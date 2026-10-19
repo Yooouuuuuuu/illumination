@@ -1,0 +1,37 @@
+# Illumination process model on one machine (Windows).
+# One binary, four roles; mirrors AnyDesk 9.7 as observed on 2026-10-19.
+
+direction: right
+
+remote: Remote illum (controller) {
+  shape: rectangle
+  style.stroke-dash: 4
+}
+
+host: Host machine {
+  session0: Session 0 (SYSTEM) {
+    service: "illum --service\n(always on)" {
+      tooltip: "Listens on the chosen interfaces only, terminates TLS, owns pairing, permissions and config"
+    }
+  }
+
+  console: Console session (e.g. session 1) {
+    backend: "illum --backend\n(SYSTEM, one per incoming session)" {
+      tooltip: "Capture, encode, input injection, desktop switching, accept/permissions panel"
+    }
+    control: "illum --control\n(logged-in user)" {
+      tooltip: "Clipboard, tray"
+    }
+    frontend: "illum\n(app window)" {
+      tooltip: "Device list, outgoing connections, viewer"
+    }
+  }
+
+  session0.service -> console.backend: "spawns per session\n(as SYSTEM in console session)"
+  session0.service -> console.control: "spawns per user session"
+  session0.service <-> console.backend: local IPC {style.stroke-dash: 3}
+  session0.service <-> console.control: local IPC {style.stroke-dash: 3}
+  session0.service <-> console.frontend: local IPC {style.stroke-dash: 3}
+}
+
+remote -> host.session0.service: "TCP + TLS 1.3 (mutual)\nover Tailscale / LAN\ndefault port 7171"

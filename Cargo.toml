@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/illum", "crates/illum-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/<owner>/illumination"
+rust-version = "1.85"
+
+[workspace.dependencies]
+illum-core = { path = "crates/illum-core" }

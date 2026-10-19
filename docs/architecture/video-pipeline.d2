@@ -1,0 +1,30 @@
+# Host -> controller media path. One internal pixel format end to end.
+
+direction: right
+
+host: Host (--backend) {
+  capture: "Capture\nDXGI Desktop Duplication\n(fallback: WGC, then GDI)"
+  frame: "Frame\nBGRA8 (X8R8G8B8)\n+ dirty rects"
+  segments: "Segmenter\nsplit into segments,\nskip unchanged ones"
+  encode: "Encoder\nhardware H.264/HEVC\n4:4:4 when supported"
+  pace: "Pacer\nlatest frame wins,\nsmall send buffer"
+  cursor: "Cursor shape + position\n(sent separately)"
+  capture -> frame -> segments -> encode -> pace
+  capture -> cursor
+}
+
+net: "One TLS connection\n(prioritised channels)" {shape: queue}
+
+ctl: Controller (illum) {
+  decode: "Decoder\nhardware, same colour\nspace/range as encoder"
+  present: "Present\nflip-model swap chain"
+  local_cursor: "Draw cursor locally\n(no video round trip)"
+  decode -> present
+  local_cursor -> present
+}
+
+host.pace -> net: video
+host.cursor -> net: cursor (higher priority)
+net -> ctl.decode
+net -> ctl.local_cursor
+ctl -> host.pace: "feedback: RTT, throughput,\nframe acks" {style.stroke-dash: 3}

@@ -1,0 +1,18 @@
+# Milestone dependencies. Each milestone has a pass/fail check in roadmap.md.
+
+direction: right
+
+m0: "M0\nRepo + docs" {style.fill: "#d4edda"}
+m1: "M1\nConnect & trust"
+m2: "M2\nFirst pixels"
+m3: "M3\nInput"
+m4: "M4\nService &\nsecure desktop"
+m5: "M5\nDesktop features"
+m6: "M6\nQuality &\nlatency"
+m7: "M7\nv0.1 release"
+
+m0 -> m1 -> m2 -> m3 -> m4
+m2 -> m6
+m4 -> m5
+m5 -> m7
+m6 -> m7

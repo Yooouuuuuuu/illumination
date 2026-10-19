@@ -1,0 +1,31 @@
+# Connection and session start, controller -> host.
+
+shape: sequence_diagram
+
+user: Person at controller
+ctl: Controller (illum)
+svc: Host service (--service)
+back: Host backend (--backend)
+owner: Person at host
+
+user -> ctl: "dial 100.x.y.z:7171\n(or MagicDNS name)"
+ctl -> svc: "TCP connect (direct; Tailscale handles the path)"
+ctl <-> svc: "TLS 1.3, both sides present\nself-signed device certificates"
+
+trust: Trust check {
+  svc -> svc: "peer fingerprint known (paired)?"
+  ctl -> ctl: "host fingerprint pinned?\nfirst time: show it, ask to pin"
+}
+
+ctl -> svc: "hello: protocol version, capabilities"
+svc -> ctl: "hello: protocol version, capabilities,\nhost keyboard layout, displays"
+svc -> back: "spawn backend in console session (SYSTEM)"
+
+auth: Authorisation {
+  back -> owner: "accept panel (interactive profile)"
+  owner -> back: "accept / deny"
+  back -> svc: "result + granted permissions"
+}
+
+svc -> ctl: "session accepted: permissions\n(supported / allowed / enabled)"
+ctl <-> back: "session channels over the same TLS connection:\ncontrol, input, cursor, video, audio, clipboard, files"
