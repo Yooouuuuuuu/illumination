@@ -65,6 +65,7 @@ pub fn key_from_scancode(code: u32) -> Option<Key> {
 pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
+    pub shift: bool,
     pub logo: bool,
 }
 

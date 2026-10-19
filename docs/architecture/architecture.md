@@ -171,8 +171,14 @@ See [`video-pipeline.d2`](video-pipeline.d2).
   `desk_rt.system_event_source - Enabled mouse cursor`.
 - The controller decodes in hardware and presents through a flip-model swap chain, not through a
   UI toolkit's image widget.
-  - **v0.3.0 stand-in:** `winit` + `softbuffer`, CPU blit. Shown 1:1 when the window is big
-    enough, otherwise scaled down to fit (nearest neighbour). The flip-model swap chain comes in M6.
+  - **v0.3.0 stand-in:** `winit` + `softbuffer`, CPU blit. The flip-model swap chain comes in M6.
+  - **View modes (v0.4.2):**
+    - **Fit:** 1:1 when the window is big enough, otherwise scaled down. Each window pixel
+      **averages** the host pixels it covers. Nearest neighbour, used until v0.4.1, dropped
+      pixel rows and columns and broke thin text strokes.
+    - **Original:** 1:1, and the visible part follows the mouse when the host screen is larger
+      than the window.
+    - **Ctrl+Alt+Shift+F2** switches between them.
   - BGRA is translated to the window's `0x00RRGGBB` in exactly one function
     (`illum_media::scale::bgra_to_0rgb`), and a test pins the channel order.
 
@@ -223,8 +229,12 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
 **Special keys:**
 - Ctrl+Alt+Del is sent by the service with `SendSAS`. The installer sets
   `SoftwareSASGeneration` so this is allowed.
-- Reserved hotkeys use the `Ctrl+Alt+Shift+<key>` pattern, as AnyDesk does: Del = Ctrl+Alt+Del,
-  arrows = switch display, Return = fullscreen. *(M4.)*
+- Reserved hotkeys use the `Ctrl+Alt+Shift+<key>` pattern, as AnyDesk does, and are never sent
+  to the host.
+  - **F2:** switch between fit and original size *(v0.4.2)*
+  - **Del:** Ctrl+Alt+Del *(M4)*
+  - **arrows:** switch display *(later)*
+  - **Return:** fullscreen *(later)*
 - **System keys (v0.4.0):** a low-level keyboard hook on the controller sends Win, Apps,
   Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 to the host while the viewer has focus. Injected keys are
   ignored by the hook.

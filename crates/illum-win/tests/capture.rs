@@ -41,3 +41,11 @@ fn captures_the_primary_display() {
         "not an all-black frame"
     );
 }
+
+#[test]
+#[ignore = "installs a system-wide keyboard hook for a moment"]
+fn system_key_hook_installs() {
+    illum_win::SystemKeyHook::set_active(false); // stays passive: no key is intercepted
+    let hook = illum_win::SystemKeyHook::install(|_, _| {}).expect("hook installs");
+    drop(hook);
+}

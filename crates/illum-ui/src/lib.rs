@@ -13,7 +13,7 @@ pub use input::{InputOut, KeyboardMode};
 use illum_core::input::{InputMsg, Key, MouseButton};
 use illum_media::clock::{ClockSync, now_us};
 use illum_media::cursor::{CursorPosition, CursorShape};
-use illum_media::scale::{Placement, blit_fit, draw_cursor};
+use illum_media::scale::{Placement, ViewMode, blit_fit, blit_original, draw_cursor};
 use illum_media::tiles::TileDecoder;
 use input::{KeyPress, Modifiers, key_from_scancode, translate_key};
 use std::collections::HashSet;
@@ -177,6 +177,8 @@ impl ViewerWindow {
             composing: false,
             texted: HashSet::new(),
             placement: None,
+            view_mode: ViewMode::default(),
+            window_mouse: None,
             local_mouse: None,
             hovering: false,
             ime_allowed: None,
@@ -198,8 +200,12 @@ struct App {
     mods: Modifiers,
     composing: bool,
     texted: HashSet<Key>,
-    /// Where the frame was drawn last time, and its size: maps window pixels to host pixels.
-    placement: Option<(Placement, u32, u32)>,
+    /// Where the frame was drawn last time: maps window pixels to host pixels.
+    placement: Option<Placement>,
+    /// Fit to the window, or original size (Ctrl+Alt+Shift+F2 toggles).
+    view_mode: ViewMode,
+    /// The local mouse in window pixels; in original size it decides which part is shown.
+    window_mouse: Option<(f64, f64)>,
     /// The local mouse in host pixels, while it is over the picture.
     local_mouse: Option<(i32, i32)>,
     hovering: bool,
@@ -248,8 +254,16 @@ impl App {
         let mut state = self.shared.lock().expect("view state lock");
         let presented = match state.decoder.frame() {
             Some(frame) => {
-                let p = blit_fit(frame, &mut buffer, w.get(), h.get());
-                self.placement = Some((p, frame.width, frame.height));
+                let p = match self.view_mode {
+                    ViewMode::Fit => blit_fit(frame, &mut buffer, w.get(), h.get()),
+                    ViewMode::Original => {
+                        let pan = self.window_mouse.map_or((0.5, 0.5), |(x, y)| {
+                            (x / w.get() as f64, y / h.get() as f64)
+                        });
+                        blit_original(frame, &mut buffer, w.get(), h.get(), pan)
+                    }
+                };
+                self.placement = Some(p);
                 // While we control the host, draw its cursor shape at *our* mouse position:
                 // no waiting for the host to report where it moved.
                 let cursor = match (
@@ -287,7 +301,7 @@ impl App {
         let title = if let Some(status) = state.status.clone() {
             Some(format!("{} — {status}", self.options.title))
         } else if state.stats.tick(rtt) {
-            tracing::info!(target: "viewer", "{}", state.stats.summary);
+            tracing::debug!(target: "viewer", "{}", state.stats.summary); // shown with -v
             Some(format!("{} — {}", self.options.title, state.stats.summary))
         } else {
             None
@@ -305,11 +319,35 @@ impl App {
 
     /// Window pixels → host pixels, if the point is on the picture.
     fn to_host(&self, x: f64, y: f64) -> Option<(i32, i32)> {
-        let (p, fw, fh) = self.placement?;
-        let hx = ((x - p.x as f64) / p.scale).floor();
-        let hy = ((y - p.y as f64) / p.scale).floor();
-        (hx >= 0.0 && hy >= 0.0 && hx < fw as f64 && hy < fh as f64)
-            .then_some((hx as i32, hy as i32))
+        self.placement?.to_frame(x, y)
+    }
+
+    /// Viewer hotkeys use AnyDesk's Ctrl+Alt+Shift pattern and are never sent to the host.
+    /// Returns true if the event was a hotkey.
+    fn hotkey(&mut self, event: &WindowEvent) -> bool {
+        let WindowEvent::KeyboardInput { event, .. } = event else {
+            return false;
+        };
+        if !(self.mods.ctrl && self.mods.alt && self.mods.shift) {
+            return false;
+        }
+        let Some(key) = event.physical_key.to_scancode().and_then(key_from_scancode) else {
+            return false;
+        };
+        const F2: u16 = 0x3c;
+        match (key.scancode, key.extended) {
+            (F2, false) => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.view_mode = match self.view_mode {
+                        ViewMode::Fit => ViewMode::Original,
+                        ViewMode::Original => ViewMode::Fit,
+                    };
+                    self.request_redraw();
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn input_event(&mut self, event: &WindowEvent) {
@@ -338,14 +376,6 @@ impl App {
                     input.send(msg);
                 }
             }
-            WindowEvent::ModifiersChanged(m) => {
-                let s = m.state();
-                self.mods = Modifiers {
-                    ctrl: s.control_key(),
-                    alt: s.alt_key(),
-                    logo: s.super_key(),
-                };
-            }
             WindowEvent::Ime(Ime::Preedit(text, _)) => self.composing = !text.is_empty(),
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.composing = false;
@@ -354,12 +384,10 @@ impl App {
                 }
             }
             WindowEvent::Ime(Ime::Disabled) => self.composing = false,
-            WindowEvent::CursorMoved { position, .. } => {
-                self.local_mouse = self.to_host(position.x, position.y);
+            WindowEvent::CursorMoved { .. } => {
                 if let Some((x, y)) = self.local_mouse {
                     input.send(InputMsg::MouseMove { x, y });
                 }
-                self.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let button = match button {
@@ -406,6 +434,10 @@ impl ApplicationHandler<UiEvent> for App {
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface =
             softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+        // If the window already has focus, no focus event follows: switch the hook on now.
+        if window.has_focus() {
+            (self.options.on_focus)(true);
+        }
         self.window = Some(Surface { window, surface });
     }
 
@@ -452,7 +484,24 @@ impl ApplicationHandler<UiEvent> for App {
                 }
                 self.request_redraw();
             }
+            WindowEvent::ModifiersChanged(m) => {
+                let s = m.state();
+                self.mods = Modifiers {
+                    ctrl: s.control_key(),
+                    alt: s.alt_key(),
+                    shift: s.shift_key(),
+                    logo: s.super_key(),
+                };
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.window_mouse = Some((position.x, position.y));
+                self.local_mouse = self.to_host(position.x, position.y);
+                self.request_redraw();
+            }
             _ => {}
+        }
+        if self.hotkey(&event) {
+            return;
         }
         self.input_event(&event);
     }

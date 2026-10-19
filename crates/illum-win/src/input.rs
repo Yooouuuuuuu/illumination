@@ -9,7 +9,8 @@ use crate::DisplayInfo;
 use illum_core::input::{InputSink, Key, MouseButton};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -221,8 +222,18 @@ impl SystemKeyHook {
     /// Installs the hook. Call on the thread that runs the window's message loop.
     pub fn install(forward: impl Fn(Key, bool) + Send + 'static) -> Result<SystemKeyHook, String> {
         *forward_slot().lock().expect("hook lock") = Some(Box::new(forward));
-        let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
-            .map_err(|e| format!("SetWindowsHookExW: {e}"))?;
+        // A global hook needs the module that holds the hook procedure: this executable.
+        let module =
+            unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
+        let hook = unsafe {
+            SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(hook_proc),
+                Some(HINSTANCE(module.0)),
+                0,
+            )
+        }
+        .map_err(|e| format!("SetWindowsHookExW: {e}"))?;
         Ok(SystemKeyHook(hook))
     }
 

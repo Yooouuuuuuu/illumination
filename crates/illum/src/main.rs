@@ -161,7 +161,8 @@ fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_target(true)
         .with_writer(std::io::stderr)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        // Colour codes only where they are understood: classic Windows consoles print them raw.
+        .with_ansi(!cfg!(windows) && std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_max_level(if cli.verbose {
             tracing::Level::DEBUG
         } else {
@@ -469,7 +470,9 @@ fn run_view(
             }) {
                 Ok(hook) => Some(hook),
                 Err(e) => {
-                    tracing::warn!(target: "viewer", "System keys stay local: {e}");
+                    println!(
+                        "Note: Win, Alt+Tab and similar keys will stay on this machine ({e})."
+                    );
                     None
                 }
             }
@@ -499,7 +502,8 @@ fn run_view(
     // Window closed (or the session ended): say goodbye and wait briefly for a clean close.
     sender.send_control(&ControlMsg::ScreenStop);
     sender.send_control(&ControlMsg::Bye);
-    match runtime.block_on(tokio::time::timeout(Duration::from_secs(3), session)) {
+    // The timer must be created inside the runtime, hence the async block.
+    match runtime.block_on(async { tokio::time::timeout(Duration::from_secs(3), session).await }) {
         Ok(Ok(Ok(()))) | Err(_) => Ok(()),
         Ok(Ok(Err(err))) => Err(err.into()),
         Ok(Err(join)) => Err(anyhow::anyhow!("viewer task failed: {join}")),

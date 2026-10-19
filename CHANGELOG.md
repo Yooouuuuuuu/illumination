@@ -11,6 +11,44 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-19
+
+Fixes from the first two-machine test.
+
+### Fixed
+
+- **Small text looked broken in the viewer.** Shrinking the host screen to fit
+  the window dropped whole pixel rows and columns, so thin strokes vanished in
+  places. Each window pixel now averages the host pixels it covers.
+- **Alt+Tab and the Win key stayed on the controlling machine.** The keyboard
+  hook was registered without a module handle, which Windows can refuse. It now
+  passes the program's module, switches on even if the window already has focus
+  when it opens, and prints a clear note if it still fails.
+- **Closing the viewer panicked** ("there is no reactor running"). The
+  shutdown timer was created outside the async runtime.
+- **The laptop console filled with stats and colour codes.** The once-a-second
+  stats line is now only shown with `-v` (the window title still has it), and
+  colour codes are off on Windows consoles, which printed them raw.
+
+### Added
+
+- **Original-size view:** 1:1 pixels, and the visible part follows the mouse
+  when the host screen is larger than the window. **Ctrl+Alt+Shift+F2**
+  switches between fit and original size; the hotkey is never sent to the host.
+
+### Changed
+
+- `Cargo.toml` names the real repository.
+
+### Verified
+
+- `cargo test`: 74 tests pass. New tests check that averaging keeps a
+  one-pixel line instead of dropping it, that the original-size view pans and
+  maps the mouse back correctly, and (with `-- --ignored`) that the keyboard
+  hook installs. `cargo clippy` is clean.
+- Live: when the host goes away, the viewer now exits with a plain error
+  instead of a panic, and the console shows no stats spam or colour codes.
+
 ## [0.4.1] - 2026-10-19
 
 ### Fixed
