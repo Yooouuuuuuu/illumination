@@ -61,6 +61,10 @@ impl Outbox {
         inner.queues.iter().all(|q| q.is_empty())
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().expect("outbox lock").closed
+    }
+
     /// Stops accepting frames. Frames already queued are still delivered by `next`.
     pub fn close(&self) {
         self.inner.lock().expect("outbox lock").closed = true;

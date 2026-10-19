@@ -116,6 +116,9 @@ AnyDesk's mitigations:
 - **Small socket send buffer, tuned at runtime.** AnyDesk logs `Adjusted send buffer: 8192` and
   then `16384`.
 - Never let video pile up in the socket: pace frames and drop stale ones before sending.
+  **Implemented (v0.3.0) as acknowledgements:** the viewer sends `video_ack` after it shows a
+  frame, and the host keeps at most **2 frames in flight**. The capture thread holds only the
+  newest screen and encodes it when a slot frees up, so the backlog can never exceed two frames.
 - Adapt to measured bandwidth (§5.4).
 
 If Tailscale falling back to its DERP relays turns out to hurt in practice, revisit this with
@@ -142,10 +145,17 @@ See [`video-pipeline.d2`](video-pipeline.d2).
 ### 5.3 Encoding
 - The frame is split into **segments**, and segments that didn't change are skipped. AnyDesk logs
   `desk_rt.encoder - 8 segments.`
-- Codec: hardware H.264/HEVC through the GPU vendor's encoder (NVENC, AMF, QSV), with **4:4:4
-  when the GPU supports it** so text stays sharp. Software fallback. The encoder sits behind an
-  interface so it can be swapped.
-- When the screen stops changing, static regions are refined to full quality.
+- **First codec (v0.3.0): lossless tiles.**
+  - 64×64 tiles; only tiles that changed since the last *sent* frame are transmitted.
+  - Each tile is LZ4-compressed packed BGR.
+  - Colours arrive bit-exact, and encoding adds about 3 ms at 1080p.
+  - This follows the AnyDesk rule: DeskRT is a segmented screen codec, not a camera-video codec.
+  - Wire format: `illum_media::tiles`.
+- **Second codec (M6):** hardware H.264/HEVC through the GPU vendor's encoder (NVENC, AMF, QSV),
+  with **4:4:4 when the GPU supports it**, for regions that change every frame (video, games),
+  where lossless tiles cost too much bandwidth. Both sit behind the same video message.
+- When the screen stops changing, static regions are refined to full quality. Lossless tiles
+  already are.
 
 ### 5.4 Adaptation
 - Measure RTT and throughput continuously, and pick a quality/frame-rate preset from bands, as
@@ -161,6 +171,10 @@ See [`video-pipeline.d2`](video-pipeline.d2).
   `desk_rt.system_event_source - Enabled mouse cursor`.
 - The controller decodes in hardware and presents through a flip-model swap chain, not through a
   UI toolkit's image widget.
+  - **v0.3.0 stand-in:** `winit` + `softbuffer`, CPU blit. Shown 1:1 when the window is big
+    enough, otherwise scaled down to fit (nearest neighbour). The flip-model swap chain comes in M6.
+  - BGRA is translated to the window's `0x00RRGGBB` in exactly one function
+    (`illum_media::scale::bgra_to_0rgb`), and a test pins the channel order.
 
 ## 6. Input
 
@@ -275,9 +289,9 @@ logs `Migrating V0 -> V1`).
 | `illum` | The binary: role dispatch (exists) |
 | `illum-core` | Roles, protocol messages, capabilities, permissions, config (exists) |
 | `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel multiplexing and priorities (exists, M1) |
-| `illum-media` | Pixel-format module, segmenter, encoder/decoder interfaces, pacing and adaptation |
-| `illum-win` | Windows: service, process spawning into sessions, DDA capture, input, desktop switching, clipboard, power |
-| `illum-ui` | The app window: device list, viewer, accept panel |
+| `illum-media` | Pixel format, tile codec, colour test pattern, cursor shapes, scaling, clock sync (exists, M2) |
+| `illum-win` | Windows: DDA capture (exists, M2); later service, process spawning into sessions, input, desktop switching, clipboard, power |
+| `illum-ui` | Viewer window (exists, M2); later device list and accept panel |
 
 Crates are added only when a milestone needs them.
 

@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `illum`: one binary, every role (frontend, service, backend, control).
 //!
-//! M1 runs in a console: `illum --service` hosts, `illum connect <ip>` dials. The Windows
-//! service, the backend and the app window arrive in later milestones.
+//! Runs in a console for now: `illum --service` hosts, `illum view <ip>` opens a viewer window,
+//! `illum connect <ip>` measures round-trip time. The Windows service, the backend and the
+//! full app window arrive in later milestones.
 
 mod prompt;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use illum::host::{SourceFactory, serve_session};
+use illum::viewer::{Notify, run_viewer_session};
 use illum_core::Role;
 use illum_core::protocol::DEFAULT_PORT;
+use illum_core::protocol::{ControlMsg, Hello};
 use illum_core::store::TrustStore;
-use illum_net::session::{accept, connect, normalize_target, serve_host_session};
+use illum_media::MediaError;
+use illum_media::source::{PatternSource, ScreenSource};
+use illum_net::session::{accept, connect, normalize_target};
 use illum_net::{Endpoint, Identity, Listener, Timeouts, bind};
+use illum_ui::{Shared, UiEvent, ViewerWindow};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,6 +63,10 @@ struct Cli {
     #[arg(long = "bind", value_name = "IP", requires = "service")]
     bind: Vec<IpAddr>,
 
+    /// Stream the colour test pattern instead of the real screen (with --service).
+    #[arg(long, requires = "service")]
+    test_pattern: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -70,6 +81,16 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         pings: u32,
     },
+    /// Open a window showing a host's screen.
+    View {
+        /// e.g. 100.100.101.1, laptop, or laptop.tail1234.ts.net:7171
+        target: String,
+        /// Which of the host's displays to show (0 = primary; see `illum displays` on the host).
+        #[arg(long, default_value_t = 0)]
+        screen: u32,
+    },
+    /// List this machine's displays.
+    Displays,
     /// Show this device's key fingerprint.
     Fingerprint,
     /// List pinned hosts and paired devices.
@@ -121,8 +142,7 @@ fn endpoint(home: &Path) -> Result<Endpoint> {
     })
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_target(true)
@@ -134,7 +154,19 @@ async fn main() -> std::process::ExitCode {
             tracing::Level::INFO
         })
         .init();
-    match run(cli).await {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let result = match &cli.command {
+        // The window must own the main thread, so the viewer runs outside `block_on`.
+        Some(Command::View { target, screen }) if cli.role() == Role::Frontend => {
+            let home = cli.home.clone().unwrap_or_else(default_home);
+            run_view(&runtime, &home, target, *screen)
+        }
+        _ => runtime.block_on(run(cli)),
+    };
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("illum: {err:#}");
@@ -147,7 +179,9 @@ async fn run(cli: Cli) -> Result<()> {
     let home = cli.home.clone().unwrap_or_else(default_home);
     let role = cli.role();
     match (role, cli.command) {
-        (Role::Service, _) => run_service(&home, cli.port, &cli.bind).await,
+        (Role::Service, _) => {
+            run_service(&home, cli.port, &cli.bind, source_factory(cli.test_pattern)).await
+        }
         (Role::Backend | Role::Control, _) => bail!("role {role:?} is not implemented yet"),
         (Role::Frontend, None) => {
             println!("The app window isn't built yet. Try `illum connect <ip>` or `illum --help`.");
@@ -156,6 +190,8 @@ async fn run(cli: Cli) -> Result<()> {
         (Role::Frontend, Some(Command::Connect { target, pings })) => {
             run_connect(&home, &target, pings).await
         }
+        (Role::Frontend, Some(Command::View { .. })) => unreachable!("handled in main"),
+        (Role::Frontend, Some(Command::Displays)) => list_displays(),
         (Role::Frontend, Some(Command::Fingerprint)) => {
             let ep = endpoint(&home)?;
             println!("{}", ep.identity.fingerprint);
@@ -196,7 +232,63 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr]) -> Result<()> {
+/// An error with its causes, e.g. "network error: connection reset".
+fn describe(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+/// Where the host's picture comes from: the real screen, or the colour test pattern.
+fn source_factory(test_pattern: bool) -> SourceFactory {
+    Arc::new(
+        move |display| -> std::result::Result<Box<dyn ScreenSource>, MediaError> {
+            if test_pattern {
+                return Ok(Box::new(PatternSource::new(1920, 1080, 60)));
+            }
+            #[cfg(windows)]
+            {
+                Ok(Box::new(illum_win::DdaSource::new(display as usize)?))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = display;
+                Err(MediaError::Capture(
+                    "screen capture is only implemented on Windows so far; use --test-pattern"
+                        .into(),
+                ))
+            }
+        },
+    )
+}
+
+fn list_displays() -> Result<()> {
+    #[cfg(windows)]
+    {
+        for d in illum_win::list_displays()? {
+            let primary = if d.primary { " (primary)" } else { "" };
+            println!(
+                "{}: {} {}x{} at {},{}{primary}",
+                d.index, d.name, d.width, d.height, d.x, d.y
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    bail!("listing displays is only implemented on Windows so far")
+}
+
+async fn run_service(
+    home: &Path,
+    port: u16,
+    bind_to: &[IpAddr],
+    factory: SourceFactory,
+) -> Result<()> {
     let ep = endpoint(home)?;
     let addrs = if bind_to.is_empty() {
         bind::tailscale_addresses()
@@ -221,6 +313,7 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr]) -> Result<()> {
     while let Some((tcp, peer)) = listener.next().await {
         let ep = ep.clone();
         let acceptor = listener.acceptor();
+        let factory = factory.clone();
         tokio::spawn(async move {
             tracing::info!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
@@ -231,18 +324,76 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr]) -> Result<()> {
                         .map(|h| h.device_name.clone())
                         .unwrap_or_default();
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" started.");
-                    match serve_host_session(conn, ep.timeouts.idle).await {
+                    match serve_session(conn, Some(factory), ep.timeouts.idle).await {
                         Ok(()) => tracing::info!(target: "service", "[{peer}] Session ended."),
                         Err(err) => {
-                            tracing::warn!(target: "service", "[{peer}] Session ended: {err}")
+                            tracing::warn!(target: "service", "[{peer}] Session ended: {}", describe(&err))
                         }
                     }
                 }
-                Err(err) => tracing::warn!(target: "service", "[{peer}] Not connected: {err}"),
+                Err(err) => {
+                    tracing::warn!(target: "service", "[{peer}] Not connected: {}", describe(&err))
+                }
             }
         });
     }
     Ok(())
+}
+
+/// Connects, then shows the host's screen in a window until it is closed.
+fn run_view(
+    runtime: &tokio::runtime::Runtime,
+    home: &Path,
+    target: &str,
+    screen: u32,
+) -> Result<()> {
+    let ep = endpoint(home)?;
+    println!("This device's fingerprint: {}", ep.identity.fingerprint);
+    println!("Connecting to {}…", normalize_target(target));
+    let conn = runtime.block_on(connect(&ep, target))?;
+    let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));
+    if !hello.capabilities.iter().any(|c| c == "screen") {
+        bail!(
+            "\"{}\" does not offer screen sharing (it may run an older version)",
+            hello.device_name
+        );
+    }
+    println!(
+        "Connected to \"{}\" at {}.",
+        hello.device_name, conn.peer_address
+    );
+
+    let window = ViewerWindow::new().map_err(anyhow::Error::msg)?;
+    let waker = window.waker();
+    let shared: Shared = Arc::default();
+    let sender = conn.sender();
+    let session = {
+        let (shared, waker) = (shared.clone(), waker.clone());
+        let redraw = waker.clone();
+        let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
+        runtime.spawn(async move {
+            let result = run_viewer_session(conn, screen, shared, notify).await;
+            waker.wake(UiEvent::Exit);
+            result
+        })
+    };
+    let ack = sender.clone();
+    window
+        .run(
+            format!("Illumination — {}", hello.device_name),
+            shared,
+            Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
+        )
+        .map_err(anyhow::Error::msg)?;
+
+    // Window closed (or the session ended): say goodbye and wait briefly for a clean close.
+    sender.send_control(&ControlMsg::ScreenStop);
+    sender.send_control(&ControlMsg::Bye);
+    match runtime.block_on(tokio::time::timeout(Duration::from_secs(3), session)) {
+        Ok(Ok(Ok(()))) | Err(_) => Ok(()),
+        Ok(Ok(Err(err))) => Err(err.into()),
+        Ok(Err(join)) => Err(anyhow::anyhow!("viewer task failed: {join}")),
+    }
 }
 
 async fn run_connect(home: &Path, target: &str, pings: u32) -> Result<()> {
@@ -311,6 +462,23 @@ mod tests {
         let cli = parse(&["--service", "--port", "9000", "--bind", "127.0.0.1"]).unwrap();
         assert_eq!(cli.port, 9000);
         assert_eq!(cli.bind, vec!["127.0.0.1".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn view_and_test_pattern() {
+        let cli = parse(&["view", "laptop", "--screen", "1"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::View { ref target, screen: 1 }) if target == "laptop")
+        );
+        assert!(
+            parse(&["--test-pattern"]).is_err(),
+            "test pattern needs --service"
+        );
+        assert!(
+            parse(&["--service", "--test-pattern"])
+                .unwrap()
+                .test_pattern
+        );
     }
 
     #[test]

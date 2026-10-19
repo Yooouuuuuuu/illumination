@@ -12,6 +12,28 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
+/// A cheap, thread-safe handle for sending on a connection from other tasks or threads
+/// (for example the capture thread).
+#[derive(Clone)]
+pub struct Sender {
+    outbox: Arc<Outbox>,
+}
+
+impl Sender {
+    pub fn send(&self, channel: Channel, payload: Vec<u8>) {
+        self.outbox.push(channel, payload);
+    }
+
+    pub fn send_control(&self, msg: &ControlMsg) {
+        self.send(Channel::Control, msg.encode());
+    }
+
+    /// True once the connection is closing or has failed; senders should stop.
+    pub fn is_closed(&self) -> bool {
+        self.outbox.is_closed()
+    }
+}
+
 pub struct Connection {
     reader: Box<dyn AsyncRead + Unpin + Send>,
     outbox: Arc<Outbox>,
@@ -57,6 +79,13 @@ impl Connection {
             peer_fingerprint,
             peer_address,
             peer_hello: None,
+        }
+    }
+
+    /// A handle for sending from other tasks or threads.
+    pub fn sender(&self) -> Sender {
+        Sender {
+            outbox: self.outbox.clone(),
         }
     }
 

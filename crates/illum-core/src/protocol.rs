@@ -4,13 +4,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Default listening port. Not AnyDesk's 7070, so both can run on one machine.
 pub const DEFAULT_PORT: u16 = 7171;
 
 /// Capabilities this build offers. A feature is used only if both sides list it.
-pub const CAPABILITIES: &[&str] = &["ping"];
+pub const CAPABILITIES: &[&str] = &["ping", "screen"];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,6 +100,29 @@ pub enum ControlMsg {
     Pong {
         seq: u64,
     },
+    /// Controller → host: start streaming display `display` (0 = primary).
+    ScreenStart {
+        display: u32,
+    },
+    /// Controller → host: stop streaming.
+    ScreenStop,
+    /// Host → controller: the screen cannot be streamed.
+    ScreenError {
+        reason: String,
+    },
+    /// Controller → host: video frame `seq` was presented; the host may send another.
+    VideoAck {
+        seq: u64,
+    },
+    /// Controller → host: clock-sync probe (used to estimate frame latency).
+    TimeRequest {
+        seq: u64,
+    },
+    /// Host → controller: the host clock (microseconds) when the probe arrived.
+    TimeReply {
+        seq: u64,
+        host_us: u64,
+    },
     /// Orderly end of session.
     Bye,
 }
@@ -144,6 +167,17 @@ mod tests {
             },
             ControlMsg::Ping { seq: 7 },
             ControlMsg::Pong { seq: 7 },
+            ControlMsg::ScreenStart { display: 1 },
+            ControlMsg::ScreenStop,
+            ControlMsg::ScreenError {
+                reason: "busy".into(),
+            },
+            ControlMsg::VideoAck { seq: 9 },
+            ControlMsg::TimeRequest { seq: 3 },
+            ControlMsg::TimeReply {
+                seq: 3,
+                host_us: 123_456,
+            },
             ControlMsg::Bye,
         ];
         for m in msgs {

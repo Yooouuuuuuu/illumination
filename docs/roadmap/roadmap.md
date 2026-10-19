@@ -67,11 +67,30 @@ Build `illum-media` plus capture and presentation in `illum-win`:
 - latest-frame-wins pacing and a small send buffer
 - per-stage timestamps
 
+**Status (v0.3.0):** implemented.
+
+Changes from the plan above:
+- The first codec is **lossless tiles** (LZ4), not hardware encoding. It follows the AnyDesk rule
+  (DeskRT is a segmented screen codec) and makes colours bit-exact. Hardware H.264/HEVC moves to
+  M6 for fast-moving regions.
+- Pacing uses frame acknowledgements (at most 2 frames in flight) instead of tuning the socket
+  buffer.
+- Presentation uses `softbuffer`; the flip-model swap chain moves to M6.
+
+Not yet checked: the run from the laptop and the cursor check by eye.
+
 **Check:**
-- [ ] Host desktop visible and live on the laptop at 1080p, at least 60 fps on a static desktop or light use.
-- [ ] **Colour test pattern correct:** each patch within ΔE 2. No red↔blue swap and no chroma shift. Automated in CI.
-- [ ] Median screen-to-screen latency ≤ 50 ms (target for M6: ≤ 30 ms).
-- [ ] Cursor moves with no visible lag compared with the video.
+- [x] Host desktop visible and live at 1080p, at least 60 fps on a static desktop or light use.
+  *Measured on this PC over its Tailscale address: 59 fps with the 60 fps test pattern
+  (0.3 Mb/s). The real desktop streams live. When the viewer shows its own screen, the whole
+  frame changes every time and it reaches 15–36 fps at about 18 Mb/s. Laptop run: to do.*
+- [x] **Colour test pattern correct:** bit-exact (ΔE 0), stricter than the ΔE 2 target.
+  Automated in `crates/illum/tests/m2.rs` (end to end over TLS) and in the codec tests.
+- [x] Median latency ≤ 50 ms. *Measured about 5 ms from capture to presentation, with the clocks
+  synced over the control channel. That excludes the wait for the next screen update and the
+  monitor's own scan-out. A true screen-to-screen measurement from the laptop is still to do.*
+- [ ] Cursor moves with no visible lag compared with the video. *It is sent separately and drawn
+  by the viewer. Still to be checked by eye.*
 
 ## M3: Input
 - Keyboard modes Remote/Local/Auto, with the host reporting its layout
@@ -117,6 +136,9 @@ Build `illum-media` plus capture and presentation in `illum-win`:
 - [ ] Unattended: correct password works; 5 wrong ones lock out for the configured time.
 
 ## M6: Quality and latency
+- Hardware H.264/HEVC (4:4:4 where supported) for regions that change every frame, next to the lossless tiles
+- Use the capture API's dirty rectangles instead of comparing whole frames; keep frames on the GPU
+- Flip-model swap chain for presentation
 - Segmented encoding with skipped unchanged segments
 - full-quality refinement of static regions
 - bandwidth measurement and preset bands

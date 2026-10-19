@@ -9,10 +9,10 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 - **Written in Rust.**
 - **Free:** GPL-3.0-only.
 
-> Status: milestone M1. Two machines can connect, trust each other and measure round-trip
-> time. There is no screen yet. See [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
+> Status: milestone M2. You can see another machine's screen live, but you can't control it
+> yet; input is M3. See [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
 
-## Try it (M1, console)
+## Try it (console)
 
 On the machine to be reached (the host):
 ```
@@ -20,20 +20,26 @@ illum --service                  # listens on this machine's Tailscale address, 
 ```
 On the other machine:
 ```
-illum connect 100.x.y.z          # or a MagicDNS name; prints the round-trip time
+illum view 100.x.y.z             # or a MagicDNS name; opens a window with the host's screen
 ```
 The first time, each side shows the other's key fingerprint and asks you to confirm. After
-that you connect without prompts, and a changed key is refused.
+that you connect without prompts, and a changed key is refused. The window title shows frame
+rate, bandwidth and latency.
 
 You may need to allow `illum.exe` through Windows Firewall on the host.
+
+To check colours, run the host with `--test-pattern`. The top half shows eight patches, left to
+right: **red, green, blue, cyan, magenta, yellow, white, black**.
 
 ## Commands
 
 ```
 illum                  # the app window (not built yet)
-illum --service        # host: listen for connections (--port, --bind to opt in to other addresses)
+illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern)
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
+illum view <host>      # show a host's screen (--screen N for another display)
+illum displays         # list this machine's displays
 illum connect <host>   # dial a host and measure round-trip time
 illum fingerprint      # show this device's key fingerprint
 illum list             # pinned hosts and paired devices

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/illum", "crates/illum-core", "crates/illum-net"]
+members = ["crates/illum", "crates/illum-core", "crates/illum-media", "crates/illum-net", "crates/illum-ui", "crates/illum-win"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/<owner>/illumination"
@@ -12,3 +12,6 @@ rust-version = "1.85"
 [workspace.dependencies]
 illum-core = { path = "crates/illum-core" }
 illum-net = { path = "crates/illum-net" }
+illum-media = { path = "crates/illum-media" }
+illum-win = { path = "crates/illum-win" }
+illum-ui = { path = "crates/illum-ui" }

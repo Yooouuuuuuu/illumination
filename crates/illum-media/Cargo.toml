@@ -1,0 +1,12 @@
+[package]
+name = "illum-media"
+description = "Pixel format, tile codec, test pattern and cursor handling for Illumination"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lz4_flex = "0.14.0"
+thiserror = "2.0.21"

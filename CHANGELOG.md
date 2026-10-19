@@ -11,6 +11,56 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
+Milestone M2, first pixels: you can see another machine's screen live in a
+window. Input comes in M3.
+
+### Added
+
+- **`illum view <host>`:** opens a window with the host's screen, shown 1:1 or
+  scaled down to fit. The title bar shows frame rate, bandwidth, latency,
+  encode time and round-trip time. `--screen N` picks another display.
+- **Screen capture on Windows** with DXGI Desktop Duplication. Only the BGRA8
+  desktop format is accepted, and capture is recreated after a mode change.
+  `illum displays` lists monitors, primary first.
+- **Lossless tile codec:**
+  - 64×64 tiles; only tiles that changed are sent, each LZ4-compressed
+  - colours arrive bit-exact
+  - about 3 ms encode at 1080p
+  - like AnyDesk's segmented DeskRT, a screen codec rather than a video codec
+- **One pixel format** (BGRA8) end to end, translated for display in exactly
+  one function. Tests pin the channel order, so a red↔blue swap fails the build.
+- **Cursor sent separately** from the video (position and shape, including
+  colour, masked-colour and monochrome cursors) and drawn by the viewer.
+- **Frame pacing:** the viewer acknowledges each frame it shows, and the host
+  keeps at most two frames in flight, always sending the newest screen, so
+  delays never pile up.
+- **Clock sync** over the control channel to measure capture-to-screen latency.
+  The probes also keep a session on a still screen from timing out.
+- **Colour test pattern:** `illum --service --test-pattern` streams eight
+  colour patches, a grey ramp and a moving bar instead of the screen.
+- New crates: `illum-media` (portable media), `illum-win` (Windows capture) and
+  `illum-ui` (viewer window).
+
+### Changed
+
+- Protocol version 2: screen start/stop, screen errors, frame
+  acknowledgements, clock probes, and a `screen` capability.
+- Host logs show the full cause of an error, not just "network error".
+
+### Verified
+
+- `cargo test`: 53 tests pass, including an end-to-end test over TLS that
+  checks the colour pattern arrives bit-exact and that the host stops after two
+  unacknowledged frames. The real-capture test (`-- --ignored`) passes on this
+  PC. `cargo clippy` is clean.
+- On this PC over its Tailscale address: the test pattern ran at 59 fps,
+  0.3 Mb/s, about 5 ms capture-to-screen. The real desktop streamed live (15–36
+  fps in the worst case, where the viewer shows itself and every frame changes
+  completely).
+- Not yet run from the laptop, and the cursor is not yet checked by eye.
+
 ## [0.2.0] - 2026-10-19
 
 Milestone M1, connect and trust: two machines connect directly, check each
