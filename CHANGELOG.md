@@ -11,6 +11,14 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-19
+
+### Fixed
+
+- README: the "Try it" steps now run in PowerShell. PowerShell needs `.\illum.exe`
+  to start a program from the current folder; plain `illum` fails. The steps
+  also show how to clone and build on each machine.
+
 ## [0.4.0] - 2026-10-19
 
 Milestone M3, input: you can control the host's keyboard and mouse from the

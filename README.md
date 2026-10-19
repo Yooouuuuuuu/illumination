@@ -15,13 +15,22 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 
 ## Try it (console)
 
-On the machine to be reached (the host):
+Build on each machine (needs [Rust](https://rustup.rs)):
+```powershell
+git clone https://github.com/Yooouuuuuuu/illumination
+cd illumination
+cargo build --release
+cd target\release
 ```
-illum --service                  # listens on this machine's Tailscale address, port 7171
+PowerShell only runs programs from the current folder with `.\` in front, hence `.\illum.exe`.
+
+On the machine to be reached (the host):
+```powershell
+.\illum.exe --service            # listens on this machine's Tailscale address, port 7171
 ```
 On the other machine:
-```
-illum view 100.x.y.z             # or a MagicDNS name; opens a window with the host's screen
+```powershell
+.\illum.exe view 100.x.y.z       # or a MagicDNS name; opens a window with the host's screen
 ```
 The first time, each side shows the other's key fingerprint and asks you to confirm. After
 that you connect without prompts, and a changed key is refused. The window title shows frame
