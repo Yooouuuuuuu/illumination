@@ -19,7 +19,7 @@ Dependencies: [`milestones.d2`](milestones.d2). Design: [`../architecture/archit
 
 ---
 
-## M0: Repo and docs ✅
+## M0: Repo and docs ✅ (v0.1.0)
 - Workspace, GPL-3.0-only license, `illum` role dispatch, architecture, lessons and roadmap docs.
 
 **Check:** `cargo build` and `cargo test` pass. Docs reviewed.
@@ -36,12 +36,26 @@ Build `illum-net`:
 
 Uses console `illum` commands; no GUI yet.
 
+**Status (v0.2.0):** implemented. The checks pass on one machine, both in tests and over its
+own Tailscale address. The cross-device run from the laptop is still to do.
+
+Stand-ins until later milestones:
+- The pairing question is asked in the `--service` console. It moves to the backend's accept
+  panel in M5.
+- The key and trust store live in one device-wide folder (`%ProgramData%\Illumination`) that
+  both roles use directly. In M4 the app reaches them through the service instead.
+
 **Check:**
 - [ ] Connect from the laptop to the host by Tailscale IP. Both sides show the same fingerprints.
-- [ ] After pairing, reconnecting needs no prompt. A changed host key is refused with a clear error.
-- [ ] The host is **not** reachable on a LAN or public interface unless enabled.
-- [ ] RTT is shown and is within 2 ms of `tailscale ping`.
-- [ ] No connection step can hang: every one has a deadline (tested by killing the peer mid-handshake).
+  *(Same-machine run over the Tailscale address: ✅. Laptop: to do.)*
+- [x] After pairing, reconnecting needs no prompt. A changed host key is refused with a clear
+  error that names `illum forget`.
+- [x] The host is **not** reachable on a LAN or public interface unless enabled. It binds only
+  Tailscale addresses by default; `192.168.50.123:7171` refuses.
+- [ ] RTT is shown and is within 2 ms of `tailscale ping`. *(RTT is shown. Comparing with
+  `tailscale ping` needs the laptop.)*
+- [x] No connection step can hang: every one has a deadline. Tests cover a silent host, a
+  silent controller, an unanswered prompt and an idle session.
 
 ## M2: First pixels
 Build `illum-media` plus capture and presentation in `illum-win`:

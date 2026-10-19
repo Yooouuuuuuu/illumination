@@ -274,7 +274,7 @@ logs `Migrating V0 -> V1`).
 |---|---|
 | `illum` | The binary: role dispatch (exists) |
 | `illum-core` | Roles, protocol messages, capabilities, permissions, config (exists) |
-| `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel multiplexing and priorities |
+| `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel multiplexing and priorities (exists, M1) |
 | `illum-media` | Pixel-format module, segmenter, encoder/decoder interfaces, pacing and adaptation |
 | `illum-win` | Windows: service, process spawning into sessions, DDA capture, input, desktop switching, clipboard, power |
 | `illum-ui` | The app window: device list, viewer, accept panel |

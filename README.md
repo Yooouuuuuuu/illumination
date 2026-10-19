@@ -9,15 +9,35 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 - **Written in Rust.**
 - **Free:** GPL-3.0-only.
 
-> Status: early design. Nothing works yet. See [`docs/`](docs/).
+> Status: milestone M1. Two machines can connect, trust each other and measure round-trip
+> time. There is no screen yet. See [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
 
-## Command
+## Try it (M1, console)
+
+On the machine to be reached (the host):
+```
+illum --service                  # listens on this machine's Tailscale address, port 7171
+```
+On the other machine:
+```
+illum connect 100.x.y.z          # or a MagicDNS name; prints the round-trip time
+```
+The first time, each side shows the other's key fingerprint and asks you to confirm. After
+that you connect without prompts, and a changed key is refused.
+
+You may need to allow `illum.exe` through Windows Firewall on the host.
+
+## Commands
 
 ```
-illum              # the app window
-illum --service    # background service (installed, runs as SYSTEM)
-illum --backend    # per-session worker (started by the service)
-illum --control    # per-user helper: clipboard, tray (started by the service)
+illum                  # the app window (not built yet)
+illum --service        # host: listen for connections (--port, --bind to opt in to other addresses)
+illum --backend        # per-session worker, started by the service (later milestone)
+illum --control        # per-user helper for clipboard and tray (later milestone)
+illum connect <host>   # dial a host and measure round-trip time
+illum fingerprint      # show this device's key fingerprint
+illum list             # pinned hosts and paired devices
+illum forget <host>    # drop a pinned host key (after the host was reinstalled)
 ```
 
 ## Acknowledgements
