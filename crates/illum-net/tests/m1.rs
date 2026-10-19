@@ -37,6 +37,7 @@ fn side(name: &str, answer: bool, timeouts: Timeouts) -> Side {
         device_name: name.to_string(),
         timeouts,
         prompt,
+        capabilities: session::all_capabilities(),
     };
     Side { ep, prompts }
 }
@@ -261,4 +262,16 @@ async fn prompts_carry_the_right_details() {
         seen[0].address,
         session::normalize_target(&addr.to_string())
     );
+}
+
+#[tokio::test]
+async fn hello_carries_the_endpoints_capabilities() {
+    let mut host = side("host-j", true, Timeouts::default());
+    host.ep.capabilities = vec!["ping".into(), "screen".into()]; // e.g. no input injection
+    let ctl = side("ctl-j", true, Timeouts::default());
+    let addr = start_host(&host).await;
+    let conn = connect(&ctl.ep, &addr.to_string()).await.unwrap();
+    let caps = &conn.peer_hello.as_ref().unwrap().capabilities;
+    assert_eq!(caps, &["ping".to_string(), "screen".to_string()]);
+    conn.close(Duration::from_secs(1)).await;
 }

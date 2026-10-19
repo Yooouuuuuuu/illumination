@@ -9,9 +9,15 @@ mod prompt;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use illum::host::{SourceFactory, serve_session};
+use illum::host::{HostConfig, SourceFactory, serve_session};
+#[cfg(windows)]
+use illum::host::{InputFactory, LayoutFn};
 use illum::viewer::{Notify, run_viewer_session};
 use illum_core::Role;
+use illum_core::input::InputMsg;
+#[cfg(windows)]
+use illum_core::input::InputSink;
+use illum_core::protocol::Channel;
 use illum_core::protocol::DEFAULT_PORT;
 use illum_core::protocol::{ControlMsg, Hello};
 use illum_core::store::TrustStore;
@@ -19,7 +25,7 @@ use illum_media::MediaError;
 use illum_media::source::{PatternSource, ScreenSource};
 use illum_net::session::{accept, connect, normalize_target};
 use illum_net::{Endpoint, Identity, Listener, Timeouts, bind};
-use illum_ui::{Shared, UiEvent, ViewerWindow};
+use illum_ui::{InputOut, KeyboardMode, Shared, UiEvent, ViewerOptions, ViewerWindow};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,6 +94,13 @@ enum Command {
         /// Which of the host's displays to show (0 = primary; see `illum displays` on the host).
         #[arg(long, default_value_t = 0)]
         screen: u32,
+        /// How keys are sent: remote (key positions; the host's layout and IME apply),
+        /// local (characters as typed here), or auto (remote when both layouts match).
+        #[arg(long, default_value = "auto", value_parser = parse_keyboard)]
+        keyboard: KeyboardMode,
+        /// Only watch: send no keyboard or mouse input.
+        #[arg(long)]
+        view_only: bool,
     },
     /// List this machine's displays.
     Displays,
@@ -139,6 +152,7 @@ fn endpoint(home: &Path) -> Result<Endpoint> {
         device_name: device_name(),
         timeouts: Timeouts::default(),
         prompt: prompt::console_prompt(),
+        capabilities: illum_net::session::all_capabilities(),
     })
 }
 
@@ -160,9 +174,19 @@ fn main() -> std::process::ExitCode {
         .expect("tokio runtime");
     let result = match &cli.command {
         // The window must own the main thread, so the viewer runs outside `block_on`.
-        Some(Command::View { target, screen }) if cli.role() == Role::Frontend => {
+        Some(Command::View {
+            target,
+            screen,
+            keyboard,
+            view_only,
+        }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
-            run_view(&runtime, &home, target, *screen)
+            let options = ViewArgs {
+                screen: *screen,
+                keyboard: *keyboard,
+                view_only: *view_only,
+            };
+            run_view(&runtime, &home, target, options)
         }
         _ => runtime.block_on(run(cli)),
     };
@@ -180,7 +204,7 @@ async fn run(cli: Cli) -> Result<()> {
     let role = cli.role();
     match (role, cli.command) {
         (Role::Service, _) => {
-            run_service(&home, cli.port, &cli.bind, source_factory(cli.test_pattern)).await
+            run_service(&home, cli.port, &cli.bind, host_config(cli.test_pattern)).await
         }
         (Role::Backend | Role::Control, _) => bail!("role {role:?} is not implemented yet"),
         (Role::Frontend, None) => {
@@ -244,6 +268,37 @@ fn describe(err: &dyn std::error::Error) -> String {
     text
 }
 
+fn parse_keyboard(s: &str) -> std::result::Result<KeyboardMode, String> {
+    s.parse()
+}
+
+/// What the host offers: its screen (or the test pattern), input injection and layout reports.
+/// With the test pattern there is no real screen, so input isn't injected either.
+fn host_config(test_pattern: bool) -> HostConfig {
+    #[cfg(windows)]
+    let (input, layout): (Option<InputFactory>, Option<LayoutFn>) = if test_pattern {
+        (None, None)
+    } else {
+        let input: InputFactory = Arc::new(|display| {
+            let displays = illum_win::list_displays().map_err(|e| e.to_string())?;
+            let info = displays
+                .into_iter()
+                .nth(display as usize)
+                .ok_or_else(|| format!("no display {display}"))?;
+            Ok(Box::new(illum_win::WinInjector::new(&info)) as Box<dyn InputSink + Send>)
+        });
+        let layout: LayoutFn = Arc::new(illum_win::foreground_keyboard_layout);
+        (Some(input), Some(layout))
+    };
+    #[cfg(not(windows))]
+    let (input, layout) = (None, None);
+    HostConfig {
+        screen: Some(source_factory(test_pattern)),
+        input,
+        layout,
+    }
+}
+
 /// Where the host's picture comes from: the real screen, or the colour test pattern.
 fn source_factory(test_pattern: bool) -> SourceFactory {
     Arc::new(
@@ -283,13 +338,16 @@ fn list_displays() -> Result<()> {
     bail!("listing displays is only implemented on Windows so far")
 }
 
-async fn run_service(
-    home: &Path,
-    port: u16,
-    bind_to: &[IpAddr],
-    factory: SourceFactory,
-) -> Result<()> {
-    let ep = endpoint(home)?;
+async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostConfig) -> Result<()> {
+    // Physical pixels everywhere, matching what Desktop Duplication captures.
+    #[cfg(windows)]
+    illum_win::make_dpi_aware();
+    let mut ep = endpoint(home)?;
+    ep.capabilities.retain(|c| match c.as_str() {
+        "screen" => config.screen.is_some(),
+        "input" => config.input.is_some(),
+        _ => true,
+    });
     let addrs = if bind_to.is_empty() {
         bind::tailscale_addresses()
     } else {
@@ -313,7 +371,7 @@ async fn run_service(
     while let Some((tcp, peer)) = listener.next().await {
         let ep = ep.clone();
         let acceptor = listener.acceptor();
-        let factory = factory.clone();
+        let config = config.clone();
         tokio::spawn(async move {
             tracing::info!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
@@ -324,7 +382,7 @@ async fn run_service(
                         .map(|h| h.device_name.clone())
                         .unwrap_or_default();
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" started.");
-                    match serve_session(conn, Some(factory), ep.timeouts.idle).await {
+                    match serve_session(conn, config, ep.timeouts.idle).await {
                         Ok(()) => tracing::info!(target: "service", "[{peer}] Session ended."),
                         Err(err) => {
                             tracing::warn!(target: "service", "[{peer}] Session ended: {}", describe(&err))
@@ -340,12 +398,18 @@ async fn run_service(
     Ok(())
 }
 
+struct ViewArgs {
+    screen: u32,
+    keyboard: KeyboardMode,
+    view_only: bool,
+}
+
 /// Connects, then shows the host's screen in a window until it is closed.
 fn run_view(
     runtime: &tokio::runtime::Runtime,
     home: &Path,
     target: &str,
-    screen: u32,
+    args: ViewArgs,
 ) -> Result<()> {
     let ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
@@ -363,26 +427,72 @@ fn run_view(
         hello.device_name, conn.peer_address
     );
 
+    let with_input = !args.view_only && hello.capabilities.iter().any(|c| c == "input");
+    if !args.view_only && !with_input {
+        println!("The host does not accept input; opening view-only.");
+    }
+
     let window = ViewerWindow::new().map_err(anyhow::Error::msg)?;
     let waker = window.waker();
     let shared: Shared = Arc::default();
+    #[cfg(windows)]
+    {
+        shared.lock().expect("view state lock").local_layout =
+            Some(illum_win::own_keyboard_layout());
+    }
     let sender = conn.sender();
     let session = {
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
         let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
+        let screen = args.screen;
         runtime.spawn(async move {
             let result = run_viewer_session(conn, screen, shared, notify).await;
             waker.wake(UiEvent::Exit);
             result
         })
     };
+
+    let input = with_input.then(|| {
+        let input_sender = sender.clone();
+        Arc::new(InputOut::new(move |ev| {
+            input_sender.send(Channel::Input, ev.encode())
+        }))
+    });
+    // Keys Windows keeps for itself (Win, Alt+Tab, …) go to the host while the viewer has focus.
+    #[cfg(windows)]
+    let _hook = match &input {
+        Some(input) => {
+            let input = input.clone();
+            match illum_win::SystemKeyHook::install(move |key, down| {
+                input.send(InputMsg::Key { key, down })
+            }) {
+                Ok(hook) => Some(hook),
+                Err(e) => {
+                    tracing::warn!(target: "viewer", "System keys stay local: {e}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
     let ack = sender.clone();
+    let mode = if with_input { "" } else { " (view only)" };
     window
         .run(
-            format!("Illumination — {}", hello.device_name),
             shared,
-            Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
+            ViewerOptions {
+                title: format!("Illumination — {}{mode}", hello.device_name),
+                on_presented: Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
+                input,
+                keyboard: args.keyboard,
+                on_focus: Box::new(|focused| {
+                    #[cfg(windows)]
+                    illum_win::SystemKeyHook::set_active(focused);
+                    #[cfg(not(windows))]
+                    let _ = focused;
+                }),
+            },
         )
         .map_err(anyhow::Error::msg)?;
 
@@ -468,7 +578,7 @@ mod tests {
     fn view_and_test_pattern() {
         let cli = parse(&["view", "laptop", "--screen", "1"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Command::View { ref target, screen: 1 }) if target == "laptop")
+            matches!(cli.command, Some(Command::View { ref target, screen: 1, .. }) if target == "laptop")
         );
         assert!(
             parse(&["--test-pattern"]).is_err(),

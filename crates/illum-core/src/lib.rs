@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Shared code for every Illumination role: roles, protocol messages and the trust store.
 
+pub mod input;
 pub mod protocol;
 pub mod store;
 

@@ -9,8 +9,9 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 - **Written in Rust.**
 - **Free:** GPL-3.0-only.
 
-> Status: milestone M2. You can see another machine's screen live, but you can't control it
-> yet; input is M3. See [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
+> Status: milestone M3. You can see and control another machine (keyboard, mouse, IME text).
+> It still runs from a console, not yet as a Windows service. See
+> [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
 
 ## Try it (console)
 
@@ -31,6 +32,17 @@ You may need to allow `illum.exe` through Windows Firewall on the host.
 To check colours, run the host with `--test-pattern`. The top half shows eight patches, left to
 right: **red, green, blue, cyan, magenta, yellow, white, black**.
 
+**Keyboard modes** (`illum view <host> --keyboard …`):
+- `remote`: sends key positions, so the host's layout and IME apply
+- `local`: sends characters as you type them here, including your IME's result
+- `auto` (default): remote when both machines use the same layout
+
+`--view-only` sends no input. While the viewer has focus, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
+Alt+F4 go to the host.
+
+Don't control the machine you're sitting at: its own injected keys would loop back into the
+viewer.
+
 ## Commands
 
 ```
@@ -38,7 +50,7 @@ illum                  # the app window (not built yet)
 illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern)
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
-illum view <host>      # show a host's screen (--screen N for another display)
+illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only)
 illum displays         # list this machine's displays
 illum connect <host>   # dial a host and measure round-trip time
 illum fingerprint      # show this device's key fingerprint

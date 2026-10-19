@@ -68,6 +68,25 @@ pub struct Endpoint {
     pub device_name: String,
     pub timeouts: Timeouts,
     pub prompt: Prompt,
+    /// What this side offers in its hello (e.g. a host without input injection omits "input").
+    pub capabilities: Vec<String>,
+}
+
+impl Endpoint {
+    fn hello(&self) -> Hello {
+        Hello {
+            capabilities: self.capabilities.clone(),
+            ..Hello::ours(&self.device_name)
+        }
+    }
+}
+
+/// Every capability this build knows, as owned strings.
+pub fn all_capabilities() -> Vec<String> {
+    illum_core::protocol::CAPABILITIES
+        .iter()
+        .map(|c| c.to_string())
+        .collect()
 }
 
 async fn deadline<T, E>(
@@ -173,7 +192,7 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
     };
 
     let mut conn = Connection::new(stream, fingerprint.clone(), socket_addr);
-    conn.send_control(&ControlMsg::Hello(Hello::ours(&ep.device_name)));
+    conn.send_control(&ControlMsg::Hello(ep.hello()));
     let hello = expect_hello(conn.recv_control(t.hello, "hello").await?)?;
 
     // The host may be waiting for a person to accept, so allow the prompt time as well.
@@ -222,7 +241,7 @@ pub async fn accept(
             return Err(err);
         }
     };
-    conn.send_control(&ControlMsg::Hello(Hello::ours(&ep.device_name)));
+    conn.send_control(&ControlMsg::Hello(ep.hello()));
 
     let address = peer.to_string();
     let paired = {

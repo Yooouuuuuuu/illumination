@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! M2 end to end over loopback, with the colour test pattern as the screen.
 
-use illum::host::{FRAMES_IN_FLIGHT, SourceFactory, serve_session};
+use illum::host::{FRAMES_IN_FLIGHT, HostConfig, SourceFactory, serve_session};
 use illum::viewer::{Notify, run_viewer_session};
 use illum_core::protocol::ControlMsg;
 use illum_core::store::TrustStore;
@@ -29,6 +29,7 @@ fn endpoint(name: &str) -> Endpoint {
         device_name: name.into(),
         timeouts: Timeouts::default(),
         prompt: yes,
+        capabilities: illum_net::session::all_capabilities(),
     }
 }
 
@@ -47,7 +48,11 @@ async fn start_host(name: &str, factory: Option<SourceFactory>) -> SocketAddr {
             let (ep, acceptor, factory) = (ep.clone(), listener.acceptor(), factory.clone());
             tokio::spawn(async move {
                 if let Ok(conn) = accept(&ep, &acceptor, tcp, peer).await {
-                    let _ = serve_session(conn, factory, Duration::from_secs(30)).await;
+                    let config = HostConfig {
+                        screen: factory,
+                        ..HostConfig::default()
+                    };
+                    let _ = serve_session(conn, config, Duration::from_secs(30)).await;
                 }
             });
         }

@@ -4,7 +4,12 @@
 //! A capture thread polls the screen source and keeps only the newest frame. It encodes and
 //! sends a frame only while the viewer has fewer than [`FRAMES_IN_FLIGHT`] unacknowledged
 //! frames, so frames never pile up in the network: "latest frame wins" (architecture §4.4).
+//!
+//! An input thread applies the input rules in [`crate::input`] for the display being shown,
+//! reports the host keyboard layout, and releases everything when the session ends.
 
+use crate::input::InputState;
+use illum_core::input::{InputEvent, InputSink};
 use illum_core::protocol::{Channel, ControlMsg};
 use illum_media::clock::now_us;
 use illum_media::cursor::CursorMsg;
@@ -14,8 +19,9 @@ use illum_media::{Frame, MediaError};
 use illum_net::{Connection, NetError, Sender};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Frames the host may send before the viewer acknowledges one.
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -26,6 +32,86 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 /// Creates the screen source for a display index, inside the capture thread.
 pub type SourceFactory =
     Arc<dyn Fn(u32) -> Result<Box<dyn ScreenSource>, MediaError> + Send + Sync>;
+
+/// Creates the input sink for a display index (positions are relative to that display).
+pub type InputFactory = Arc<dyn Fn(u32) -> Result<Box<dyn InputSink + Send>, String> + Send + Sync>;
+
+/// Reports the host's active keyboard layout as an opaque id (Windows: HKL as hex).
+pub type LayoutFn = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// What this host can do. A `None` capability is refused politely.
+#[derive(Clone, Default)]
+pub struct HostConfig {
+    pub screen: Option<SourceFactory>,
+    pub input: Option<InputFactory>,
+    pub layout: Option<LayoutFn>,
+}
+
+const INPUT_TICK: Duration = Duration::from_millis(10);
+const LAYOUT_CHECK: Duration = Duration::from_secs(1);
+
+/// The input thread. Dropping it releases every held key and button on the host.
+struct InputWorker {
+    tx: Option<mpsc::Sender<InputEvent>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl InputWorker {
+    fn start(
+        sink: Box<dyn InputSink + Send>,
+        layout: Option<LayoutFn>,
+        sender: Sender,
+    ) -> InputWorker {
+        let (tx, rx) = mpsc::channel::<InputEvent>();
+        let thread = std::thread::Builder::new()
+            .name("input".into())
+            .spawn(move || {
+                let mut state = InputState::new(sink, Instant::now());
+                let mut last_layout: Option<String> = None;
+                let mut next_layout_check = Instant::now();
+                loop {
+                    match rx.recv_timeout(INPUT_TICK) {
+                        Ok(ev) => state.handle(ev, Instant::now()),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                    let now = Instant::now();
+                    state.tick(now);
+                    if let Some(layout) = &layout
+                        && now >= next_layout_check
+                    {
+                        next_layout_check = now + LAYOUT_CHECK;
+                        let id = layout();
+                        if last_layout.as_ref() != Some(&id) {
+                            sender.send_control(&ControlMsg::KeyboardLayout { id: id.clone() });
+                            last_layout = Some(id);
+                        }
+                    }
+                }
+                state.release_all();
+            })
+            .expect("spawn input thread");
+        InputWorker {
+            tx: Some(tx),
+            thread: Some(thread),
+        }
+    }
+
+    fn send(&self, ev: InputEvent) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(ev);
+        }
+    }
+}
+
+impl Drop for InputWorker {
+    fn drop(&mut self) {
+        self.tx = None; // disconnects the channel: the thread releases everything and exits
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
 
 struct Capture {
     stop: Arc<AtomicBool>,
@@ -112,13 +198,13 @@ fn capture_loop(
 }
 
 /// Serves one accepted session until the controller says bye, disconnects or goes idle.
-/// `factory` is `None` when this host cannot share its screen.
 pub async fn serve_session(
     mut conn: Connection,
-    factory: Option<SourceFactory>,
+    config: HostConfig,
     idle: Duration,
 ) -> Result<(), NetError> {
     let mut capture: Option<Capture> = None;
+    let mut input: Option<InputWorker> = None;
     let result = loop {
         let frame = match tokio::time::timeout(idle, conn.recv()).await {
             Err(_) => break Err(NetError::Timeout("session (idle)")),
@@ -126,8 +212,20 @@ pub async fn serve_session(
             Ok(Ok(None)) => break Ok(()),
             Ok(Ok(Some(frame))) => frame,
         };
-        let (Channel::Control, payload) = frame else {
-            continue;
+        let payload = match frame {
+            (Channel::Control, payload) => payload,
+            (Channel::Input, payload) => {
+                match InputEvent::decode(&payload) {
+                    Ok(ev) => {
+                        if let Some(worker) = &input {
+                            worker.send(ev);
+                        }
+                    }
+                    Err(e) => break Err(NetError::Protocol(e.to_string())),
+                }
+                continue;
+            }
+            _ => continue,
         };
         let msg = match ControlMsg::decode(&payload) {
             Ok(msg) => msg,
@@ -141,7 +239,8 @@ pub async fn serve_session(
             }),
             ControlMsg::ScreenStart { display: index } => {
                 capture = None; // stop any previous stream first
-                match &factory {
+                input = None; // and release anything held on the previous display
+                match &config.screen {
                     Some(f) => {
                         tracing::info!(target: "session", "Streaming display {index}.");
                         capture = Some(Capture::start(f.clone(), index, conn.sender()));
@@ -150,8 +249,23 @@ pub async fn serve_session(
                         reason: "this host cannot share its screen".into(),
                     }),
                 }
+                if let Some(make_sink) = &config.input {
+                    match make_sink(index) {
+                        Ok(sink) => {
+                            input = Some(InputWorker::start(
+                                sink,
+                                config.layout.clone(),
+                                conn.sender(),
+                            ))
+                        }
+                        Err(e) => tracing::warn!(target: "session", "Input unavailable: {e}"),
+                    }
+                }
             }
-            ControlMsg::ScreenStop => capture = None,
+            ControlMsg::ScreenStop => {
+                capture = None;
+                input = None;
+            }
             ControlMsg::VideoAck { .. } => {
                 if let Some(c) = &capture {
                     c.credit();
@@ -161,6 +275,7 @@ pub async fn serve_session(
             _ => {}
         }
     };
+    drop(input); // releases every held key and button
     drop(capture);
     conn.close(Duration::from_secs(1)).await;
     result

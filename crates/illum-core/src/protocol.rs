@@ -4,13 +4,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Default listening port. Not AnyDesk's 7070, so both can run on one machine.
 pub const DEFAULT_PORT: u16 = 7171;
 
 /// Capabilities this build offers. A feature is used only if both sides list it.
-pub const CAPABILITIES: &[&str] = &["ping", "screen"];
+pub const CAPABILITIES: &[&str] = &["ping", "screen", "input"];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,6 +122,11 @@ pub enum ControlMsg {
     TimeReply {
         seq: u64,
         host_us: u64,
+    },
+    /// Host → controller: the host's active keyboard layout (Windows KLID / HKL, as hex).
+    /// Sent when the screen starts and whenever it changes; drives the Auto keyboard mode.
+    KeyboardLayout {
+        id: String,
     },
     /// Orderly end of session.
     Bye,

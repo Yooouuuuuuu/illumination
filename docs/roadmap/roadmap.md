@@ -100,11 +100,29 @@ Not yet checked: the run from the laptop and the cursor check by eye.
 - absolute mouse per monitor with DPI
 - reserved `Ctrl+Alt+Shift` hotkeys
 
+**Status (v0.4.0):** implemented. The input rules are verified by tests with a recording sink.
+Real injection still needs the two-machine manual test: a viewer controlling its own PC would
+feed its injected keys back into itself.
+
+Notes:
+- The reserved `Ctrl+Alt+Shift` hotkeys move to M4, since Ctrl+Alt+Del needs the SYSTEM service.
+- Elevated windows can't receive input until the backend runs as SYSTEM (M4). Windows blocks
+  injection into them from a normal process.
+
 **Check:**
 - [ ] Typing English and Chinese (IME) into Notepad on the host comes out exactly as typed.
-- [ ] Hold Enter, drop the laptop's Wi-Fi for 3 s, release: **no stuck key and no extra Enters** on the host.
-- [ ] Mouse lands exactly on target on both monitors (2560×1440 and 1920×1080).
-- [ ] Shortcuts (Ctrl+C/V, Alt+Tab while the viewer is focused) reach the host.
+  *Both paths are built: Remote mode sends key positions so the host's IME composes; Local
+  mode sends this machine's IME result as text. Needs the laptop.*
+- [x] Hold Enter, drop the laptop's Wi-Fi for 3 s, release: **no stuck key and no extra Enters**
+  on the host. *Verified by test: the rule tests in `crates/illum/src/input.rs` replay exactly
+  this case, and `crates/illum/tests/m3.rs` drops a real connection while Enter is held. To be
+  repeated by hand with the laptop.*
+- [ ] Mouse lands exactly on target on both monitors (2560×1440 and 1920×1080). *Absolute
+  positions per display, the process is DPI-aware, and coordinates use the virtual desktop.
+  Needs the laptop.*
+- [ ] Shortcuts (Ctrl+C/V, Alt+Tab while the viewer is focused) reach the host. *Ctrl+C/V go as
+  normal keys. Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 are caught by a low-level hook while
+  the viewer has focus. Needs the laptop.*
 
 ## M4: Service and secure desktop
 - Windows service (`--service`, SYSTEM)

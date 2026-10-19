@@ -195,13 +195,39 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
 3. **Release every held key and mouse button** on disconnect, a network stall (no input-channel
    traffic for longer than a threshold), or when the viewer loses focus.
 
+**Implemented (v0.4.0):**
+- **Host rules** (`crates/illum/src/input.rs`, unit-tested with a fake clock and sink):
+  - repeat the most recent key after **500 ms**, every **40 ms**
+  - pause repeating after **300 ms** of input silence
+  - release everything after **1 s** of silence
+  - ignore a second key-down for a held key and any old sequence number
+  - release everything when the session ends
+- **Heartbeats:** while keys or buttons are held, the controller sends a heartbeat every
+  **200 ms**, so silence really means trouble.
+- **Local mode and repeats:** the host can't repeat text, so in Local mode the controller's own
+  repeats are passed on for character keys only.
+- **IME:**
+  - Local mode enables this machine's IME and sends its result as text.
+  - Remote mode disables it, so the host's IME composes from key positions.
+  - Keys pressed while composing are not sent.
+- **Wire format:** `illum_core::input`, binary, on the input channel.
+- **Capabilities:** the host advertises `input` only when it can inject, and the viewer then
+  opens view-only.
+
 **Mouse:** absolute coordinates mapped per monitor, using each monitor's DPI.
+- *v0.4.0:* positions are in pixels of the shown display. The host is per-monitor DPI-aware and
+  converts to normalised virtual-desktop coordinates for `SendInput`.
+- The viewer draws the host's cursor shape at its own mouse position while controlling, so the
+  cursor never lags.
 
 **Special keys:**
 - Ctrl+Alt+Del is sent by the service with `SendSAS`. The installer sets
   `SoftwareSASGeneration` so this is allowed.
 - Reserved hotkeys use the `Ctrl+Alt+Shift+<key>` pattern, as AnyDesk does: Del = Ctrl+Alt+Del,
-  arrows = switch display, Return = fullscreen.
+  arrows = switch display, Return = fullscreen. *(M4.)*
+- **System keys (v0.4.0):** a low-level keyboard hook on the controller sends Win, Apps,
+  Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 to the host while the viewer has focus. Injected keys are
+  ignored by the hook.
 
 ## 7. Secure desktop (UAC, lock screen)
 

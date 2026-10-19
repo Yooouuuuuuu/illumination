@@ -1,22 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The viewer window (M2). Draws the decoded remote screen, scaled to fit, plus the remote
-//! cursor (sent separately), and reports each presented frame so the host may send the next.
+//! The viewer window. Draws the decoded remote screen, scaled to fit, plus the remote cursor
+//! (sent separately); reports each presented frame so the host may send the next; and turns
+//! keyboard, IME and mouse events into input for the host (M3).
 //!
 //! Presentation uses `softbuffer` for now; the flip-model swap chain (architecture §5.5) comes
 //! with the quality work in M6.
 
+pub mod input;
+
+pub use input::{InputOut, KeyboardMode};
+
+use illum_core::input::{InputMsg, Key, MouseButton};
 use illum_media::clock::{ClockSync, now_us};
 use illum_media::cursor::{CursorPosition, CursorShape};
-use illum_media::scale::{blit_fit, draw_cursor};
+use illum_media::scale::{Placement, blit_fit, draw_cursor};
 use illum_media::tiles::TileDecoder;
+use input::{KeyPress, Modifiers, key_from_scancode, translate_key};
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::scancode::PhysicalKeyExtScancode;
 use winit::window::{Window, WindowId};
 
 /// Rolling numbers for the title bar, reset every second.
@@ -103,6 +112,9 @@ pub struct ViewState {
     pub stats: Stats,
     /// Shown in the title instead of the stats, e.g. "screen unavailable: …".
     pub status: Option<String>,
+    /// Keyboard layouts, for the Auto keyboard mode.
+    pub host_layout: Option<String>,
+    pub local_layout: Option<String>,
 }
 
 pub type Shared = Arc<Mutex<ViewState>>;
@@ -125,6 +137,18 @@ impl Waker {
     }
 }
 
+/// How the window behaves.
+pub struct ViewerOptions {
+    pub title: String,
+    /// Called after each new frame reaches the screen (to acknowledge it).
+    pub on_presented: Box<dyn Fn(u64)>,
+    /// `None` for view-only.
+    pub input: Option<Arc<InputOut>>,
+    pub keyboard: KeyboardMode,
+    /// Called when the window gains or loses keyboard focus.
+    pub on_focus: Box<dyn Fn(bool)>,
+}
+
 pub struct ViewerWindow {
     event_loop: EventLoop<UiEvent>,
 }
@@ -142,20 +166,20 @@ impl ViewerWindow {
         Waker(Arc::new(Mutex::new(self.event_loop.create_proxy())))
     }
 
-    /// Runs until the window is closed or `UiEvent::Exit` arrives. `on_presented(seq)` is
-    /// called after each new frame reaches the screen.
-    pub fn run(
-        self,
-        title: String,
-        shared: Shared,
-        on_presented: Box<dyn Fn(u64)>,
-    ) -> Result<(), String> {
+    /// Runs until the window is closed or `UiEvent::Exit` arrives.
+    pub fn run(self, shared: Shared, options: ViewerOptions) -> Result<(), String> {
         let mut app = App {
-            title,
             shared,
-            on_presented,
+            options,
             window: None,
             last_acked: None,
+            mods: Modifiers::default(),
+            composing: false,
+            texted: HashSet::new(),
+            placement: None,
+            local_mouse: None,
+            hovering: false,
+            ime_allowed: None,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
     }
@@ -167,14 +191,46 @@ struct Surface {
 }
 
 struct App {
-    title: String,
     shared: Shared,
-    on_presented: Box<dyn Fn(u64)>,
+    options: ViewerOptions,
     window: Option<Surface>,
     last_acked: Option<u64>,
+    mods: Modifiers,
+    composing: bool,
+    texted: HashSet<Key>,
+    /// Where the frame was drawn last time, and its size: maps window pixels to host pixels.
+    placement: Option<(Placement, u32, u32)>,
+    /// The local mouse in host pixels, while it is over the picture.
+    local_mouse: Option<(i32, i32)>,
+    hovering: bool,
+    ime_allowed: Option<bool>,
 }
 
 impl App {
+    fn request_redraw(&self) {
+        if let Some(s) = &self.window {
+            s.window.request_redraw();
+        }
+    }
+
+    fn effective_mode(&self) -> KeyboardMode {
+        let state = self.shared.lock().expect("view state lock");
+        self.options
+            .keyboard
+            .effective(state.host_layout.as_deref(), state.local_layout.as_deref())
+    }
+
+    /// Local mode uses this machine's IME; Remote mode lets the host's IME do the work.
+    fn sync_ime(&mut self, mode: KeyboardMode) {
+        let allowed = mode == KeyboardMode::Local;
+        if self.ime_allowed != Some(allowed) {
+            if let Some(s) = &self.window {
+                s.window.set_ime_allowed(allowed);
+            }
+            self.ime_allowed = Some(allowed);
+        }
+    }
+
     fn draw(&mut self) {
         let Some(s) = self.window.as_mut() else {
             return;
@@ -193,8 +249,22 @@ impl App {
         let presented = match state.decoder.frame() {
             Some(frame) => {
                 let p = blit_fit(frame, &mut buffer, w.get(), h.get());
+                self.placement = Some((p, frame.width, frame.height));
+                // While we control the host, draw its cursor shape at *our* mouse position:
+                // no waiting for the host to report where it moved.
+                let cursor = match (
+                    self.options.input.is_some() && self.hovering,
+                    self.local_mouse,
+                ) {
+                    (true, Some((x, y))) => CursorPosition {
+                        visible: true,
+                        x,
+                        y,
+                    },
+                    _ => state.cursor,
+                };
                 if let Some(shape) = &state.cursor_shape {
-                    draw_cursor(&mut buffer, w.get(), h.get(), p, state.cursor, shape);
+                    draw_cursor(&mut buffer, w.get(), h.get(), p, cursor, shape);
                 }
                 state.latest
             }
@@ -215,10 +285,10 @@ impl App {
         }
         let rtt = state.clock.last_rtt;
         let title = if let Some(status) = state.status.clone() {
-            Some(format!("{} — {status}", self.title))
+            Some(format!("{} — {status}", self.options.title))
         } else if state.stats.tick(rtt) {
             tracing::info!(target: "viewer", "{}", state.stats.summary);
-            Some(format!("{} — {}", self.title, state.stats.summary))
+            Some(format!("{} — {}", self.options.title, state.stats.summary))
         } else {
             None
         };
@@ -229,7 +299,90 @@ impl App {
         }
         if let Some((seq, _)) = new_frame {
             self.last_acked = Some(seq);
-            (self.on_presented)(seq);
+            (self.options.on_presented)(seq);
+        }
+    }
+
+    /// Window pixels → host pixels, if the point is on the picture.
+    fn to_host(&self, x: f64, y: f64) -> Option<(i32, i32)> {
+        let (p, fw, fh) = self.placement?;
+        let hx = ((x - p.x as f64) / p.scale).floor();
+        let hy = ((y - p.y as f64) / p.scale).floor();
+        (hx >= 0.0 && hy >= 0.0 && hx < fw as f64 && hy < fh as f64)
+            .then_some((hx as i32, hy as i32))
+    }
+
+    fn input_event(&mut self, event: &WindowEvent) {
+        let Some(input) = self.options.input.clone() else {
+            return;
+        };
+        match event {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } => {
+                let Some(key) = event.physical_key.to_scancode().and_then(key_from_scancode) else {
+                    return;
+                };
+                let mode = self.effective_mode();
+                self.sync_ime(mode);
+                let press = KeyPress {
+                    key,
+                    down: event.state == ElementState::Pressed,
+                    repeat: event.repeat,
+                    text: event.text.as_deref(),
+                };
+                let msgs = translate_key(mode, self.mods, self.composing, press, &mut self.texted);
+                for msg in msgs {
+                    input.send(msg);
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                let s = m.state();
+                self.mods = Modifiers {
+                    ctrl: s.control_key(),
+                    alt: s.alt_key(),
+                    logo: s.super_key(),
+                };
+            }
+            WindowEvent::Ime(Ime::Preedit(text, _)) => self.composing = !text.is_empty(),
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.composing = false;
+                if !text.is_empty() {
+                    input.send(InputMsg::Text(text.clone()));
+                }
+            }
+            WindowEvent::Ime(Ime::Disabled) => self.composing = false,
+            WindowEvent::CursorMoved { position, .. } => {
+                self.local_mouse = self.to_host(position.x, position.y);
+                if let Some((x, y)) = self.local_mouse {
+                    input.send(InputMsg::MouseMove { x, y });
+                }
+                self.request_redraw();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let button = match button {
+                    winit::event::MouseButton::Left => MouseButton::Left,
+                    winit::event::MouseButton::Right => MouseButton::Right,
+                    winit::event::MouseButton::Middle => MouseButton::Middle,
+                    winit::event::MouseButton::Back => MouseButton::Back,
+                    winit::event::MouseButton::Forward => MouseButton::Forward,
+                    winit::event::MouseButton::Other(_) => return,
+                };
+                input.send(InputMsg::MouseButton {
+                    button,
+                    down: *state == ElementState::Pressed,
+                });
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => ((x * 120.0) as i32, (y * 120.0) as i32),
+                    MouseScrollDelta::PixelDelta(p) => (p.x as i32, p.y as i32),
+                };
+                input.send(InputMsg::Wheel { dx, dy });
+            }
+            _ => {}
         }
     }
 }
@@ -240,7 +393,7 @@ impl ApplicationHandler<UiEvent> for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title(&self.title)
+            .with_title(&self.options.title)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
@@ -258,26 +411,63 @@ impl ApplicationHandler<UiEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UiEvent) {
         match event {
-            UiEvent::Redraw => {
-                if let Some(s) = &self.window {
-                    s.window.request_redraw();
-                }
-            }
+            UiEvent::Redraw => self.request_redraw(),
             UiEvent::Exit => event_loop.exit(),
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
+        match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::Resized(_) => {
-                if let Some(s) = &self.window {
-                    s.window.request_redraw();
+            WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::Focused(focused) => {
+                (self.options.on_focus)(*focused);
+                if !*focused {
+                    // Never leave keys held on the host while we can't see their key-ups.
+                    if let Some(input) = &self.options.input {
+                        input.release_all();
+                    }
+                    self.texted.clear();
+                    self.composing = false;
                 }
+            }
+            WindowEvent::CursorEntered { .. } if self.options.input.is_some() => {
+                self.hovering = true;
+                let has_shape = self
+                    .shared
+                    .lock()
+                    .expect("view state lock")
+                    .cursor_shape
+                    .is_some();
+                if let Some(s) = &self.window {
+                    s.window.set_cursor_visible(!has_shape);
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.hovering = false;
+                self.local_mouse = None;
+                if let Some(s) = &self.window {
+                    s.window.set_cursor_visible(true);
+                }
+                self.request_redraw();
             }
             _ => {}
         }
+        self.input_event(&event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Heartbeats while keys or buttons are held, so the host knows we're still here.
+        let next = self
+            .options
+            .input
+            .as_ref()
+            .and_then(|input| input.heartbeat());
+        event_loop.set_control_flow(match next {
+            Some(when) => ControlFlow::WaitUntil(when),
+            None => ControlFlow::Wait,
+        });
     }
 }
 

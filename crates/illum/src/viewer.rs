@@ -92,6 +92,9 @@ pub async fn run_viewer_session(
                         );
                     }
                 }
+                Ok(ControlMsg::KeyboardLayout { id }) => {
+                    shared.lock().expect("view state lock").host_layout = Some(id);
+                }
                 Ok(ControlMsg::ScreenError { reason }) => {
                     shared.lock().expect("view state lock").status =
                         Some(format!("screen unavailable: {reason}"));

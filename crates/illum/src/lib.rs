@@ -2,4 +2,5 @@
 //! Session logic shared by the `illum` binary and its tests.
 
 pub mod host;
+pub mod input;
 pub mod viewer;

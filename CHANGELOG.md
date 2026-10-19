@@ -11,6 +11,57 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-19
+
+Milestone M3, input: you can control the host's keyboard and mouse from the
+viewer.
+
+### Added
+
+- **Keyboard:**
+  - keys go by position (scancode), so the host's layout and IME apply
+  - three modes, as in AnyDesk, with `--keyboard remote|local|auto`; Auto
+    compares the two machines' keyboard layouts, which the host reports
+    whenever its layout changes
+  - in Local mode, characters and this machine's IME result are sent as text
+    and typed on the host as Unicode
+- **No stuck keys and no extra Enters:**
+  - only the host repeats keys (after 500 ms, every 40 ms); the controller
+    drops its own repeats
+  - while keys are held, the controller sends heartbeats
+  - the host stops repeating after 300 ms of silence and releases everything
+    after 1 s, when the viewer loses focus, or when the session ends
+  - duplicate presses and old sequence numbers are ignored
+- **Mouse:** absolute positions on the shown display, buttons (including
+  back/forward) and wheel. The host is DPI-aware, so positions match the
+  captured pixels.
+- **Cursor:** while controlling, the host's cursor shape is drawn at your own
+  mouse position, so it never lags.
+- **System keys:** Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 go to the host
+  while the viewer has focus (low-level keyboard hook).
+- **View-only:** `--view-only`. The viewer also opens view-only on its own if
+  the host doesn't offer input.
+
+### Changed
+
+- Protocol version 3: input channel messages, a keyboard-layout message, and an
+  `input` capability.
+- Hosts advertise only the capabilities they have. A test-pattern host offers
+  no input.
+
+### Verified
+
+- `cargo test`: 71 tests pass, including:
+  - the input rules replayed with a fake clock (a 3 s network drop while
+    holding Enter gives no extra Enters and no stuck key)
+  - an end-to-end test where a real connection drops while Enter is held and
+    the host releases it
+- `cargo clippy` is clean.
+- Live on this PC: the viewer opens view-only against a test-pattern host, and
+  real-screen streaming still works.
+- Real keyboard and mouse injection is not yet tested by hand. It needs two
+  machines, because controlling your own PC loops input back into the viewer.
+
 ## [0.3.0] - 2026-10-19
 
 Milestone M2, first pixels: you can see another machine's screen live in a
