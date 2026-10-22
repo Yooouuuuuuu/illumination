@@ -3,16 +3,16 @@
 direction: right
 
 m0: "M0\nRepo + docs" {style.fill: "#d4edda"}
-m1: "M1\nConnect & trust"
-m2: "M2\nFirst pixels"
-m3: "M3\nInput"
-m4: "M4\nService &\nsecure desktop"
-m5: "M5\nDesktop features"
-m6: "M6\nQuality &\nlatency"
-m7: "M7\nv0.1 release"
+m1: "M1\nConnect & trust" {style.fill: "#d4edda"}
+m2: "M2\nFirst pixels" {style.fill: "#d4edda"}
+m3: "M3\nInput" {style.fill: "#d4edda"}
+m4: "M4\nMedia transport\n& codec"
+m5: "M5\nAdaptation\n& harness"
+m6: "M6\nService &\nsecure desktop"
+m7: "M7\nDesktop features"
+m8: "M8\nQuality &\nlatency"
+m9: "M9\nv0.1 release"
 
-m0 -> m1 -> m2 -> m3 -> m4
-m2 -> m6
-m4 -> m5
-m5 -> m7
-m6 -> m7
+m0 -> m1 -> m2 -> m3 -> m4 -> m5
+m5 -> m6 -> m7 -> m9
+m5 -> m8 -> m9

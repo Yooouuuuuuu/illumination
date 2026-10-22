@@ -11,6 +11,36 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-22
+
+Documentation only: the design decisions from the bandwidth discussion, after
+the first two-machine test. No code changes.
+
+### Changed
+
+- **Architecture:** media (video and audio) moves to **UDP and is never
+  resent**; control and input stay on TLS over TCP; one port number for both,
+  default **28326** (code still uses 7171 until the media path lands). Codec:
+  **AV1 if both sides can, otherwise H.265**, chosen per direction. Loss:
+  **parity FEC over the whole frame** (5–30%, adaptive, budget-neutral) plus
+  reference invalidation. A full **adaptation design**: a latency controller
+  on a user-set limit (50 ms) with per-second grades, interval rules and a
+  one-rung-at-a-time ladder, and a separate slow FEC controller, with three
+  coordination rules. Audio the Sunshine way: Opus 5 ms frames, fixed 4+2
+  parity groups, ~40 ms buffer. User settings, the tunable numbers and the
+  simulated-link test harness are written down. Ideas discussed and not
+  adopted are listed so they aren't re-proposed.
+- **Roadmap:** re-planned. M4 is now the media transport and codec, M5 the
+  adaptation and harness; the service, desktop features, quality and release
+  milestones became M6–M9. M1–M3 checks updated with the laptop results.
+- **Lessons:** AnyDesk's bandwidth behaviour and connect timeline from the
+  two sessions; RustDesk's adaptation as documented in its `video_qos.rs`;
+  Sunshine/Moonlight's FEC, audio, connection-status thresholds, bitrate
+  table and pacer, from their source; the two-machine test numbers; the
+  laptop's codec support; the port check.
+- Two new diagrams: `media-transport.d2` and `adaptation.d2`;
+  `milestones.d2` updated.
+
 ## [0.4.2] - 2026-10-19
 
 Fixes from the first two-machine test.

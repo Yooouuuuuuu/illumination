@@ -1,0 +1,33 @@
+# The two controllers on the host (architecture §5.5–5.6).
+
+direction: down
+
+feedback: "Viewer feedback, per frame:\nshown? latency (capture → shown), packets lost before repair" {
+  shape: document
+}
+
+lat: Latency controller (per second, user limit L = 50 ms) {
+  grade: "Grade the second from SHOWN frames\n🟢 ≥90% within L · 🟡 50–90% · 🔴 <50%\n⚪ fewer than N frames"
+  rule: "Count from the first 🔴 / 🟢\ndrop: ≥30% 🔴 in 10 s\nraise: ≥80% 🟢 in 15 s (no raise while loss > threshold)"
+  ladder: "One rung per action, start at the top\nbitrate ×0.8 → fps 60/45/30/20/15 → resolution"
+  grade -> rule -> ladder
+}
+
+fec: FEC controller (30 s windows) {
+  zones: "Packet loss before repair\n🔴 ≥0.5% → +5 · 🟡 0.1–0.5% hold\n🟢 <0.1% → −5 after two 🟢 windows"
+  bounds: "floor 5% · ceiling 30% (user-changeable)"
+  backstop: "at ceiling and loss persists one more window\n→ ask for one rung down"
+  zones -> bounds -> backstop
+}
+
+budget: "Budget: FEC bytes come out of the video target,\nnever on top → FEC can't add latency" {
+  shape: hexagon
+}
+
+feedback -> lat.grade: "shown frames only"
+feedback -> fec.zones: "loss only"
+fec.backstop -> lat.ladder: "one rung down" {style.stroke-dash: 3}
+lat.ladder -> budget
+fec.bounds -> budget
+budget -> encoder: "bitrate target, fps, resolution, parity count"
+encoder: "Encoder + packetiser" {shape: rectangle}

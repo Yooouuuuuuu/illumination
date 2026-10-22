@@ -1,11 +1,14 @@
 # Illumination architecture
 
-Status: agreed design, nothing implemented yet. Last updated 2026-10-19.
+Status: agreed design. M1–M3 are implemented (v0.4.x); the media transport, codec and adaptation
+sections describe what comes next. Last updated 2026-10-22.
 
 Diagrams in this folder (render with `d2 <file>.d2`):
 - [`processes.d2`](processes.d2): roles and processes on one machine
 - [`session.d2`](session.d2): connection and session start
 - [`video-pipeline.d2`](video-pipeline.d2): the media path from host to controller
+- [`media-transport.d2`](media-transport.d2): the two paths, reliable and unreliable
+- [`adaptation.d2`](adaptation.d2): the latency controller and the FEC controller
 
 ## 1. Goals and non-goals
 
@@ -36,6 +39,10 @@ Exceptions, decided on purpose:
 1. **No relay and no ID.** That is the product's scope, so AnyDesk's relay link and its
    relay↔direct "connection switch" layer are left out.
 2. **No UPnP.** AnyDesk tries to forward its port on the router. We bind to chosen interfaces only.
+3. **Pixels and audio travel over UDP and are never resent** (decided 2026-10-22). AnyDesk sends
+   everything over one TCP connection, and TCP resends lost data, which holds up everything behind
+   it. Our first two-machine test showed the cost of a reliable stream under load (§4.4). Control
+   and input stay on TLS over TCP, as AnyDesk does.
 
 The evidence behind each decision is in [`../lessons/lessons.md`](../lessons/lessons.md).
 
@@ -63,13 +70,22 @@ Rules:
 - The service restarts `--control` and `--backend` when the console session changes (login,
   logout, fast user switching).
 
+*v0.4.x:* the session logic runs inside `--service` itself; the per-session backend and the
+control process arrive with the service milestone.
+
 ## 4. Network and trust
 
 ### 4.1 Listening
-- **One TCP port**, default **7171**. It can be changed. The default differs from AnyDesk's 7070
-  so both can run on the same machine.
+- **One port number**, default **28326**, used twice: **TCP** for control, input and clipboard,
+  **UDP** for video and audio. To the operating system these are two separate ports that don't
+  collide; to the user it is one number to set and one firewall rule. 28326 is unassigned in the
+  IANA registry, outside Windows' outgoing-port range, and used by no well-known program.
+  *(v0.4.x builds still listen on 7171; the change lands with the UDP media path.)*
+- `--port` moves both together, the way Sunshine moves its whole port family.
 - Default bind: **Tailscale interfaces only** (`100.64.0.0/10` and `fd7a:115c:a1e0::/48`). LAN
   interfaces are opt-in. Never `0.0.0.0` by default, and no UPnP.
+- The viewer opens no listening port. It sends to the host's UDP port from an ephemeral local
+  port, and replies come back through that; Windows Firewall lets them through on its own.
 - Hosting can be switched off, for machines that only control others (AnyDesk's "Allow direct
   connections" setting).
 
@@ -89,40 +105,44 @@ Rules:
 ### 4.3 Session handshake
 See [`session.d2`](session.d2).
 1. TCP connect, then TLS 1.3 (mutual), then the fingerprint check.
-2. **hello** in both directions: protocol version, **capability list**, host keyboard layout,
-   displays. AnyDesk logs `Remote caps: sound_src, sound_sink, keyboard_sink, …`. A feature is
-   used only if both sides list it.
+2. **hello** in both directions: protocol version, **capability list** (including which video
+   codecs each side can encode and decode in hardware), host keyboard layout, displays. AnyDesk
+   logs `Remote caps: sound_src, sound_sink, keyboard_sink, …`. A feature is used only if both
+   sides list it.
 3. The service starts a backend in the console session.
 4. **Authorisation.** Interactive profile: the backend shows the accept panel to the person at
    the host. Unattended profile: a paired device, optionally with a password.
-5. **Session accepted.** The host sends the granted permissions. From then on, all traffic runs
-   over the same TLS connection as separate channels.
+5. **Session accepted.** The host sends the granted permissions. Control, input and clipboard
+   continue on the TLS connection; video and audio start on the UDP path (§4.4).
 
-### 4.4 Channels on one connection
-One TCP+TLS connection carries every channel. Each message has a small header (channel, length).
-The sender gives some channels priority over others:
+### 4.4 Two paths: reliable control, unreliable media
+See [`media-transport.d2`](media-transport.d2). This is the SIP/WebRTC/Sunshine shape: a
+reliable channel to set things up and carry what must arrive, and an unreliable channel for
+media that must arrive *now* or not at all.
 
-| Priority | Channel | Notes |
+| Path | Carries | Properties |
 |---|---|---|
-| 1 (highest) | input, cursor | Small and latency-critical; never queued behind video |
-| 2 | control | Session commands, permissions, pings, feedback |
-| 3 | video | **Latest frame wins.** Frames still waiting to be sent are replaced, never queued |
-| 4 | audio | Opus, 20 ms frames |
-| 5 (lowest) | clipboard, files | Bulk; paused while the video queue is under pressure |
+| **TLS 1.3 over TCP** (exists since M1) | pairing, hello, permissions, **input**, cursor, clipboard, files, feedback and probes | Everything arrives, in order. Priorities inside this path: input and cursor first, then control, then clipboard and files. |
+| **UDP**, same port number | **video and audio** | Never resent. Encrypted with keys **exported from the TLS session** (RFC 5705 keying material), so no second handshake is invented. Each packet is authenticated. |
 
-**Why TCP:** AnyDesk's direct path is TCP (port 7070, observed), and it feels smooth on your
-tailnet. TCP's weak spot is that one lost packet holds up everything behind it. We follow
-AnyDesk's mitigations:
-- **Small socket send buffer, tuned at runtime.** AnyDesk logs `Adjusted send buffer: 8192` and
-  then `16384`.
-- Never let video pile up in the socket: pace frames and drop stale ones before sending.
-  **Implemented (v0.3.0) as acknowledgements:** the viewer sends `video_ack` after it shows a
-  frame, and the host keeps at most **2 frames in flight**. The capture thread holds only the
-  newest screen and encodes it when a slot frees up, so the backlog can never exceed two frames.
-- Adapt to measured bandwidth (§5.4).
+**Why media left TCP** (the override in §2):
+- The first two-machine test (v0.4.0, laptop → this PC over Tailscale) sent about 13 Mb/s of
+  lossless tiles into a link that could not carry it. Nothing was lost (Tailscale reported 0%),
+  but the data **queued**: the round trip rose from 12 ms idle to 48–75 ms, frame latency to
+  about 100 ms, and the frame rate fell to 11. That is what a reliable stream does under load.
+- On TCP, one lost packet also stops every frame behind it until the resend arrives. Over UDP a
+  lost packet costs one frame at most, and parity data usually repairs it (§5.6).
+- Sunshine, the one open-source peer that handles games well, works this way. AnyDesk stays on
+  TCP but sends roughly a tenth of the data, so its queue stays short.
 
-If Tailscale falling back to its DERP relays turns out to hurt in practice, revisit this with
-measurements. Don't change it in advance.
+**What stays from the TCP design:** input never waits behind video (it travels the other way
+and on the other path). The per-frame acknowledgement from v0.3.0 remains, but as **feedback**
+(latency and loss per frame) rather than flow control; pacing is now the bitrate target (§5.5).
+
+**Considered and set aside:** QUIC with datagrams would give the same split on one port with one
+handshake, and remains an option. We chose the plain UDP path because it keeps all of M1
+unchanged and reuses the TLS handshake we already trust for the keys. A fully custom handshake
+was rejected: that is where security mistakes happen.
 
 ## 5. Video
 
@@ -132,6 +152,8 @@ See [`video-pipeline.d2`](video-pipeline.d2).
 - Primary: **DXGI Desktop Duplication (DDA)**, with a fallback chain (Windows.Graphics.Capture,
   then GDI). AnyDesk: `capture.fallback_capture - Selecting DDA capture.`
 - Use the dirty rectangles that DDA reports, and keep frames on the GPU until encoding.
+- The cursor is **not** in the captured image (DDA leaves the pointer out), so moving the mouse
+  over a still screen produces no video frames at all.
 
 ### 5.2 One pixel format
 - Internally every frame is **BGRA8**, the format Windows calls `X8R8G8B8`. AnyDesk logs
@@ -142,36 +164,45 @@ See [`video-pipeline.d2`](video-pipeline.d2).
 - CI test: a colour test pattern goes through capture → encode → decode → present and is compared
   with a reference image. A red↔blue swap or a chroma shift fails the build.
 
-### 5.3 Encoding
-- The frame is split into **segments**, and segments that didn't change are skipped. AnyDesk logs
-  `desk_rt.encoder - 8 segments.`
-- **First codec (v0.3.0): lossless tiles.**
-  - 64×64 tiles; only tiles that changed since the last *sent* frame are transmitted.
-  - Each tile is LZ4-compressed packed BGR.
-  - Colours arrive bit-exact, and encoding adds about 3 ms at 1080p.
-  - This follows the AnyDesk rule: DeskRT is a segmented screen codec, not a camera-video codec.
-  - Wire format: `illum_media::tiles`.
-- **Second codec (M6):** hardware H.264/HEVC through the GPU vendor's encoder (NVENC, AMF, QSV),
-  with **4:4:4 when the GPU supports it**, for regions that change every frame (video, games),
-  where lossless tiles cost too much bandwidth. Both sit behind the same video message.
-- When the screen stops changing, static regions are refined to full quality. Lossless tiles
-  already are.
+### 5.3 Codec
+**Decided 2026-10-20:** the stream uses a hardware video codec, chosen **per direction** from
+what the two machines can do:
 
-### 5.4 Adaptation
-- Measure RTT and throughput continuously, and pick a quality/frame-rate preset from bands, as
-  AnyDesk does: `Adjusting for a direct connection (997.84 kb/s)` and
-  `Adjusting for 500-1.500 kb/s`.
-- The controller sends feedback (RTT, throughput, frame acknowledgements) on the control channel.
-- Optional, as AnyDesk does: reduce host animations during a session to save bandwidth
-  (`taskbar_animation_modifier`).
+> **AV1 if both sides can use it in hardware, otherwise H.265 (HEVC).**
 
-### 5.5 Cursor and presentation
+- Each side lists its hardware encoders and decoders in the hello. The host encodes with the
+  best codec the viewer can decode.
+- AV1 is royalty-free and gives the best picture per bit. H.265 is the fallback every recent GPU
+  handles in hardware; using the GPU's built-in encoder and decoder carries no licensing cost for
+  us. H.264 is left out for now.
+- On the reference setup: this PC (RTX 5070 Ti) → laptop (RTX 3050 Ti, which decodes but can't
+  encode AV1) uses **AV1**; laptop → this PC uses **H.265**.
+- Decoding may be done in software where that avoids trouble (for example dav1d for AV1 on a
+  laptop whose windows run on the integrated GPU); the choice is an implementation detail.
+
+**Two codecs we looked at and why they aren't the base:** VP9 (NVIDIA has never encoded it in
+hardware) and lossless tiles for motion (far too much data; see §4.4).
+
+**The lossless tile codec from v0.3.0** (`illum_media::tiles`: 64×64 tiles, LZ4, bit-exact) is
+what current builds stream. Whether it keeps a role once the video codec lands is an open
+question (§13). Ideas that were discussed and **not** adopted, so nobody re-proposes them by
+accident: switching between tiles and video per frame, "refinement" passes after motion, ordering
+or protecting parts of a frame by a neighbourhood score, and sending the smallest parts of a
+frame first. A high-quality still frame after the screen stops changing is parked as a future
+idea.
+
+### 5.4 Presentation and the cursor
 - The cursor shape and position are sent **separately** from the video and drawn locally by the
   controller, so the cursor never waits for a video frame. AnyDesk:
-  `desk_rt.system_event_source - Enabled mouse cursor`.
+  `desk_rt.system_event_source - Enabled mouse cursor`. While controlling, the viewer draws the
+  host's cursor shape at its **own** mouse position.
+- **No added video delay.** Each frame is shown as soon as it is decoded; a newer frame replaces
+  an older one that hasn't been shown yet. Moonlight does the same (its pacer keeps at most one
+  queued frame). Audio is the exception (§8).
 - The controller decodes in hardware and presents through a flip-model swap chain, not through a
   UI toolkit's image widget.
-  - **v0.3.0 stand-in:** `winit` + `softbuffer`, CPU blit. The flip-model swap chain comes in M6.
+  - **v0.3.0 stand-in:** `winit` + `softbuffer`, CPU blit. The flip-model swap chain comes with
+    the quality milestone.
   - **View modes (v0.4.2):**
     - **Fit:** 1:1 when the window is big enough, otherwise scaled down. Each window pixel
       **averages** the host pixels it covers. Nearest neighbour, used until v0.4.1, dropped
@@ -181,6 +212,153 @@ See [`video-pipeline.d2`](video-pipeline.d2).
     - **Ctrl+Alt+Shift+F2** switches between them.
   - BGRA is translated to the window's `0x00RRGGBB` in exactly one function
     (`illum_media::scale::bgra_to_0rgb`), and a test pins the channel order.
+  - Frame pacing to the display refresh (Moonlight's optional feature) is a v2 idea.
+
+### 5.5 Adaptation: the latency controller
+See [`adaptation.d2`](adaptation.d2). Decided 2026-10-22. The design is ours; the comparison with
+AnyDesk, RustDesk and Moonlight is in the lessons doc, §5.
+
+**The user sets a latency limit L** (default **50 ms**, from capture on the host to shown on the
+viewer). The controller's job is to keep frames within L using as much quality as the link allows.
+It starts at the **top** and steps **down**.
+
+**Measure, per second, from frames that were shown:**
+- share of frames whose latency was within L
+- number of frames shown
+
+Lost frames are **not** counted here; they belong to the FEC controller (§5.6).
+
+**Grade each second:**
+
+| Share of shown frames within L | Grade |
+|---|---|
+| ≥ 90% | 🟢 may raise |
+| 50–90% | 🟡 hold |
+| < 50% | 🔴 may drop |
+| fewer than **N** frames shown | ⚪ no evidence: never raises, never drops |
+
+N = one quarter of the current target frame rate, minimum 5. A still screen produces ⚪ seconds,
+so it never changes anything.
+
+**Act only when a grade persists.** Counting starts at the first 🔴 (or 🟢) second:
+- **Drop one rung** if, within **10 s**, at least **30%** of the seconds were 🔴.
+- **Raise one rung** if, within **15 s**, at least **80%** of the seconds were 🟢 (⚪ seconds
+  don't count), and loss is not above the FEC threshold.
+- After any action the count starts fresh.
+- One rung per action, never several at once: a one-second Wi-Fi accident must not cost a drop
+  that then takes a full raise window to undo. There is **no emergency path** in v1; the harness
+  (§5.7) decides whether one is needed.
+
+**The ladder.** A rung is a triple (resolution, frame rate, bitrate cap). Rungs are generated in
+the order **bitrate → frame rate → resolution**, because bitrate and frame rate are free to change
+while a resolution change costs a keyframe, and because for screen content readable text matters
+more than motion (WebRTC's screen-sharing default and RustDesk agree on bitrate before frame
+rate).
+1. From the cap, each rung multiplies bitrate by **0.8** until the bitrate floor for that
+   resolution (about 3 Mb/s at 1080p, 1.5 at 720p).
+2. Then frame rate: 60 → 45 → 30 → 20 → **15**.
+3. Then resolution drops one level, and the bitrate and frame-rate rungs repeat there.
+
+**Top rung:** native resolution, 60 fps, and a bitrate cap from a table like Moonlight's
+(1080p60 = 20 Mb/s, 1440p60 = 40, 720p60 = 10; half at 30 fps). The cap is a ceiling for the
+encoder's rate control; a still desktop uses far less.
+**Bottom rung:** 15 fps, half the native resolution, about 1 Mb/s.
+
+**If L is below what the link can do** (half the round trip plus encode and decode is already
+higher), the controller uses that floor plus a margin and the app shows "best possible on this
+link: X ms" instead of stepping down forever.
+
+**Why not the others' designs:** AnyDesk estimates once, about 0.7 s into the session, picks a
+band and (as far as its log shows) never moves again. Moonlight never adapts and tells the user to
+lower the bitrate. RustDesk adapts on queue delay above a 150 ms threshold and starts low. Ours
+works in the user's own terms (a latency number), keeps adapting, and starts high.
+
+### 5.6 Loss: parity FEC, never resend
+Pixels are never resent (§2). Loss is handled in two layers.
+
+**Parity over the whole frame.** Each frame's packets get **m** extra parity packets computed from
+them (Reed–Solomon). Any **m** of the frame's packets can be lost and the viewer rebuilds them,
+with no waiting and no round trip. A parity packet is the same size as a data packet, so m ÷ k
+is the overhead. Facts that shaped this:
+- A frame is **all-or-nothing** to a hardware decoder, so every packet is equally necessary.
+  Protecting "important" packets by duplicating them, or scoring parts of a frame, buys almost
+  nothing; parity at the same cost protects any packet. Moonlight drops incomplete frames too.
+- Overhead is budgeted in **bytes**, not percent: a 2-packet frame with "10%" rounds to one parity
+  packet, which is 50% of that frame but one small packet in absolute terms.
+
+**The FEC controller** is separate from the latency controller: availability and latency are
+different goals. It measures **packet loss before repair** (gaps in sequence numbers, so FEC doing
+its job doesn't hide the loss) over **30 s windows**:
+
+| Loss before repair | Zone | Action |
+|---|---|---|
+| ≥ 0.5% | 🔴 | step up **+5** points, up to the ceiling |
+| 0.1–0.5% | 🟡 | hold |
+| < 0.1% | 🟢 | after **two** consecutive 🟢 windows, step down **−5**, then −5 per further 🟢 window, down to the floor |
+
+Defaults: **floor 5%, ceiling 30%**, both user-changeable. Fast up, slow down.
+
+**How the two controllers coexist** (three rules, nothing more):
+1. **FEC is budget-neutral.** Its bytes come out of the video bitrate target, never on top. So
+   stepping FEC up cannot add latency; the picture gets slightly softer instead.
+2. **FEC never waits for the latency controller.** Availability comes first: a frame that arrives
+   late beats one that never arrives. The time horizons already keep them apart: the latency
+   controller fixes overload within about 10 s; if loss is still there after FEC's 30 s window,
+   it is path loss and parity is the right fix. The latency controller never raises while loss is
+   above the FEC threshold.
+3. **Backstop.** If FEC sits at the ceiling and loss persists for one more window, the loss is
+   overload that never showed up as late frames (a path that drops instead of queueing). FEC then
+   asks the latency controller for one rung down, and again each window while it continues.
+
+**Reference invalidation** is the second layer, for the frame that FEC could not save. The
+viewer reports "frame N broken"; the host encodes its *next* frame as a difference from an older
+frame the viewer does have. No old data is resent, the viewer never waits (it keeps showing the
+last good frame), and the picture heals within one round trip. AV1 and H.265 both support this,
+and it is what Sunshine does. Extra parity for keyframes (which are larger and costlier to lose)
+is a v2 refinement.
+
+### 5.7 Testing the numbers
+Every number above is a starting value. We control the UDP path, so the test suite inserts a
+**simulated link** between host and viewer, bandwidth cap, delay, jitter, random and burst loss,
+scripted over time, and runs fixed scenarios in CI:
+
+| Scenario | Scored by |
+|---|---|
+| steady link at X Mb/s | utilisation (bitrate reached vs. available); flaps per minute at steady state (≈ 0) |
+| bandwidth suddenly halves | recovery time until 🟢/🟡 |
+| 1–2 s outage, then normal | false drops (must be none) |
+| slow degradation over a minute | share of frames over L |
+| random loss 1 / 3 / 10 %, burst loss | frames lost after repair (→ 0); FEC bytes spent; time to converge |
+
+One parameter changes per run; everything else stays fixed. The tunables, with their defaults:
+
+| Parameter | Default |
+|---|---|
+| 🟢 / 🔴 thresholds | 90% / 50% |
+| drop window / share | 10 s / 30% |
+| raise window / share | 15 s / 80% |
+| rung ratio | ×0.8 |
+| bitrate floor per resolution | 3 Mb/s @1080p, 1.5 @720p |
+| N | ¼ of target fps, min 5 |
+| FEC thresholds | 0.5% / 0.1% |
+| FEC step | +5 / −5 |
+| FEC window | 30 s |
+| FEC decay wait | 2 clean windows |
+| FEC backstop wait | 1 window at ceiling |
+
+### 5.8 User settings
+Two main numbers, and a few under "advanced":
+
+| Setting | Default | Notes |
+|---|---|---|
+| **Latency limit** | 50 ms | the controller's target |
+| **Max bandwidth** | from the table | the top of the ladder; lower it on a metered or slow link |
+| FEC range (advanced) | 5–30% | floor and ceiling |
+| Max frame rate (advanced) | 60 | some people want 30 to save bandwidth |
+| Send audio | on | off means nothing is captured or sent |
+
+Plus one message the app shows rather than asks: "best possible on this link: X ms" when L is out
+of reach.
 
 ## 6. Input
 
@@ -219,6 +397,7 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
 - **Wire format:** `illum_core::input`, binary, on the input channel.
 - **Capabilities:** the host advertises `input` only when it can inject, and the viewer then
   opens view-only.
+- **Checked by hand (2026-10-19, laptop → this PC):** English and Chinese typing both correct.
 
 **Mouse:** absolute coordinates mapped per monitor, using each monitor's DPI.
 - *v0.4.0:* positions are in pixels of the shown display. The host is per-monitor DPI-aware and
@@ -232,12 +411,13 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
 - Reserved hotkeys use the `Ctrl+Alt+Shift+<key>` pattern, as AnyDesk does, and are never sent
   to the host.
   - **F2:** switch between fit and original size *(v0.4.2)*
-  - **Del:** Ctrl+Alt+Del *(M4)*
+  - **Del:** Ctrl+Alt+Del *(service milestone)*
   - **arrows:** switch display *(later)*
   - **Return:** fullscreen *(later)*
-- **System keys (v0.4.0):** a low-level keyboard hook on the controller sends Win, Apps,
-  Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 to the host while the viewer has focus. Injected keys are
-  ignored by the hook.
+- **System keys (v0.4.0, fixed in v0.4.2):** a low-level keyboard hook on the controller sends
+  Win, Apps, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 to the host while the viewer has focus.
+  Injected keys are ignored by the hook. The hook is registered with the program's module handle;
+  without it Windows may refuse a global hook, which is why v0.4.0 kept Alt+Tab local.
 
 ## 7. Secure desktop (UAC, lock screen)
 
@@ -257,9 +437,18 @@ The session stays connected throughout.
   - Each update carries its origin and a content hash, and an update that just came from the peer
     is never sent back. That prevents echo loops.
   - Retry with backoff when another program holds the clipboard.
-- **Audio:** WASAPI loopback capture, resampled to 48 kHz, **Opus with 20 ms frames** at about
-  80 kb/s. AnyDesk logs `Target frame length 20 ms` and `Bitrate set to 81690 bits/s`.
-- **Files:** a later milestone, on the lowest-priority channel.
+- **Audio** (decided 2026-10-22, the Sunshine way):
+  - WASAPI loopback capture, resampled to 48 kHz, **Opus at about 80 kb/s** (AnyDesk logs
+    `Bitrate set to 81690 bits/s`).
+  - **5 ms frames**, so that a parity group stays short.
+  - Over the UDP path, in **fixed parity groups of 4 data + 2 parity packets** (a 20 ms group).
+    Audio packets decode independently, so this is cheap and not adaptive.
+  - A fixed **~40 ms jitter buffer** on the viewer: long enough to rebuild a lost packet from its
+    group, short enough not to be noticed. Every real-time audio path has one; video has none.
+  - Fixed bitrate, not part of the adaptive budget: 0.08 Mb/s next to 2–20 Mb/s of video isn't
+    worth adapting. Subtracted from the budget once as a constant.
+  - **"Send audio: off"** captures and sends nothing.
+- **Files:** a later milestone, on the lowest-priority channel of the TCP path.
 
 ## 9. Permissions and profiles
 
@@ -306,7 +495,10 @@ logs `Migrating V0 -> V1`).
 ## 11. Diagnostics
 
 - Every frame carries timestamps (capture, encode, send, receive, decode, present). The viewer can
-  show where the time goes.
+  show where the time goes. *(v0.3.0: the title bar shows fps, bandwidth, latency, encode time
+  and RTT; `-v` logs it once a second.)*
+- The per-second grades, rung changes and FEC steps are logged, so a bad session can be read back
+  second by second.
 - Each role writes a trace log with a component prefix, as AnyDesk's `ad.trace` does.
 - One-click diagnostics bundle containing:
   - connection details
@@ -322,18 +514,25 @@ logs `Migrating V0 -> V1`).
 
 | Crate | Contents |
 |---|---|
-| `illum` | The binary: role dispatch (exists) |
-| `illum-core` | Roles, protocol messages, capabilities, permissions, config (exists) |
-| `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel multiplexing and priorities (exists, M1) |
-| `illum-media` | Pixel format, tile codec, colour test pattern, cursor shapes, scaling, clock sync (exists, M2) |
-| `illum-win` | Windows: DDA capture (exists, M2); later service, process spawning into sessions, input, desktop switching, clipboard, power |
-| `illum-ui` | Viewer window (exists, M2); later device list and accept panel |
+| `illum` | The binary: role dispatch, session glue, host input rules (exists) |
+| `illum-core` | Roles, protocol messages, capabilities, input messages, trust store (exists) |
+| `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel framing (exists, M1); next: the UDP media path with TLS-exported keys |
+| `illum-media` | Pixel format, tile codec, colour test pattern, cursor shapes, scaling, clock sync (exists, M2); next: codec interfaces, FEC, the two controllers, the simulated link |
+| `illum-win` | Windows: DDA capture, input injection, system-key hook (exists); later service, process spawning into sessions, desktop switching, clipboard, power |
+| `illum-ui` | Viewer window and controller-side input (exists); later device list and accept panel |
 
 Crates are added only when a milestone needs them.
 
 ## 13. Open questions
 
-- UI toolkit for the window and the viewer surface.
-- Which encoder library to bind (vendor SDKs directly, or FFmpeg).
-- How the controller asks for a full-quality refresh after it drops frames.
+- **Encoder/decoder library:** Media Foundation (built into Windows, all vendors), the vendor
+  SDKs directly (NVENC first), or FFmpeg.
+- **Chroma:** hardware AV1 encoders are 4:2:0; text sharpness at 4:2:0 vs. the cost of 4:4:4 on
+  H.265 has not been decided.
+- **Lossless tiles:** whether the v0.3.0 tile codec keeps any role once the video codec lands.
+- **UI toolkit** for the window and the viewer surface.
 - Exact threshold for "network stall → release all keys".
+- Parked ideas (not planned, kept so they aren't lost): a high-quality still frame after the
+  screen stops changing; per-area encoder quality from a neighbourhood score; extra parity for
+  keyframes (v2); frame pacing to the display refresh (v2); an adaptive audio buffer; an emergency
+  drop path if the harness shows one is needed.

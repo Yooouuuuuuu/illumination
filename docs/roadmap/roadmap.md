@@ -6,16 +6,23 @@ milestone is done when its check passes, not when its code is written.
 
 Dependencies: [`milestones.d2`](milestones.d2). Design: [`../architecture/architecture.md`](../architecture/architecture.md).
 
+**Re-planned 2026-10-22.** The first two-machine test (v0.4.0) showed that the picture pipeline,
+not the service work, is what the user feels first: 11 fps and about 100 ms latency over a 12 ms
+link. So the media transport, the video codec and the adaptation moved ahead of the Windows
+service. The old M4–M7 became M6–M9.
+
 | | Milestone | Depends on |
 |---|---|---|
-| M0 | Repo and docs | — |
-| M1 | Connect and trust | M0 |
-| M2 | First pixels | M1 |
-| M3 | Input | M2 |
-| M4 | Service and secure desktop | M3 |
-| M5 | Desktop features | M4 |
-| M6 | Quality and latency | M2 (runs alongside M3–M5) |
-| M7 | v0.1 release | M5, M6 |
+| M0 | Repo and docs ✅ | — |
+| M1 | Connect and trust ✅ | M0 |
+| M2 | First pixels ✅ | M1 |
+| M3 | Input ✅ | M2 |
+| M4 | Media transport and codec | M3 |
+| M5 | Adaptation and the simulated-link harness | M4 |
+| M6 | Service and secure desktop | M5 |
+| M7 | Desktop features | M6 |
+| M8 | Quality and latency | M5 (runs alongside M6–M7) |
+| M9 | v0.1 release | M7, M8 |
 
 ---
 
@@ -24,9 +31,9 @@ Dependencies: [`milestones.d2`](milestones.d2). Design: [`../architecture/archit
 
 **Check:** `cargo build` and `cargo test` pass. Docs reviewed.
 
-## M1: Connect and trust
+## M1: Connect and trust ✅ (v0.2.0)
 Build `illum-net`:
-- TCP listener bound to Tailscale interfaces only, default port 7171
+- TCP listener bound to Tailscale interfaces only
 - self-signed Ed25519 device certificate
 - TLS 1.3 with certificates on both sides
 - pairing (show fingerprints, pin them)
@@ -36,114 +43,150 @@ Build `illum-net`:
 
 Uses console `illum` commands; no GUI yet.
 
-**Status (v0.2.0):** implemented. The checks pass on one machine, both in tests and over its
-own Tailscale address. The cross-device run from the laptop is still to do.
-
 Stand-ins until later milestones:
 - The pairing question is asked in the `--service` console. It moves to the backend's accept
-  panel in M5.
+  panel in M7.
 - The key and trust store live in one device-wide folder (`%ProgramData%\Illumination`) that
-  both roles use directly. In M4 the app reaches them through the service instead.
+  both roles use directly. In M6 the app reaches them through the service instead.
 
 **Check:**
-- [ ] Connect from the laptop to the host by Tailscale IP. Both sides show the same fingerprints.
-  *(Same-machine run over the Tailscale address: ✅. Laptop: to do.)*
+- [x] Connect from the laptop to the host by Tailscale IP. Both sides show the same fingerprints.
+  *(Done 2026-10-19: the laptop paired with this PC on the first try.)*
 - [x] After pairing, reconnecting needs no prompt. A changed host key is refused with a clear
   error that names `illum forget`.
 - [x] The host is **not** reachable on a LAN or public interface unless enabled. It binds only
   Tailscale addresses by default; `192.168.50.123:7171` refuses.
-- [ ] RTT is shown and is within 2 ms of `tailscale ping`. *(RTT is shown. Comparing with
-  `tailscale ping` needs the laptop.)*
+- [ ] RTT is shown and is within 2 ms of `tailscale ping`. *(RTT is shown. The comparison was
+  inconclusive because the link was saturated by the video stream at the time: 10–75 ms vs.
+  12 ms idle. Repeat once M5 keeps the queue short.)*
 - [x] No connection step can hang: every one has a deadline. Tests cover a silent host, a
   silent controller, an unanswered prompt and an idle session.
 
-## M2: First pixels
+## M2: First pixels ✅ (v0.3.0)
 Build `illum-media` plus capture and presentation in `illum-win`:
 - DDA capture into BGRA8
 - one colour-conversion module
-- hardware encode (4:4:4 if supported)
 - decode, and present in a viewer window
 - separate, locally drawn cursor
-- latest-frame-wins pacing and a small send buffer
+- latest-frame-wins pacing
 - per-stage timestamps
 
-**Status (v0.3.0):** implemented.
-
-Changes from the plan above:
-- The first codec is **lossless tiles** (LZ4), not hardware encoding. It follows the AnyDesk rule
-  (DeskRT is a segmented screen codec) and makes colours bit-exact. Hardware H.264/HEVC moves to
-  M6 for fast-moving regions.
-- Pacing uses frame acknowledgements (at most 2 frames in flight) instead of tuning the socket
-  buffer.
-- Presentation uses `softbuffer`; the flip-model swap chain moves to M6.
-
-Not yet checked: the run from the laptop and the cursor check by eye.
+Changes from the original plan:
+- The first codec is **lossless tiles** (LZ4), not hardware encoding, which made colours bit-exact
+  and got pixels on screen quickly. The hardware video codec is now M4.
+- Pacing used frame acknowledgements (at most 2 frames in flight). With the UDP path (M4) the
+  acknowledgements become feedback only.
+- Presentation uses `softbuffer`; the flip-model swap chain is M8.
+- v0.4.2: downscaling averages pixels (nearest neighbour broke thin text); an original-size view
+  was added.
 
 **Check:**
 - [x] Host desktop visible and live at 1080p, at least 60 fps on a static desktop or light use.
-  *Measured on this PC over its Tailscale address: 59 fps with the 60 fps test pattern
-  (0.3 Mb/s). The real desktop streams live. When the viewer shows its own screen, the whole
-  frame changes every time and it reaches 15–36 fps at about 18 Mb/s. Laptop run: to do.*
+  *On this PC over its Tailscale address: 59 fps with the test pattern. From the laptop
+  (2026-10-19): the picture is live, but 11 fps at about 13 Mb/s; the lossless tiles overloaded
+  the link. That result is why M4 and M5 come next.*
 - [x] **Colour test pattern correct:** bit-exact (ΔE 0), stricter than the ΔE 2 target.
   Automated in `crates/illum/tests/m2.rs` (end to end over TLS) and in the codec tests.
-- [x] Median latency ≤ 50 ms. *Measured about 5 ms from capture to presentation, with the clocks
-  synced over the control channel. That excludes the wait for the next screen update and the
-  monitor's own scan-out. A true screen-to-screen measurement from the laptop is still to do.*
-- [ ] Cursor moves with no visible lag compared with the video. *It is sent separately and drawn
-  by the viewer. Still to be checked by eye.*
+- [x] Median latency ≤ 50 ms. *About 5 ms capture-to-presentation locally; about 100 ms from the
+  laptop under the overload above. To be re-measured after M5.*
+- [x] Cursor moves with no visible lag compared with the video. *Sent separately and drawn at the
+  viewer's own mouse position while controlling.*
 
-## M3: Input
+## M3: Input ✅ (v0.4.0, fixes in v0.4.2)
 - Keyboard modes Remote/Local/Auto, with the host reporting its layout
 - IME text path
 - host-side repeat only, sequence numbers
 - release everything on disconnect, stall or focus loss
 - absolute mouse per monitor with DPI
-- reserved `Ctrl+Alt+Shift` hotkeys
-
-**Status (v0.4.0):** implemented. The input rules are verified by tests with a recording sink.
-Real injection still needs the two-machine manual test: a viewer controlling its own PC would
-feed its injected keys back into itself.
+- system keys (Win, Alt+Tab, …) via a low-level hook
 
 Notes:
-- The reserved `Ctrl+Alt+Shift` hotkeys move to M4, since Ctrl+Alt+Del needs the SYSTEM service.
-- Elevated windows can't receive input until the backend runs as SYSTEM (M4). Windows blocks
+- The reserved `Ctrl+Alt+Shift+Del` hotkey moves to M6, since Ctrl+Alt+Del needs the SYSTEM
+  service.
+- Elevated windows can't receive input until the backend runs as SYSTEM (M6). Windows blocks
   injection into them from a normal process.
 
 **Check:**
-- [ ] Typing English and Chinese (IME) into Notepad on the host comes out exactly as typed.
-  *Both paths are built: Remote mode sends key positions so the host's IME composes; Local
-  mode sends this machine's IME result as text. Needs the laptop.*
+- [x] Typing English and Chinese (IME) into Notepad on the host comes out exactly as typed.
+  *(Confirmed by hand from the laptop, 2026-10-19.)*
 - [x] Hold Enter, drop the laptop's Wi-Fi for 3 s, release: **no stuck key and no extra Enters**
   on the host. *Verified by test: the rule tests in `crates/illum/src/input.rs` replay exactly
-  this case, and `crates/illum/tests/m3.rs` drops a real connection while Enter is held. To be
-  repeated by hand with the laptop.*
-- [ ] Mouse lands exactly on target on both monitors (2560×1440 and 1920×1080). *Absolute
-  positions per display, the process is DPI-aware, and coordinates use the virtual desktop.
-  Needs the laptop.*
-- [ ] Shortcuts (Ctrl+C/V, Alt+Tab while the viewer is focused) reach the host. *Ctrl+C/V go as
-  normal keys. Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 are caught by a low-level hook while
-  the viewer has focus. Needs the laptop.*
+  this case, and `crates/illum/tests/m3.rs` drops a real connection while Enter is held. Still to
+  be repeated by hand.*
+- [ ] Mouse lands exactly on target on both monitors (2560×1440 and 1920×1080). *Not yet
+  reported from the laptop.*
+- [x] Shortcuts (Ctrl+C/V, Alt+Tab while the viewer is focused) reach the host. *(Alt+Tab stayed
+  local in v0.4.0 because the hook lacked a module handle; fixed in v0.4.2 and confirmed.)*
 
-## M4: Service and secure desktop
+## M4: Media transport and codec
+Architecture §4.4, §5.3, §5.6, §8.
+- UDP media path next to the TLS connection, keys exported from the TLS session, authenticated
+  packets; one port number for both (default **28326**, `--port` moves both)
+- hardware video codec chosen per direction: **AV1 if both sides can, otherwise H.265**;
+  capabilities carry each side's hardware encoders and decoders
+- parity FEC over each frame (Reed–Solomon), budgeted in bytes; fixed at the 5% floor until M5
+- reference invalidation: the viewer reports a broken frame, the host encodes the next frame from
+  an older good one
+- per-frame feedback over TLS: shown time, latency, packets lost before repair
+- audio: Opus 80 kb/s, 5 ms frames, 4+2 parity groups, ~40 ms viewer buffer; "send audio: off"
+- a fixed bitrate target for now (the ladder's top rung), so M4 can be judged on its own
+
+**Check:**
+- [ ] This PC → laptop streams **AV1**, laptop → this PC streams **H.265**, both in hardware;
+  the chosen codec is shown in the title bar and the log.
+- [ ] Colour test pattern through the real codec: every patch within **ΔE 2** (lossy now, so the
+  bit-exact test moves to the tile codec only).
+- [ ] At a fixed 6 Mb/s from the laptop, a 1080p60 desktop with scrolling stays at 60 fps with no
+  queue build-up: RTT during the stream within 5 ms of `tailscale ping` idle.
+- [ ] With 3% simulated random loss, no visible broken frames (parity repairs them) and the
+  log shows zero reference-invalidation requests; at 10% loss, the picture heals within one round
+  trip after each broken frame.
+- [ ] Audio plays with no gaps at 3% loss; "send audio: off" sends zero audio packets.
+
+## M5: Adaptation and the simulated-link harness
+Architecture §5.5–5.8.
+- the simulated link inside the test suite: bandwidth cap, delay, jitter, random and burst loss,
+  scripted over time
+- the latency controller: per-second grades, interval rules, the ladder, ⚪ seconds
+- the FEC controller: 30 s windows, zones, floor and ceiling, decay, backstop
+- the three coordination rules (budget-neutral FEC, no raise during loss, backstop)
+- settings: latency limit, max bandwidth, FEC range, max fps, send audio
+- "best possible on this link: X ms" when the limit can't be met
+- the tuning runs: one parameter per run, scored as in §5.7
+
+**Check:**
+- [ ] Steady 20 Mb/s link: the stream settles on the top rung and changes rungs **0 times** in
+  5 minutes.
+- [ ] Bandwidth halves: back to 🟢/🟡 within **30 s**, one rung at a time.
+- [ ] A 2 s outage causes **no** rung change.
+- [ ] 3% random loss: FEC settles between 10 and 20%, frames lost after repair → 0, and the
+  bitrate is **not** reduced (loss, not overload).
+- [ ] Loss-only overload (small-buffer link): FEC reaches the ceiling, then the backstop steps the
+  bitrate down until the loss stops.
+- [ ] From the laptop over Tailscale: median latency within the 50 ms limit at the best rung the
+  link allows, with the limit shown as unreachable only if the link really can't do it.
+
+## M6: Service and secure desktop
 - Windows service (`--service`, SYSTEM)
 - backend started per session as SYSTEM in the console session
 - `--control` per user
 - desktop switcher (suspend, switch, restart)
-- Ctrl+Alt+Del via `SendSAS`
+- Ctrl+Alt+Del via `SendSAS`, hotkey Ctrl+Alt+Shift+Del
 - wake lock
 - restart on session change
+- install/uninstall commands (service registration, firewall rule, `SoftwareSASGeneration`)
 
 **Check:**
 - [ ] Connect when nobody is logged in (login screen). Log in remotely.
 - [ ] A UAC prompt appears and can be answered remotely. The session never drops.
 - [ ] Ctrl+Alt+Shift+Del opens the Ctrl+Alt+Del screen on the host.
 - [ ] The host does not sleep during an hour-long idle session. After the session, normal sleep works again.
+- [ ] Input reaches an elevated window.
 
-## M5: Desktop features
+## M7: Desktop features
 - Accept panel and permissions (three states)
 - interactive and unattended profiles
 - clipboard (text, then files) with loop prevention
-- audio (Opus, 20 ms)
 - one-controller policy with view-only extras
 - privacy mode, block input, lock on session end
 
@@ -153,38 +196,41 @@ Notes:
 - [ ] Privacy mode: the person at the host sees black; the controller still sees the desktop.
 - [ ] Unattended: correct password works; 5 wrong ones lock out for the configured time.
 
-## M6: Quality and latency
-- Hardware H.264/HEVC (4:4:4 where supported) for regions that change every frame, next to the lossless tiles
-- Use the capture API's dirty rectangles instead of comparing whole frames; keep frames on the GPU
-- Flip-model swap chain for presentation
-- Segmented encoding with skipped unchanged segments
-- full-quality refinement of static regions
-- bandwidth measurement and preset bands
+## M8: Quality and latency
+- Use the capture API's dirty rectangles; keep frames on the GPU from capture to encoder
+- Flip-model swap chain for presentation; hardware decode straight to the screen
 - HDR tone-mapping
-- optional reduction of host animations
+- optional reduction of host animations (AnyDesk's `taskbar_animation_modifier`)
 - diagnostics bundle
+- decide the open questions from architecture §13 that need measurements: chroma (4:2:0 vs
+  4:4:4), whether the tile codec keeps a role, extra parity for keyframes, frame pacing
 
 **Check:**
 - [ ] Median screen-to-screen latency **≤ 30 ms** on the reference setup.
-- [ ] Text sharpness: a small-font text screenshot matches the host pixel for pixel once the screen is static.
-- [ ] Under a simulated 3% loss with 80 ms extra delay (as when Tailscale falls back to DERP), it stays usable with no long freezes.
-- [ ] Side by side with AnyDesk on the same link, it is judged at least as smooth (blind comparison by the user).
+- [ ] Small-font text is judged sharp from the laptop at the top rung (by eye, with and without
+  4:4:4 if both are available).
+- [ ] Under a simulated 3% loss with 80 ms extra delay (as when Tailscale falls back to DERP), it
+  stays usable with no long freezes.
+- [ ] Side by side with AnyDesk on the same link, it is judged at least as smooth (blind comparison
+  by the user).
 
-## M7: v0.1 release
-- Installer (service registration, firewall rule bound to the Tailscale interface, `SoftwareSASGeneration`)
-- uninstaller
+## M9: v0.1 release
+- Installer and uninstaller
 - signed build if possible
 - user docs
 - tagged release with source (GPL)
 
 **Check:**
 - [ ] Clean install and uninstall on a fresh Windows 11 machine leaves nothing behind.
-- [ ] All M1–M6 checks pass on the release build.
+- [ ] All M1–M8 checks pass on the release build.
 
 ---
 
 ## Always-on CI
 - `cargo build`, `cargo test`, `clippy`, `rustfmt`
+- From M1: failure-path tests (peer killed mid-handshake, network stall)
 - From M2: colour golden-image test, latency regression benchmark
 - From M3: input correctness tests (stuck keys, duplicate events)
-- From M1: failure-path tests (peer killed mid-handshake, network stall)
+- From M4: codec round trip through the real encoder and decoder (ΔE check), FEC repair tests
+- From M5: the simulated-link scenarios from architecture §5.7, with their scores tracked over
+  time so a change that makes any score worse fails the build

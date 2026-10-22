@@ -1,0 +1,27 @@
+# The two paths between controller and host (architecture §4.4).
+
+direction: right
+
+ctl: Controller (illum view) {
+  input: "input, cursor,\nclipboard, feedback"
+  viewer: "decoder → window"
+  audio_out: "Opus decoder\n~40 ms buffer"
+}
+
+host: Host (illum --service / --backend) {
+  session: "session, permissions,\ninput injection"
+  encoder: "capture → AV1 / H.265\n+ parity packets"
+  audio_in: "Opus 5 ms frames\n+ 4+2 parity"
+}
+
+tcp: "TLS 1.3 over TCP · port 28326\nreliable, in order" {
+  shape: queue
+}
+udp: "UDP · port 28326\nkeys exported from the TLS session\nnever resent" {
+  shape: queue
+}
+
+ctl.input -> tcp -> host.session: "input, cursor, clipboard,\nframe feedback, probes"
+host.encoder -> udp -> ctl.viewer: "video frames\n+ FEC"
+host.audio_in -> udp -> ctl.audio_out: "audio"
+host.session -> tcp: "permissions, layout,\nreference invalidation replies" {style.stroke-dash: 3}
