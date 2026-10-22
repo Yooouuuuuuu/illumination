@@ -36,6 +36,8 @@ pub struct Stats {
     bytes: u64,
     encode_us: u64,
     latencies_ms: Vec<f64>,
+    datagrams: u64,
+    lost: u64,
     pub summary: String,
 }
 
@@ -47,6 +49,8 @@ impl Default for Stats {
             bytes: 0,
             encode_us: 0,
             latencies_ms: Vec::new(),
+            datagrams: 0,
+            lost: 0,
             summary: "waiting for the first frame…".into(),
         }
     }
@@ -56,6 +60,12 @@ impl Stats {
     pub fn frame_received(&mut self, bytes: usize, encode_us: u32) {
         self.bytes += bytes as u64;
         self.encode_us += encode_us as u64;
+    }
+
+    /// Datagrams received and lost (before any repair) since the last call.
+    pub fn packets(&mut self, received: u32, lost: u32) {
+        self.datagrams += u64::from(received);
+        self.lost += u64::from(lost);
     }
 
     fn presented(&mut self, latency_ms: Option<f64>) {
@@ -90,6 +100,10 @@ impl Stats {
         }
         if let Some(rtt) = rtt {
             parts.push(format!("rtt {:.1} ms", rtt.as_secs_f64() * 1000.0));
+        }
+        if self.datagrams + self.lost > 0 {
+            let pct = self.lost as f64 * 100.0 / (self.datagrams + self.lost) as f64;
+            parts.push(format!("loss {pct:.1}%"));
         }
         self.summary = parts.join(" · ");
         *self = Stats {

@@ -12,6 +12,7 @@ bytes = "1.12.1"
 if-addrs = "0.15.0"
 illum-core.workspace = true
 rcgen = "0.14.7"
+ring = "0.17"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "logging"] }
 serde_json = "1.0.154"
 sha2 = "0.11.0"

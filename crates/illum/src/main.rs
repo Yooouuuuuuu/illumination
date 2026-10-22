@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use illum::host::{HostConfig, SourceFactory, serve_session};
 #[cfg(windows)]
 use illum::host::{InputFactory, LayoutFn};
-use illum::viewer::{Notify, run_viewer_session};
+use illum::viewer::{Notify, ViewParams, run_viewer_session};
 use illum_core::Role;
 use illum_core::input::InputMsg;
 #[cfg(windows)]
@@ -101,6 +101,9 @@ enum Command {
         /// Only watch: send no keyboard or mouse input.
         #[arg(long)]
         view_only: bool,
+        /// Cap on the host's media rate in Mb/s (the top of the ladder; default 20).
+        #[arg(long, default_value_t = 20.0)]
+        max_bitrate: f64,
     },
     /// List this machine's displays.
     Displays,
@@ -180,12 +183,14 @@ fn main() -> std::process::ExitCode {
             screen,
             keyboard,
             view_only,
+            max_bitrate,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
                 screen: *screen,
                 keyboard: *keyboard,
                 view_only: *view_only,
+                max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
             };
             run_view(&runtime, &home, target, options)
         }
@@ -373,6 +378,7 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
         let ep = ep.clone();
         let acceptor = listener.acceptor();
         let config = config.clone();
+        let media = listener.media();
         tokio::spawn(async move {
             tracing::info!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
@@ -383,7 +389,7 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
                         .map(|h| h.device_name.clone())
                         .unwrap_or_default();
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" started.");
-                    match serve_session(conn, config, ep.timeouts.idle).await {
+                    match serve_session(conn, config, ep.timeouts.idle, media).await {
                         Ok(()) => tracing::info!(target: "service", "[{peer}] Session ended."),
                         Err(err) => {
                             tracing::warn!(target: "service", "[{peer}] Session ended: {}", describe(&err))
@@ -403,6 +409,7 @@ struct ViewArgs {
     screen: u32,
     keyboard: KeyboardMode,
     view_only: bool,
+    max_bitrate_kbps: u32,
 }
 
 /// Connects, then shows the host's screen in a window until it is closed.
@@ -446,9 +453,13 @@ fn run_view(
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
         let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
-        let screen = args.screen;
+        let params = ViewParams {
+            display: args.screen,
+            max_bitrate_kbps: args.max_bitrate_kbps,
+            media_target: None,
+        };
         runtime.spawn(async move {
-            let result = run_viewer_session(conn, screen, shared, notify).await;
+            let result = run_viewer_session(conn, params, shared, notify).await;
             waker.wake(UiEvent::Exit);
             result
         })

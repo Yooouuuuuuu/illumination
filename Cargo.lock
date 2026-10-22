@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "illum"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "illum-core"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "illum-media"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "lz4_flex",
  "thiserror 2.0.21",
@@ -778,12 +778,13 @@ dependencies = [
 
 [[package]]
 name = "illum-net"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "if-addrs",
  "illum-core",
  "rcgen",
+ "ring",
  "rustls",
  "serde_json",
  "sha2",
@@ -795,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "illum-ui"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "illum-core",
  "illum-media",
@@ -806,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "illum-win"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "illum-core",
  "illum-media",

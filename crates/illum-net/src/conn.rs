@@ -3,6 +3,7 @@
 
 use crate::frame::{self, read_frame};
 use crate::identity::Fingerprint;
+use crate::media::MediaKeys;
 use crate::outbox::Outbox;
 use crate::{NetError, Result};
 use illum_core::protocol::{Channel, ControlMsg, Hello};
@@ -42,8 +43,12 @@ pub struct Connection {
     pub peer_fingerprint: Fingerprint,
     /// Where the peer connected from (host side) or to (controller side).
     pub peer_address: SocketAddr,
+    /// Our end of the TCP connection; media leaves on the same interface.
+    pub local_address: SocketAddr,
     /// The peer's `hello`, set during the handshake.
     pub peer_hello: Option<Hello>,
+    /// Keys for the UDP media path, exported from this TLS session.
+    pub media_keys: Option<MediaKeys>,
 }
 
 impl Connection {
@@ -51,6 +56,7 @@ impl Connection {
         stream: S,
         peer_fingerprint: Fingerprint,
         peer_address: SocketAddr,
+        local_address: SocketAddr,
     ) -> Connection
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -78,7 +84,9 @@ impl Connection {
             writer: Some(writer_task),
             peer_fingerprint,
             peer_address,
+            local_address,
             peer_hello: None,
+            media_keys: None,
         }
     }
 

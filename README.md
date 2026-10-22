@@ -26,7 +26,7 @@ PowerShell only runs programs from the current folder with `.\` in front, hence 
 
 On the machine to be reached (the host):
 ```powershell
-.\illum.exe --service            # listens on this machine's Tailscale address, port 7171
+.\illum.exe --service            # listens on this machine's Tailscale address, port 28326 (TCP and UDP)
 ```
 On the other machine:
 ```powershell
@@ -34,9 +34,15 @@ On the other machine:
 ```
 The first time, each side shows the other's key fingerprint and asks you to confirm. After
 that you connect without prompts, and a changed key is refused. The window title shows frame
-rate, bandwidth and latency.
+rate, bandwidth, latency and packet loss.
 
-You may need to allow `illum.exe` through Windows Firewall on the host.
+Control and input travel over TLS on TCP; video travels over **UDP on the same port number**
+and is never resent. `--max-bitrate 6` (Mb/s) caps the video rate; the default is 20. Until the
+hardware codec lands (v0.5.1) the picture is lossless tiles, which is sharp but heavy when the
+whole screen changes, so a low cap means a low frame rate.
+
+You may need to allow `illum.exe` through Windows Firewall on the host; one answer covers TCP
+and UDP.
 
 To check colours, run the host with `--test-pattern`. The top half shows eight patches, left to
 right: **red, green, blue, cyan, magenta, yellow, white, black**.
@@ -59,7 +65,7 @@ illum                  # the app window (not built yet)
 illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern)
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
-illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only)
+illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only, --max-bitrate Mb/s)
 illum displays         # list this machine's displays
 illum connect <host>   # dial a host and measure round-trip time
 illum fingerprint      # show this device's key fingerprint

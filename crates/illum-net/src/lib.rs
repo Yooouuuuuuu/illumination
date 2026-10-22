@@ -6,12 +6,14 @@ pub mod bind;
 pub mod conn;
 pub mod frame;
 pub mod identity;
+pub mod media;
 pub mod outbox;
 pub mod session;
 pub mod tls;
 
 pub use conn::{Connection, Sender};
 pub use identity::{Fingerprint, Identity};
+pub use media::{Inbound, MediaClient, MediaHub, MediaKeys, MediaStream};
 pub use session::{Endpoint, Listener, Prompt, PromptKind, PromptRequest, Timeouts};
 
 use illum_core::store::StoreError;

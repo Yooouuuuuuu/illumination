@@ -4,7 +4,7 @@
 
 use illum::host::{HostConfig, InputFactory, LayoutFn, SourceFactory, serve_session};
 use illum::input::RecordingSink;
-use illum::viewer::run_viewer_session;
+use illum::viewer::{ViewParams, run_viewer_session};
 use illum_core::input::{InputEvent, InputMsg, InputSink, Key, MouseButton};
 use illum_core::protocol::Channel;
 use illum_core::store::TrustStore;
@@ -89,13 +89,23 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         let conn = accept(&host, &listener.acceptor(), tcp, peer)
             .await
             .unwrap();
-        let _ = serve_session(conn, config, Duration::from_secs(30)).await;
+        let _ = serve_session(conn, config, Duration::from_secs(30), listener.media()).await;
     });
 
     let conn = connect(&endpoint("ctl"), &addr.to_string()).await.unwrap();
     let sender = conn.sender();
     let shared: Shared = Arc::default();
-    let session = tokio::spawn(run_viewer_session(conn, 0, shared.clone(), Arc::new(|| {})));
+    let params = ViewParams {
+        display: 0,
+        max_bitrate_kbps: 0,
+        media_target: None,
+    };
+    let session = tokio::spawn(run_viewer_session(
+        conn,
+        params,
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
 
     wait_until("the host keyboard layout", || {
         shared.lock().unwrap().host_layout.as_deref() == Some("04040404")

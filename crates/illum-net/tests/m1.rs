@@ -275,3 +275,55 @@ async fn hello_carries_the_endpoints_capabilities() {
     assert_eq!(caps, &["ping".to_string(), "screen".to_string()]);
     conn.close(Duration::from_secs(1)).await;
 }
+
+#[tokio::test]
+async fn both_sides_derive_the_same_media_keys() {
+    use illum_net::MediaStream;
+    let host = side("host-k", true, Timeouts::default());
+    let ctl = side("ctl-k", true, Timeouts::default());
+    let mut listener = Listener::bind(&host.ep, &[LOOPBACK], 0).await.unwrap();
+    let addr = listener.local_addrs()[0];
+    let host_ep = host.ep.clone();
+    let accepted = tokio::spawn(async move {
+        let (tcp, peer) = listener.next().await.unwrap();
+        accept(&host_ep, &listener.acceptor(), tcp, peer)
+            .await
+            .unwrap()
+    });
+    let viewer_conn = connect(&ctl.ep, &addr.to_string()).await.unwrap();
+    let host_conn = accepted.await.unwrap();
+    let (hk, vk) = (
+        host_conn.media_keys.clone().expect("host has media keys"),
+        viewer_conn
+            .media_keys
+            .clone()
+            .expect("viewer has media keys"),
+    );
+    assert_eq!(
+        hk.session_id, vk.session_id,
+        "same session id on both sides"
+    );
+    // What one side seals, the other opens, in both directions; nothing else does.
+    let mut hs = hk.sealer();
+    let mut vo = vk.opener();
+    let (stream, _, plain) = vo
+        .open(&hs.seal(MediaStream::Video, b"host to viewer"))
+        .unwrap();
+    assert_eq!(
+        (stream, plain.as_slice()),
+        (MediaStream::Video, &b"host to viewer"[..])
+    );
+    let mut vs = vk.sealer();
+    let mut ho = hk.opener();
+    assert_eq!(
+        ho.open(&vs.seal(MediaStream::Punch, b"")).unwrap().0,
+        MediaStream::Punch
+    );
+    assert!(
+        hk.opener()
+            .open(&hk.sealer().seal(MediaStream::Video, b"x"))
+            .is_err(),
+        "a side can't open its own sends"
+    );
+    viewer_conn.close(Duration::from_secs(1)).await;
+}

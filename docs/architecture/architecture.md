@@ -80,7 +80,7 @@ control process arrive with the service milestone.
   **UDP** for video and audio. To the operating system these are two separate ports that don't
   collide; to the user it is one number to set and one firewall rule. 28326 is unassigned in the
   IANA registry, outside Windows' outgoing-port range, and used by no well-known program.
-  *(v0.4.x builds still listen on 7171; the change lands with the UDP media path.)*
+  *(In the code since v0.5.0.)*
 - `--port` moves both together, the way Sunshine moves its whole port family.
 - Default bind: **Tailscale interfaces only** (`100.64.0.0/10` and `fd7a:115c:a1e0::/48`). LAN
   interfaces are opt-in. Never `0.0.0.0` by default, and no UPnP.
@@ -138,6 +138,24 @@ media that must arrive *now* or not at all.
 **What stays from the TCP design:** input never waits behind video (it travels the other way
 and on the other path). The per-frame acknowledgement from v0.3.0 remains, but as **feedback**
 (latency and loss per frame) rather than flow control; pacing is now the bitrate target (§5.5).
+
+**Implemented (v0.5.0)**, `illum_net::media`, `illum_media::packets`, `illum_media::pacer`:
+- The viewer sends a **punch** datagram every 200 ms until video arrives, then every 2 s as a
+  keepalive; the host learns the viewer's address from the first authenticated punch. Either
+  side reports a blocked path after **5 s** instead of hanging.
+- Keys: 72 bytes of TLS exporter output (label `illumination media v1`): host→viewer key,
+  viewer→host key, and a 64-bit session id carried in clear so the host can route the datagram
+  before decrypting. AES-256-GCM, nonce = stream byte + per-stream sequence number, a 256-entry
+  replay window per stream.
+- Datagrams are ≤ 1200 bytes. Frames are split into packets with a 22-byte header (codec, flags,
+  frame number, index/count, capture and encode times) and are **all-or-nothing** on the viewer.
+- The host encodes only the newest captured frame once the previous one has been sent, and a
+  token bucket paces the packets to the cap (`--max-bitrate`, default 20 Mb/s, burst 50 ms).
+- A frame that never completes makes the viewer request a keyframe (honoured at most every
+  500 ms) and keep showing the last good frame meanwhile. This is the tile codec's stand-in for
+  reference invalidation (§5.6).
+- Once a second the viewer reports datagrams received, datagrams lost (sequence gaps, before
+  any repair) and frames lost.
 
 **Considered and set aside:** QUIC with datagrams would give the same split on one port with one
 handshake, and remains an option. We chose the plain UDP path because it keeps all of M1

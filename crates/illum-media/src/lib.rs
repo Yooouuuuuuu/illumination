@@ -5,6 +5,8 @@
 pub mod clock;
 pub mod cursor;
 pub mod frame;
+pub mod pacer;
+pub mod packets;
 pub mod pattern;
 pub mod scale;
 pub mod source;

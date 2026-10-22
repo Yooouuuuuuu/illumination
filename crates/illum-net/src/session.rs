@@ -4,6 +4,7 @@
 
 use crate::conn::Connection;
 use crate::identity::{Fingerprint, Identity};
+use crate::media::{MediaHub, MediaKeys};
 use crate::tls::{self, SERVER_NAME};
 use crate::{NetError, Result};
 use illum_core::protocol::{ControlMsg, DEFAULT_PORT, Hello, PROTOCOL_VERSION};
@@ -159,8 +160,19 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
 
     let connector = TlsConnector::from(tls::client_config(&ep.identity)?);
     let server_name = rustls::pki_types::ServerName::try_from(SERVER_NAME).expect("valid name");
+    let local = tcp.local_addr()?;
     let stream = deadline(t.tls, "TLS handshake", connector.connect(server_name, tcp)).await?;
     let fingerprint = tls::peer_fingerprint(stream.get_ref().1.peer_certificates())?;
+    let media_keys = MediaKeys::from_exporter(
+        |buf| {
+            stream
+                .get_ref()
+                .1
+                .export_keying_material(buf, MediaKeys::export_label(), None)
+                .map(|_| ())
+        },
+        false,
+    )?;
 
     // Trust check before anything is sent over the encrypted channel.
     let pinned = ep.store.lock().await.known_host(&address).cloned();
@@ -191,7 +203,8 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
         }
     };
 
-    let mut conn = Connection::new(stream, fingerprint.clone(), socket_addr);
+    let mut conn = Connection::new(stream, fingerprint.clone(), socket_addr, local);
+    conn.media_keys = Some(media_keys);
     conn.send_control(&ControlMsg::Hello(ep.hello()));
     let hello = expect_hello(conn.recv_control(t.hello, "hello").await?)?;
 
@@ -227,10 +240,22 @@ pub async fn accept(
 ) -> Result<Connection> {
     let t = &ep.timeouts;
     tcp.set_nodelay(true)?;
+    let local = tcp.local_addr()?;
     let stream = deadline(t.tls, "TLS handshake", acceptor.accept(tcp)).await?;
     let fingerprint = tls::peer_fingerprint(stream.get_ref().1.peer_certificates())?;
+    let media_keys = MediaKeys::from_exporter(
+        |buf| {
+            stream
+                .get_ref()
+                .1
+                .export_keying_material(buf, MediaKeys::export_label(), None)
+                .map(|_| ())
+        },
+        true,
+    )?;
 
-    let mut conn = Connection::new(stream, fingerprint.clone(), peer);
+    let mut conn = Connection::new(stream, fingerprint.clone(), peer, local);
+    conn.media_keys = Some(media_keys);
     let hello = match expect_hello(conn.recv_control(t.hello, "hello").await?) {
         Ok(hello) => hello,
         Err(err) => {
@@ -299,21 +324,52 @@ pub async fn serve_host_session(mut conn: Connection, idle: Duration) -> Result<
     Ok(())
 }
 
-/// TCP listeners on the chosen addresses, merged into one stream of incoming connections.
+/// TCP listeners on the chosen addresses, merged into one stream of incoming connections, plus
+/// the UDP media sockets on the same port number.
 pub struct Listener {
     incoming: mpsc::Receiver<(TcpStream, SocketAddr)>,
     local: Vec<SocketAddr>,
     acceptor: TlsAcceptor,
+    media: Arc<MediaHub>,
 }
 
 impl Listener {
+    /// Binds TCP and UDP on every address. With `port` 0 the TCP port is chosen by the system and
+    /// UDP uses the same number (tests); otherwise both use `port`.
     pub async fn bind(ep: &Endpoint, addrs: &[IpAddr], port: u16) -> Result<Listener> {
         let acceptor = TlsAcceptor::from(tls::server_config(&ep.identity)?);
         let (tx, incoming) = mpsc::channel(16);
-        let mut local = Vec::new();
-        for ip in addrs {
-            let listener = TcpListener::bind(SocketAddr::new(*ip, port)).await?;
-            local.push(listener.local_addr()?);
+        // With port 0 the system picks the TCP port, and the UDP side must take the same number.
+        // Windows reserves scattered port ranges (Hyper-V, WSL) separately for TCP and UDP, so
+        // an ephemeral TCP port can land in a UDP-reserved range: try a few times.
+        let attempts = if port == 0 { 20 } else { 1 };
+        let mut last_err = None;
+        let mut bound = None;
+        for _ in 0..attempts {
+            let mut local = Vec::new();
+            let mut listeners = Vec::new();
+            let mut chosen = port;
+            for ip in addrs {
+                let listener = TcpListener::bind(SocketAddr::new(*ip, chosen)).await?;
+                let addr = listener.local_addr()?;
+                chosen = addr.port();
+                local.push(addr);
+                listeners.push(listener);
+            }
+            match MediaHub::bind(addrs, chosen) {
+                Ok(media) => {
+                    bound = Some((local, listeners, media));
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let Some((local, listeners, media)) = bound else {
+            return Err(last_err.unwrap_or_else(|| {
+                NetError::Io(std::io::Error::other("could not bind the media port"))
+            }));
+        };
+        for listener in listeners {
             let tx = tx.clone();
             tokio::spawn(async move {
                 while let Ok(pair) = listener.accept().await {
@@ -327,11 +383,17 @@ impl Listener {
             incoming,
             local,
             acceptor,
+            media,
         })
     }
 
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.local
+    }
+
+    /// The UDP media sockets, shared by every session.
+    pub fn media(&self) -> Arc<MediaHub> {
+        self.media.clone()
     }
 
     pub fn acceptor(&self) -> TlsAcceptor {

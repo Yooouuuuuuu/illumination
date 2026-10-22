@@ -132,6 +132,13 @@ Architecture §4.4, §5.3, §5.6, §8.
 - audio: Opus 80 kb/s, 5 ms frames, 4+2 parity groups, ~40 ms viewer buffer; "send audio: off"
 - a fixed bitrate target for now (the ladder's top rung), so M4 can be judged on its own
 
+**Status:** two slices. **v0.5.0** shipped the UDP media path, keys exported from TLS, port
+28326, packetisation, pacing, keyframe-on-loss and the loss report, still carrying the tile
+codec. **v0.5.1** is the codec, parity FEC and reference invalidation; audio follows as v0.5.2.
+Measured in v0.5.0 on this PC over its Tailscale address: test pattern 59 fps, 9 ms, 0% loss;
+real screen at a 6 Mb/s cap paced to ~6 Mb/s with RTT flat (no queue) but only 2–4 fps, because
+lossless tiles of a full-screen change are ~2 MB per frame.
+
 **Check:**
 - [ ] This PC → laptop streams **AV1**, laptop → this PC streams **H.265**, both in hardware;
   the chosen codec is shown in the title bar and the log.

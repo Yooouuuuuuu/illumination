@@ -4,13 +4,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
-/// Default listening port. Not AnyDesk's 7070, so both can run on one machine.
-pub const DEFAULT_PORT: u16 = 7171;
+/// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
+/// IANA registry and used by no well-known program (architecture §4.1).
+pub const DEFAULT_PORT: u16 = 28326;
 
 /// Capabilities this build offers. A feature is used only if both sides list it.
-pub const CAPABILITIES: &[&str] = &["ping", "screen", "input"];
+pub const CAPABILITIES: &[&str] = &["ping", "screen", "input", "udp-media"];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,9 +101,26 @@ pub enum ControlMsg {
     Pong {
         seq: u64,
     },
-    /// Controller → host: start streaming display `display` (0 = primary).
+    /// Controller → host: start streaming display `display` (0 = primary). `max_bitrate_kbps`
+    /// caps the host's media rate (0 = the host's default).
     ScreenStart {
         display: u32,
+        max_bitrate_kbps: u32,
+    },
+    /// Host → controller: send media datagrams to the host's address on this UDP port.
+    MediaEndpoint {
+        port: u16,
+    },
+    /// Controller → host: frame `seq` could not be assembled; the next frame must be a keyframe.
+    FrameLost {
+        seq: u64,
+    },
+    /// Controller → host, once a second: datagrams received and lost (before any repair), and
+    /// frames that could not be assembled.
+    MediaReport {
+        received: u32,
+        lost: u32,
+        frames_lost: u32,
     },
     /// Controller → host: stop streaming.
     ScreenStop,
@@ -110,7 +128,7 @@ pub enum ControlMsg {
     ScreenError {
         reason: String,
     },
-    /// Controller → host: video frame `seq` was presented; the host may send another.
+    /// Controller → host: video frame `seq` was presented (feedback; nothing waits on it).
     VideoAck {
         seq: u64,
     },
@@ -172,7 +190,17 @@ mod tests {
             },
             ControlMsg::Ping { seq: 7 },
             ControlMsg::Pong { seq: 7 },
-            ControlMsg::ScreenStart { display: 1 },
+            ControlMsg::ScreenStart {
+                display: 1,
+                max_bitrate_kbps: 6000,
+            },
+            ControlMsg::MediaEndpoint { port: 28326 },
+            ControlMsg::FrameLost { seq: 5 },
+            ControlMsg::MediaReport {
+                received: 100,
+                lost: 2,
+                frames_lost: 1,
+            },
             ControlMsg::ScreenStop,
             ControlMsg::ScreenError {
                 reason: "busy".into(),

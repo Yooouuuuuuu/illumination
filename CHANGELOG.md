@@ -11,6 +11,59 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-22
+
+Milestone M4, first slice: the media transport. Video now travels over UDP
+and is never resent; control and input stay on TLS over TCP.
+
+### Added
+
+- **UDP media path.** The host binds UDP on the same port number as TCP
+  (default now **28326** for both; `--port` moves both). The viewer sends
+  small "punch" datagrams so the host learns its address, then video flows
+  host → viewer. Every datagram is encrypted and authenticated with keys
+  **exported from the TLS session** (RFC 5705), so there is no second
+  handshake; the host finds the session by an id in the datagram header and
+  rejects replays and forgeries.
+- **Packetisation and reassembly.** Frames are split into ≤ 1200-byte
+  datagrams (fits Tailscale's MTU). A frame is shown only when every packet
+  has arrived; a frame whose packets stop, or that a newer frame overtakes,
+  is reported lost and the viewer asks for a keyframe (the host honours that
+  at most twice a second). Until the keyframe arrives the viewer keeps showing
+  the last good picture.
+- **Pacing by bitrate.** A token bucket paces datagrams to a cap
+  (`view --max-bitrate <Mb/s>`, default 20, capped by the host at 20). The host
+  encodes only the newest captured frame once the previous one has left, so
+  nothing queues up. The old "two frames in flight" window is gone;
+  acknowledgements are feedback only.
+- **Loss feedback.** The viewer reports datagrams received and lost (counted
+  by sequence gaps, before any repair) and frames lost, once a second; the
+  title bar shows `loss x%`.
+- **Blocked-path detection.** If no punch reaches the host within 5 s, or no
+  video reaches the viewer, each side says so in plain words instead of
+  hanging.
+
+### Changed
+
+- Protocol version 4; a `udp-media` capability. Hosts and viewers from
+  v0.4.x can't connect to v0.5.0 (the hello refuses the mismatch cleanly).
+- Video no longer travels on the TCP channel at all. Cursor updates still do.
+
+### Verified
+
+- `cargo test`: 89 tests pass, including: datagram seal/open/replay/forgery
+  tests; both sides derive the same media keys from a real TLS handshake;
+  packetisation with out-of-order and stalled frames; the pacer's average
+  rate; and end-to-end runs over loopback UDP (bit-exact colour pattern,
+  recovery through a 1% lossy relay, a blocked path reported within 5 s).
+  `cargo clippy` is clean.
+- Live on this PC over its Tailscale address: test pattern at **59 fps,
+  9 ms capture-to-screen, 0.0% loss, RTT 0.3 ms**. Real screen capped at
+  6 Mb/s: the pacer held ~6 Mb/s with **RTT flat at 0.2 ms** (no queue);
+  the picture ran at 2–4 fps because lossless tiles of a full-screen change
+  are about 2 MB per frame, which is what the hardware codec (v0.5.1) is for.
+- Not yet run from the laptop.
+
 ## [0.4.4] - 2026-10-22
 
 Documentation only. Two decisions that close the open questions before M4.
