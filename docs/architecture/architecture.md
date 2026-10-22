@@ -180,6 +180,23 @@ what the two machines can do:
 - Decoding may be done in software where that avoids trouble (for example dav1d for AV1 on a
   laptop whose windows run on the integrated GPU); the choice is an implementation detail.
 
+**Chroma: 4:2:0 in v1** (decided 2026-10-22). Hardware AV1 encoders are 4:2:0 only, and H.265 is
+used at 4:2:0 as well so both directions behave the same. 4:2:0 stores colour at a quarter of the
+resolution (one colour value per 2×2 pixels; brightness stays per pixel), which is invisible in
+video and games but softens coloured edges on text, such as ClearType fringes or red text on
+blue. A **4:4:4 mode** (H.265 on GPUs that support it, roughly 1.5–2× the bitrate at the same
+quality) is **future work**: once the 4:2:0 path is stable, try it from the laptop on a page of
+small text and decide whether it becomes a ladder rung or a user preference.
+
+**Library: FFmpeg** (decided 2026-10-22). One API for NVENC, AMF and QSV on Windows, and for
+VideoToolbox and VAAPI when other platforms come; it also wraps dav1d for software AV1 decoding.
+The cost is on our side: a trimmed FFmpeg build (hardware codecs, Opus, dav1d; roughly 10–30 MB)
+bundled with the installer, Rust bindings (`ffmpeg-next`) that need the libraries at compile
+time, and a heavier CI. Media Foundation (Windows only, nothing to ship) and the NVENC SDK (NVIDIA
+only) were the alternatives; writing one of them now and FFmpeg later would mean two
+implementations of the same thing. The encoder and decoder still sit behind a small interface in
+our code.
+
 **Two codecs we looked at and why they aren't the base:** VP9 (NVIDIA has never encoded it in
 hardware) and lossless tiles for motion (far too much data; see §4.4).
 
@@ -525,14 +542,11 @@ Crates are added only when a milestone needs them.
 
 ## 13. Open questions
 
-- **Encoder/decoder library:** Media Foundation (built into Windows, all vendors), the vendor
-  SDKs directly (NVENC first), or FFmpeg.
-- **Chroma:** hardware AV1 encoders are 4:2:0; text sharpness at 4:2:0 vs. the cost of 4:4:4 on
-  H.265 has not been decided.
 - **Lossless tiles:** whether the v0.3.0 tile codec keeps any role once the video codec lands.
 - **UI toolkit** for the window and the viewer surface.
 - Exact threshold for "network stall → release all keys".
-- Parked ideas (not planned, kept so they aren't lost): a high-quality still frame after the
+- Parked ideas (not planned, kept so they aren't lost): a **4:4:4 mode** on H.265 for sharper
+  coloured text, to try once 4:2:0 is stable (§5.3); a high-quality still frame after the
   screen stops changing; per-area encoder quality from a neighbourhood score; extra parity for
   keyframes (v2); frame pacing to the display refresh (v2); an adaptive audio buffer; an emergency
   drop path if the harness shows one is needed.

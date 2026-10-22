@@ -122,8 +122,9 @@ Notes:
 Architecture §4.4, §5.3, §5.6, §8.
 - UDP media path next to the TLS connection, keys exported from the TLS session, authenticated
   packets; one port number for both (default **28326**, `--port` moves both)
-- hardware video codec chosen per direction: **AV1 if both sides can, otherwise H.265**;
-  capabilities carry each side's hardware encoders and decoders
+- hardware video codec chosen per direction: **AV1 if both sides can, otherwise H.265**, both
+  at **4:2:0**; capabilities carry each side's hardware encoders and decoders
+- encode and decode through **FFmpeg** (`ffmpeg-next`), with a trimmed FFmpeg build bundled
 - parity FEC over each frame (Reed–Solomon), budgeted in bytes; fixed at the 5% floor until M5
 - reference invalidation: the viewer reports a broken frame, the host encodes the next frame from
   an older good one
@@ -202,13 +203,15 @@ Architecture §5.5–5.8.
 - HDR tone-mapping
 - optional reduction of host animations (AnyDesk's `taskbar_animation_modifier`)
 - diagnostics bundle
-- decide the open questions from architecture §13 that need measurements: chroma (4:2:0 vs
-  4:4:4), whether the tile codec keeps a role, extra parity for keyframes, frame pacing
+- try a **4:4:4 mode** (H.265) from the laptop on a page of small text, and decide whether it
+  becomes a ladder rung or a user preference
+- decide the remaining open questions from architecture §13: whether the tile codec keeps a
+  role, extra parity for keyframes, frame pacing
 
 **Check:**
 - [ ] Median screen-to-screen latency **≤ 30 ms** on the reference setup.
-- [ ] Small-font text is judged sharp from the laptop at the top rung (by eye, with and without
-  4:4:4 if both are available).
+- [ ] Small-font text is judged sharp from the laptop at the top rung at 4:2:0 (by eye); the
+  4:4:4 trial is compared side by side.
 - [ ] Under a simulated 3% loss with 80 ms extra delay (as when Tailscale falls back to DERP), it
   stays usable with no long freezes.
 - [ ] Side by side with AnyDesk on the same link, it is judged at least as smooth (blind comparison

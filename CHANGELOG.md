@@ -11,6 +11,18 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-22
+
+Documentation only. Two decisions that close the open questions before M4.
+
+### Changed
+
+- **Codec library: FFmpeg**, for all platforms from the start, with a trimmed
+  build bundled in the installer.
+- **Chroma: 4:2:0 in v1** for both AV1 and H.265. A 4:4:4 mode on H.265, for
+  sharper coloured text at roughly 1.5–2× the bitrate, is noted as future work
+  to try once 4:2:0 is stable (roadmap M8).
+
 ## [0.4.3] - 2026-10-22
 
 Documentation only: the design decisions from the bandwidth discussion, after
