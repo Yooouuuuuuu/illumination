@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Controller side of a session: asks for the screen, receives video over the UDP media path,
-//! decodes it and cursor updates into the shared view state, reports loss and shown frames back
-//! to the host, and keeps the clock estimate fresh.
+//! decodes it (with whichever codec the packet header names) and cursor updates into the shared
+//! view state, reports loss and shown frames back to the host, and keeps the clock estimate
+//! fresh.
 
 use illum_core::protocol::{Channel, ControlMsg};
+use illum_media::MediaError;
 use illum_media::clock::now_us;
+use illum_media::codec::{VideoCodec, VideoDecoder};
 use illum_media::cursor::CursorMsg;
 use illum_media::packets::{Assembled, Reassembler};
-use illum_media::tiles::VideoFrame;
+use illum_media::tiles::TilesDecoder;
 use illum_net::{Connection, MediaClient, MediaStream, NetError, Sender};
 use illum_ui::Shared;
 use std::collections::HashMap;
@@ -41,6 +44,17 @@ pub struct ViewParams {
 
 fn protocol(e: impl std::fmt::Display) -> NetError {
     NetError::Protocol(e.to_string())
+}
+
+fn open_decoder(codec: VideoCodec) -> Result<Box<dyn VideoDecoder>, MediaError> {
+    Ok(match codec {
+        VideoCodec::Tiles => Box::new(TilesDecoder::default()),
+        VideoCodec::Av1 | VideoCodec::Hevc => {
+            let dec = illum_ffmpeg::FfmpegDecoder::open(codec)?;
+            tracing::info!(target: "media", "Decoding {} with {}.", codec.name(), dec.name());
+            Box::new(dec)
+        }
+    })
 }
 
 /// The UDP receive side: punches, reassembly, keyframe gating and the per-second report.
@@ -98,8 +112,10 @@ fn media_loop(
     let mut blocked_reported = false;
     let mut awaiting_keyframe = true;
     let mut expected_seq: Option<u64> = None;
-    let (mut received, mut lost, mut frames_lost) = (0u32, 0u32, 0u32);
+    let (mut received, mut lost, mut frames_lost, mut repaired) = (0u32, 0u32, 0u32, 0u32);
     let mut next_report = Instant::now() + REPORT_INTERVAL;
+    // Created for whichever codec the first frame names; replaced if the host switches.
+    let mut decoder: Option<Box<dyn VideoDecoder>> = None;
 
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
         let now = Instant::now();
@@ -135,32 +151,58 @@ fn media_loop(
             match event {
                 Assembled::Lost { seq } => {
                     frames_lost += 1;
+                    shared.lock().expect("view state lock").frames_lost += 1;
                     awaiting_keyframe = true;
                     sender.send_control(&ControlMsg::FrameLost { seq: seq as u64 });
                 }
-                Assembled::Frame { meta, data } => {
+                Assembled::Frame {
+                    meta,
+                    data,
+                    repaired: was_repaired,
+                } => {
+                    if was_repaired {
+                        repaired += 1;
+                        shared.lock().expect("view state lock").frames_repaired += 1;
+                    }
                     if awaiting_keyframe && !meta.keyframe {
                         continue; // keep showing the last good frame until the keyframe arrives
                     }
-                    let vf = match VideoFrame::from_bytes(&data) {
-                        Ok(vf) => vf,
-                        Err(e) => {
-                            tracing::warn!(target: "media", "Bad video frame: {e}");
+                    if decoder.as_ref().is_none_or(|d| d.codec() != meta.codec) {
+                        match open_decoder(meta.codec) {
+                            Ok(d) => decoder = Some(d),
+                            Err(e) => {
+                                let mut state = shared.lock().expect("view state lock");
+                                state.status =
+                                    Some(format!("cannot decode {}: {e}", meta.codec.name()));
+                                drop(state);
+                                notify();
+                                continue;
+                            }
+                        }
+                        if !meta.keyframe {
+                            // A fresh decoder has no reference; start it from a keyframe.
+                            awaiting_keyframe = true;
+                            sender.send_control(&ControlMsg::FrameLost {
+                                seq: meta.seq as u64,
+                            });
                             continue;
                         }
-                    };
-                    let mut state = shared.lock().expect("view state lock");
-                    match state.decoder.apply(&vf) {
-                        Ok(_) => {
+                    }
+                    let dec = decoder.as_mut().expect("decoder open");
+                    match dec.decode(&data, meta.keyframe) {
+                        Ok(Some(frame)) => {
                             awaiting_keyframe = false;
-                            state.latest = Some((vf.seq, vf.capture_us));
-                            state.stats.frame_received(data.len(), vf.encode_us);
+                            let mut state = shared.lock().expect("view state lock");
+                            state.frame = Some(Arc::new(frame));
+                            state.codec = Some(meta.codec);
+                            state.latest = Some((meta.seq as u64, meta.capture_us));
+                            state.stats.frame_received(data.len(), meta.encode_us);
                             drop(state);
                             notify();
                         }
+                        Ok(None) => awaiting_keyframe = false, // accepted; the picture follows
                         Err(e) => {
-                            drop(state);
-                            tracing::warn!(target: "media", "Frame {} not applied: {e}; asking for a keyframe.", meta.seq);
+                            tracing::warn!(target: "media", "Frame {} not decoded: {e}; asking for a keyframe.", meta.seq);
                             awaiting_keyframe = true;
                             sender.send_control(&ControlMsg::FrameLost {
                                 seq: meta.seq as u64,
@@ -187,15 +229,17 @@ fn media_loop(
                 .lock()
                 .expect("view state lock")
                 .stats
-                .packets(received, lost);
+                .packets(received, lost, repaired);
             sender.send_control(&ControlMsg::MediaReport {
                 received,
                 lost,
                 frames_lost,
+                repaired,
             });
             received = 0;
             lost = 0;
             frames_lost = 0;
+            repaired = 0;
         }
     }
 }

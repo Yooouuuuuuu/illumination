@@ -6,6 +6,8 @@ use illum::host::{HostConfig, SourceFactory, serve_session};
 use illum::viewer::{Notify, ViewParams, run_viewer_session};
 use illum_core::protocol::ControlMsg;
 use illum_core::store::TrustStore;
+use illum_media::codec::VideoCodec;
+use illum_media::frame::Bgra;
 use illum_media::pattern::{PATCHES, TestPattern};
 use illum_media::source::{PatternSource, ScreenSource};
 use illum_net::session::{accept, connect};
@@ -19,10 +21,14 @@ use std::time::{Duration, Instant};
 const W: u32 = 640;
 const H: u32 = 360;
 
-fn endpoint(name: &str) -> Endpoint {
+/// An endpoint with the base capabilities plus `extra` (e.g. "dec:av1" for a viewer that can
+/// decode AV1). Without extras both sides fall back to lossless tiles.
+fn endpoint_with(name: &str, extra: &[String]) -> Endpoint {
     let dir = std::env::temp_dir().join(format!("illum-m2-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let yes: Prompt = Arc::new(|_| Box::pin(async { true }));
+    let mut capabilities = illum_net::session::all_capabilities();
+    capabilities.extend_from_slice(extra);
     Endpoint {
         identity: Arc::new(Identity::generate().unwrap()),
         store: Arc::new(tokio::sync::Mutex::new(
@@ -31,8 +37,12 @@ fn endpoint(name: &str) -> Endpoint {
         device_name: name.into(),
         timeouts: Timeouts::default(),
         prompt: yes,
-        capabilities: illum_net::session::all_capabilities(),
+        capabilities,
     }
+}
+
+fn endpoint(name: &str) -> Endpoint {
+    endpoint_with(name, &[])
 }
 
 fn pattern_factory() -> SourceFactory {
@@ -41,6 +51,14 @@ fn pattern_factory() -> SourceFactory {
 
 /// Starts a host on loopback. Returns its TCP address (the UDP port is the same number).
 async fn start_host(name: &str, factory: Option<SourceFactory>) -> SocketAddr {
+    start_host_with(name, factory, Vec::new()).await
+}
+
+async fn start_host_with(
+    name: &str,
+    factory: Option<SourceFactory>,
+    codecs: Vec<VideoCodec>,
+) -> SocketAddr {
     let ep = endpoint(name);
     let mut listener = Listener::bind(&ep, &[IpAddr::V4(Ipv4Addr::LOCALHOST)], 0)
         .await
@@ -49,11 +67,12 @@ async fn start_host(name: &str, factory: Option<SourceFactory>) -> SocketAddr {
     tokio::spawn(async move {
         while let Some((tcp, peer)) = listener.next().await {
             let (ep, acceptor, factory) = (ep.clone(), listener.acceptor(), factory.clone());
-            let media = listener.media();
+            let (media, codecs) = (listener.media(), codecs.clone());
             tokio::spawn(async move {
                 if let Ok(conn) = accept(&ep, &acceptor, tcp, peer).await {
                     let config = HostConfig {
                         screen: factory,
+                        codecs,
                         ..HostConfig::default()
                     };
                     let _ = serve_session(conn, config, Duration::from_secs(30), media).await;
@@ -131,12 +150,35 @@ fn params(media_target: Option<SocketAddr>) -> ViewParams {
 
 fn check_pattern(shared: &Shared) {
     let state = shared.lock().unwrap();
-    let frame = state.decoder.frame().unwrap();
+    let frame = state.frame().unwrap();
     assert_eq!((frame.width, frame.height), (W, H));
     let pattern = TestPattern::new(W, H);
     for (i, (name, colour)) in PATCHES.iter().enumerate() {
         let (x, y) = pattern.patch_centre(i);
         assert_eq!(frame.pixel(x, y), *colour, "{name} patch arrived wrong");
+    }
+}
+
+/// Colour difference in RGB space (0–441); lossy 4:2:0 codecs land within a few units on the
+/// flat patches.
+fn distance(a: Bgra, b: Bgra) -> f64 {
+    let d = |x: u8, y: u8| (x as f64 - y as f64).powi(2);
+    (d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b)).sqrt()
+}
+
+fn check_pattern_lossy(shared: &Shared) {
+    let state = shared.lock().unwrap();
+    let frame = state.frame().unwrap();
+    assert_eq!((frame.width, frame.height), (W, H));
+    let pattern = TestPattern::new(W, H);
+    for (i, (name, colour)) in PATCHES.iter().enumerate() {
+        let (x, y) = pattern.patch_centre(i);
+        let got = frame.pixel(x, y);
+        assert!(
+            distance(got, *colour) < 12.0,
+            "{name} patch arrived as {got:?} via {:?}",
+            state.codec
+        );
     }
 }
 
@@ -190,10 +232,10 @@ async fn test_pattern_arrives_bit_exact_over_udp() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn one_percent_loss_still_shows_the_pattern() {
-    // Without parity (v0.5.1), a frame is lost whenever any of its datagrams is: at 1% loss a
-    // 30-packet keyframe still gets through ~74% of the time and the keyframe request heals the
-    // picture. At 10% that drops to ~4%, which is the case FEC is for.
+async fn one_percent_loss_is_repaired_by_parity() {
+    // With the 5 % parity floor a 30-packet keyframe carries 2 parity packets: at 1 % loss it
+    // survives ~99.7 % of the time, rebuilt instead of lost. Whatever still slips through is
+    // healed by a keyframe request. (At 10 % loss the FEC controller of M5 has to raise parity.)
     let addr = start_host("host-b", Some(pattern_factory())).await;
     let (relay, dropped) = lossy_relay(addr, 10);
     let conn = connect(&endpoint("ctl-b"), &addr.to_string())
@@ -208,8 +250,7 @@ async fn one_percent_loss_still_shows_the_pattern() {
         Arc::new(|| {}),
     ));
 
-    // Wait until the relay has really dropped datagrams, then prove the stream keeps going:
-    // lost frames trigger a keyframe request and the picture recovers.
+    // Wait until the relay has really dropped datagrams, then prove the stream keeps going.
     let d = dropped.clone();
     wait_for(
         &shared,
@@ -223,13 +264,90 @@ async fn one_percent_loss_still_shows_the_pattern() {
     })
     .await;
     check_pattern(&shared);
+    let (repaired, lost, status) = {
+        let s = shared.lock().unwrap();
+        (s.frames_repaired, s.frames_lost, s.status.clone())
+    };
+    assert!(status.is_none(), "loss is not an error");
     assert!(
-        shared.lock().unwrap().status.is_none(),
-        "loss is not an error"
+        repaired > 0,
+        "parity rebuilt no frame ({lost} lost); FEC is not working end to end"
+    );
+    assert!(
+        repaired >= lost,
+        "parity should repair more frames than are lost at 1 % ({repaired} repaired, {lost} lost)"
     );
 
     sender.send_control(&ControlMsg::Bye);
     let _ = tokio::time::timeout(Duration::from_secs(5), session).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lossy_codec_is_chosen_and_keeps_colours() {
+    // Host advertises what FFmpeg can encode here, the viewer what it can decode; the host picks
+    // AV1, else H.265 (§5.3). Skipped on a machine with no encoder at all.
+    let probe = illum_ffmpeg::probe();
+    let mut codecs: Vec<VideoCodec> = probe.encoders.iter().map(|e| e.codec).collect();
+    codecs.dedup();
+    if codecs.is_empty() {
+        eprintln!("no AV1/H.265 encoder on this machine; skipping");
+        return;
+    }
+    let expected = codecs[0];
+    let addr = start_host_with("host-e", Some(pattern_factory()), codecs).await;
+    let decodes: Vec<String> = probe
+        .capabilities()
+        .into_iter()
+        .filter(|c| c.starts_with("dec:"))
+        .collect();
+    let conn = connect(&endpoint_with("ctl-e", &decodes), &addr.to_string())
+        .await
+        .unwrap();
+    let sender = conn.sender();
+    let shared: Shared = Arc::default();
+    let session = tokio::spawn(run_viewer_session(
+        conn,
+        params(None),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&shared, "30 frames", |s| {
+        s.latest.is_some_and(|(seq, _)| seq >= 30)
+    })
+    .await;
+    assert_eq!(shared.lock().unwrap().codec, Some(expected));
+    check_pattern_lossy(&shared);
+    assert!(shared.lock().unwrap().status.is_none(), "no error status");
+
+    sender.send_control(&ControlMsg::Bye);
+    let _ = tokio::time::timeout(Duration::from_secs(5), session).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn viewer_without_decoders_gets_tiles() {
+    // A host that could send H.265 to a viewer that never said "dec:hevc" sends tiles.
+    let addr = start_host_with(
+        "host-f",
+        Some(pattern_factory()),
+        vec![VideoCodec::Av1, VideoCodec::Hevc],
+    )
+    .await;
+    let conn = connect(&endpoint("ctl-f"), &addr.to_string())
+        .await
+        .unwrap();
+    let shared: Shared = Arc::default();
+    let _session = tokio::spawn(run_viewer_session(
+        conn,
+        params(None),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&shared, "10 frames", |s| {
+        s.latest.is_some_and(|(seq, _)| seq >= 10)
+    })
+    .await;
+    assert_eq!(shared.lock().unwrap().codec, Some(VideoCodec::Tiles));
+    check_pattern(&shared);
 }
 
 #[tokio::test(flavor = "multi_thread")]

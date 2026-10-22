@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
@@ -121,6 +121,8 @@ pub enum ControlMsg {
         received: u32,
         lost: u32,
         frames_lost: u32,
+        /// Frames that arrived incomplete and were rebuilt from parity.
+        repaired: u32,
     },
     /// Controller → host: stop streaming.
     ScreenStop,
@@ -200,6 +202,7 @@ mod tests {
                 received: 100,
                 lost: 2,
                 frames_lost: 1,
+                repaired: 3,
             },
             ControlMsg::ScreenStop,
             ControlMsg::ScreenError {

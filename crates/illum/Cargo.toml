@@ -18,6 +18,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 illum-core.workspace = true
+illum-ffmpeg.workspace = true
 illum-net.workspace = true
 illum-media.workspace = true
 illum-ui.workspace = true

@@ -4,8 +4,9 @@
 //!
 //! Three threads per streaming session:
 //! - **capture** polls the screen source and keeps only the newest frame ("latest frame wins");
-//! - **media sender** encodes that frame, splits it into datagrams and sends them over the UDP
-//!   path at the bitrate target, paced by a token bucket (architecture §5.5); it never resends;
+//! - **media sender** encodes that frame (AV1 or H.265 through FFmpeg when both sides can,
+//!   lossless tiles otherwise, §5.3), splits it into datagrams with parity (§5.6) and sends them
+//!   over the UDP path at the bitrate target, paced by a token bucket (§5.5); it never resends;
 //! - **media in** learns the viewer's UDP address from its punch datagrams.
 //!
 //! An input thread applies the input rules in [`crate::input`] for the display being shown,
@@ -15,11 +16,13 @@ use crate::input::InputState;
 use illum_core::input::{InputEvent, InputSink};
 use illum_core::protocol::{Channel, ControlMsg};
 use illum_media::clock::now_us;
+use illum_media::codec::{VideoCodec, VideoEncoder, choose_codec};
 use illum_media::cursor::CursorMsg;
+use illum_media::fec;
 use illum_media::pacer::TokenBucket;
-use illum_media::packets::{Codec, FrameMeta, packetize};
+use illum_media::packets::{FrameMeta, packetize};
 use illum_media::source::{ScreenSource, SourceEvent};
-use illum_media::tiles::TileEncoder;
+use illum_media::tiles::TilesEncoder;
 use illum_media::{Frame, MediaError};
 use illum_net::media::{HEADER_LEN, MAX_PAYLOAD, TAG_LEN};
 use illum_net::{Connection, MediaHub, MediaKeys, MediaStream, NetError, Sender};
@@ -40,6 +43,14 @@ const PUNCH_DEADLINE: Duration = Duration::from_secs(5);
 const PACER_BURST: Duration = Duration::from_millis(50);
 /// A viewer's keyframe request is honoured at most this often.
 const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
+/// Parity per block, as a percentage of data packets (§5.6). The floor of the 5–30 % range; the
+/// FEC controller that raises it under loss is M5.
+pub const FEC_PERCENT: u32 = 5;
+/// Nominal frame rate the encoders are opened with (the capture rate is whatever the screen
+/// gives; this only sets the codec's time base).
+const ENCODER_FPS: u32 = 60;
+/// Share of the bitrate cap given to the encoder; the rest covers packet headers and parity.
+const ENCODER_SHARE_PERCENT: u64 = 85;
 
 /// Creates the screen source for a display index, inside the capture thread.
 pub type SourceFactory =
@@ -57,6 +68,43 @@ pub struct HostConfig {
     pub screen: Option<SourceFactory>,
     pub input: Option<InputFactory>,
     pub layout: Option<LayoutFn>,
+    /// Lossy codecs this host can encode (from the FFmpeg probe). Empty means tiles only.
+    pub codecs: Vec<VideoCodec>,
+}
+
+impl HostConfig {
+    /// The codec for a viewer with these hello capabilities (§5.3: AV1, else H.265, else tiles).
+    pub fn codec_for(&self, viewer_caps: &[String]) -> VideoCodec {
+        let ours: Vec<String> = self
+            .codecs
+            .iter()
+            .map(|c| c.encode_capability().to_string())
+            .collect();
+        choose_codec(&ours, viewer_caps)
+    }
+}
+
+/// Opens the encoder for `codec` at this frame size; a lossy codec that fails to open falls back
+/// to tiles so the session still works (the packet header tells the viewer which it got).
+fn open_encoder(
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    bitrate_bps: u64,
+) -> Box<dyn VideoEncoder> {
+    if codec != VideoCodec::Tiles {
+        let bitrate = bitrate_bps * ENCODER_SHARE_PERCENT / 100;
+        match illum_ffmpeg::FfmpegEncoder::open(codec, width, height, ENCODER_FPS, bitrate) {
+            Ok(enc) => {
+                tracing::info!(target: "media", "Encoding {width}x{height} with {} ({}).", codec.name(), enc.name());
+                return Box::new(enc);
+            }
+            Err(e) => {
+                tracing::warn!(target: "media", "{} encoder failed to open ({e}); using tiles.", codec.name());
+            }
+        }
+    }
+    Box::new(TilesEncoder::default())
 }
 
 const INPUT_TICK: Duration = Duration::from_millis(10);
@@ -228,6 +276,7 @@ impl MediaLink {
         keys: MediaKeys,
         socket: Arc<UdpSocket>,
         latest: Arc<LatestFrame>,
+        codec: VideoCodec,
         bitrate_bps: u64,
         sender: Sender,
     ) -> MediaLink {
@@ -282,10 +331,14 @@ impl MediaLink {
                         }
                         std::thread::sleep(Duration::from_millis(20));
                     };
-                    tracing::info!(target: "media", "Streaming to {peer_addr} at {} kb/s.", bitrate_bps / 1000);
+                    tracing::info!(target: "media", "Streaming to {peer_addr} with {} at {} kb/s.", codec.name(), bitrate_bps / 1000);
 
                     let mut bucket = TokenBucket::new(bitrate_bps, PACER_BURST, Instant::now());
-                    let mut encoder = TileEncoder::new();
+                    let mut fec = fec::Codec::new();
+                    // Opened on the first frame, when the size is known; reopened on resize.
+                    let mut encoder: Option<Box<dyn VideoEncoder>> = None;
+                    let mut encoder_size = (0u32, 0u32);
+                    let mut force_keyframe = false;
                     let mut seq: u32 = 0;
                     let mut last_keyframe: Option<Instant> = None;
                     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
@@ -295,25 +348,51 @@ impl MediaLink {
                         if want_keyframe.swap(false, Ordering::SeqCst)
                             && last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_MIN_INTERVAL)
                         {
-                            encoder.reset();
+                            force_keyframe = true;
                         }
-                        let Some(vf) = encoder.encode(&frame, seq as u64, captured_us) else {
-                            continue;
+                        if encoder.is_none() || encoder_size != (frame.width, frame.height) {
+                            encoder = Some(open_encoder(codec, frame.width, frame.height, bitrate_bps));
+                            encoder_size = (frame.width, frame.height);
+                            force_keyframe = true;
+                        }
+                        let enc = encoder.as_mut().expect("encoder open");
+                        let encoded = match enc.encode(&frame, force_keyframe) {
+                            Ok(Some(e)) => e,
+                            Ok(None) => continue, // nothing changed (tiles)
+                            Err(e) if enc.codec() != VideoCodec::Tiles => {
+                                tracing::warn!(target: "media", "{} encode failed ({e}); switching to tiles.", enc.codec().name());
+                                encoder = Some(Box::new(TilesEncoder::default()));
+                                force_keyframe = true;
+                                continue;
+                            }
+                            Err(e) => {
+                                sender.send_control(&ControlMsg::ScreenError {
+                                    reason: format!("encoding failed: {e}"),
+                                });
+                                return;
+                            }
                         };
-                        if vf.keyframe {
+                        force_keyframe = false;
+                        if encoded.keyframe {
                             last_keyframe = Some(Instant::now());
                         }
                         let meta = FrameMeta {
-                            codec: Codec::Tiles,
-                            keyframe: vf.keyframe,
+                            codec: enc.codec(),
+                            keyframe: encoded.keyframe,
                             seq,
                             capture_us: captured_us,
-                            encode_us: vf.encode_us,
+                            encode_us: encoded.encode_us,
                         };
-                        let bytes = vf.to_bytes();
+                        let packets = match packetize(meta, &encoded.data, MAX_PAYLOAD, FEC_PERCENT, &mut fec) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!(target: "media", "Frame {seq} not sent: {e}");
+                                continue;
+                            }
+                        };
                         // The viewer may move between NATs; always send to the latest address.
                         let to = peer.lock().expect("peer lock").unwrap_or(peer_addr);
-                        for payload in packetize(meta, &bytes, MAX_PAYLOAD) {
+                        for payload in packets {
                             let wait = bucket.take(payload.len() + HEADER_LEN + TAG_LEN, Instant::now());
                             if !wait.is_zero() {
                                 std::thread::sleep(wait);
@@ -407,7 +486,13 @@ pub async fn serve_session(
                         } else {
                             max_bitrate_kbps.min(DEFAULT_MAX_BITRATE_KBPS)
                         };
-                        tracing::info!(target: "session", "Streaming display {index} (cap {kbps} kb/s).");
+                        let viewer_caps = conn
+                            .peer_hello
+                            .as_ref()
+                            .map(|h| h.capabilities.clone())
+                            .unwrap_or_default();
+                        let codec = config.codec_for(&viewer_caps);
+                        tracing::info!(target: "session", "Streaming display {index} with {} (cap {kbps} kb/s).", codec.name());
                         let latest = Arc::new(LatestFrame::default());
                         capture = Some(Capture::start(
                             f.clone(),
@@ -421,6 +506,7 @@ pub async fn serve_session(
                             keys,
                             socket,
                             latest,
+                            codec,
                             u64::from(kbps) * 1000,
                             conn.sender(),
                         ));
@@ -461,8 +547,9 @@ pub async fn serve_session(
                 received,
                 lost,
                 frames_lost,
+                repaired,
             } => {
-                tracing::debug!(target: "media", "Viewer report: {received} datagrams, {lost} lost, {frames_lost} frames lost.");
+                tracing::debug!(target: "media", "Viewer report: {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired.");
             }
             ControlMsg::VideoAck { .. } => {}
             ControlMsg::Bye => break Ok(()),

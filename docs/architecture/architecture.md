@@ -219,12 +219,35 @@ our code.
 hardware) and lossless tiles for motion (far too much data; see §4.4).
 
 **The lossless tile codec from v0.3.0** (`illum_media::tiles`: 64×64 tiles, LZ4, bit-exact) is
-what current builds stream. Whether it keeps a role once the video codec lands is an open
-question (§13). Ideas that were discussed and **not** adopted, so nobody re-proposes them by
-accident: switching between tiles and video per frame, "refinement" passes after motion, ordering
-or protecting parts of a frame by a neighbourhood score, and sending the smallest parts of a
-frame first. A high-quality still frame after the screen stops changing is parked as a future
-idea.
+the fallback when the two sides share no lossy codec, and the codec of the bit-exact tests.
+Whether it keeps any other role is an open question (§13). Ideas that were discussed and **not**
+adopted, so nobody re-proposes them by accident: switching between tiles and video per frame,
+"refinement" passes after motion, ordering or protecting parts of a frame by a neighbourhood
+score, and sending the smallest parts of a frame first. A high-quality still frame after the
+screen stops changing is parked as a future idea.
+
+**Implemented in v0.5.1** (`illum-ffmpeg`, bindings `ffmpeg-the-third`, prebuilt FFmpeg from
+BtbN fetched by `scripts/get-ffmpeg.ps1`):
+- At start the host **probes** FFmpeg's encoders by opening each once at a small size, so a
+  hardware encoder for a GPU that isn't there drops out; candidates in order: `av1_nvenc`,
+  `av1_amf`, `av1_qsv`, `libsvtav1`; `hevc_nvenc`, `hevc_amf`, `hevc_qsv`, `libx265`. Decoders:
+  `libdav1d` for AV1, FFmpeg's `hevc`. The result becomes hello capabilities `enc:av1`,
+  `enc:hevc`, `dec:av1`, `dec:hevc`; the host picks per the rule above (`choose_codec`).
+  `illum codecs` prints the probe with FFmpeg's reasons for each encoder that would not open.
+- Encoder settings are all about delay: no B-frames, no lookahead, one thread, a 100 ms
+  rate-control buffer, `LOW_DELAY`, keyframes only on request (`forced-idr`), NVENC preset p4 /
+  tune ll / CBR. The encoder gets 85 % of the bitrate cap; packet headers and parity take the
+  rest. It is opened at the first frame's size and reopened on a resolution change.
+- Decoders run with slice threading only (frame threading would hold pictures back) and
+  dav1d's `max_frame_delay=1`, so every packet yields its picture at once. The decoded picture
+  is converted to BGRA with swscale; a GPU presentation path is M8.
+- The packet header names the codec per frame, so the viewer opens the matching decoder when
+  the first frame arrives and would follow a mid-session fallback to tiles (an encoder that
+  fails to open or to encode is replaced by tiles rather than ending the session).
+- **FFmpeg 8.1, not 9.0:** 9.0's NVENC demands NVIDIA driver 610+ (API 13.1) and silently falls
+  back to software on anything older; 8.1 needs 570+.
+- A reference-invalidation request (§5.6) is served with a **keyframe** for now: FFmpeg exposes
+  no "predict from frame N" control for NVENC/AMF/QSV; that needs the vendor SDKs (§13).
 
 ### 5.4 Presentation and the cursor
 - The cursor shape and position are sent **separately** from the video and drawn locally by the
@@ -351,6 +374,19 @@ frame the viewer does have. No old data is resent, the viewer never waits (it ke
 last good frame), and the picture heals within one round trip. AV1 and H.265 both support this,
 and it is what Sunshine does. Extra parity for keyframes (which are larger and costlier to lose)
 is a v2 refinement.
+
+**Implemented in v0.5.1** (`illum_media::fec`, `illum_media::packets`): Reed–Solomon over
+GF(2⁸) (`reed-solomon-erasure`). A frame's packets are grouped into **blocks of at most 128
+data packets**, each with its own parity (the field allows 255 shards per block; a 2 MB tile
+keyframe is ~1800 packets, so one block per frame was not an option). Parity per block is
+`ceil(k × percent / 100)`, at least 1 when the percentage is non-zero, so a 2-packet frame at 5 %
+still gets one parity packet. Data packets stay variable-length on the wire; parity is computed
+over the padded, length-prefixed form, whose length the header carries. The packet header (30
+bytes) names codec, keyframe flag, frame sequence, block index and count, shard index, k, m,
+shard length, capture time and encode time, so any single packet identifies its frame and block.
+The viewer rebuilds a block as soon as any k of its k + m shards are in and reports frames it
+had to repair (`MediaReport.repaired`, "N repaired" in the title). Parity is fixed at the
+**5 % floor**; the controller above is M5. Reference invalidation is a keyframe for now (§5.3).
 
 ### 5.7 Testing the numbers
 Every number above is a starting value. We control the UDP path, so the test suite inserts a
@@ -552,7 +588,8 @@ logs `Migrating V0 -> V1`).
 | `illum` | The binary: role dispatch, session glue, host input rules (exists) |
 | `illum-core` | Roles, protocol messages, capabilities, input messages, trust store (exists) |
 | `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel framing (exists, M1); next: the UDP media path with TLS-exported keys |
-| `illum-media` | Pixel format, tile codec, colour test pattern, cursor shapes, scaling, clock sync (exists, M2); next: codec interfaces, FEC, the two controllers, the simulated link |
+| `illum-media` | Pixel format, codec interfaces, tile codec, packetisation and parity FEC, pacer, colour test pattern, cursor shapes, scaling, clock sync (exists, M2–M4); next: the two controllers, the simulated link |
+| `illum-ffmpeg` | AV1 / H.265 encode and decode through FFmpeg: the probe, low-delay encoder settings, BGRA conversion (exists, v0.5.1); later Opus |
 | `illum-win` | Windows: DDA capture, input injection, system-key hook (exists); later service, process spawning into sessions, desktop switching, clipboard, power |
 | `illum-ui` | Viewer window and controller-side input (exists); later device list and accept panel |
 
@@ -560,7 +597,11 @@ Crates are added only when a milestone needs them.
 
 ## 13. Open questions
 
-- **Lossless tiles:** whether the v0.3.0 tile codec keeps any role once the video codec lands.
+- **Lossless tiles:** whether the v0.3.0 tile codec keeps any role beyond fallback and tests.
+- **True reference invalidation:** FFmpeg gives no per-frame reference control for the hardware
+  encoders, so a broken frame costs a keyframe (§5.3). Worth the vendor SDKs (NVENC's
+  `NV_ENC_PIC_PARAMS` invalidation list, AMF, QSV) only if keyframes on loss show up as visible
+  stalls in the M5 harness.
 - **UI toolkit** for the window and the viewer surface.
 - Exact threshold for "network stall → release all keys".
 - Parked ideas (not planned, kept so they aren't lost): a **4:4:4 mode** on H.265 for sharper

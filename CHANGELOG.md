@@ -11,6 +11,56 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-22
+
+Milestone M4, second slice: the video codec and parity FEC. Lossless tiles
+remain only as the fallback.
+
+### Added
+
+- **AV1 / H.265 video through FFmpeg** (new crate `illum-ffmpeg`, FFmpeg 8.1
+  prebuilt, fetched once by `scripts/get-ffmpeg.ps1`; `scripts/get-libclang.ps1`
+  fetches what the bindings need to build). At start each side probes which
+  encoders actually open here (NVENC, AMF, QSV, then software) and lists them
+  in its hello as `enc:av1`, `enc:hevc`, `dec:av1`, `dec:hevc`. The host picks
+  **AV1 if it can encode it and the viewer decode it, otherwise H.265,
+  otherwise tiles**; the choice is per direction, 4:2:0, and shown in the
+  title bar and the log. Encoders run with no B-frames, no lookahead and a
+  100 ms rate buffer; decoders with slice threading only, so a packet yields
+  its picture at once.
+- **Parity FEC.** Every frame's packets carry Reed–Solomon parity (blocks of
+  ≤ 128 packets, **5 %** of each block, at least one packet), so the viewer
+  rebuilds lost packets without waiting or a round trip. Repaired frames are
+  counted (`MediaReport.repaired`, "N repaired" in the title). The 5–30 %
+  controller is M5.
+- `illum codecs`: what this machine can encode and decode, with FFmpeg's
+  reason for each hardware encoder that would not open.
+
+### Changed
+
+- Protocol version 5: a new packet header (codec id, block and shard fields,
+  30 bytes) and the `repaired` field in the loss report.
+- Reference invalidation is served with a **keyframe** for now: FFmpeg gives
+  no per-frame reference control for the hardware encoders (architecture §13).
+- FFmpeg 8.1 rather than 9.0, whose NVENC needs NVIDIA driver 610+ and would
+  otherwise fall back to software unnoticed; 8.1 needs 570+.
+- `illum-ffmpeg`'s build copies the FFmpeg DLLs next to every executable that
+  links it (so tests run too).
+
+### Verified
+
+- `cargo test`: 104 tests pass. New: Reed–Solomon parity and rebuild;
+  block-based packetisation with repair, out-of-order and stalled frames;
+  the tile codec behind the common codec interface; AV1 and H.265 round trips
+  of the colour pattern through the real encoders (`av1_nvenc`, `hevc_nvenc`
+  on this PC) and decoders, every patch within a colour distance of 12;
+  end to end over loopback UDP: the host picks AV1 for a viewer that
+  advertises `dec:av1`, colours survive; a viewer without decoders gets
+  tiles, bit-exact; through a 1 % lossy relay frames are **repaired by
+  parity** (more repaired than lost) and the pattern stays intact.
+  `cargo clippy` is clean.
+- Not yet run live between this PC and the laptop.
+
 ## [0.5.0] - 2026-10-22
 
 Milestone M4, first slice: the media transport. Video now travels over UDP

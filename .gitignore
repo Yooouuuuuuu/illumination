@@ -2,3 +2,4 @@
 *.pdb
 .vscode/
 .idea/
+/third_party/

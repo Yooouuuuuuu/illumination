@@ -1,0 +1,5 @@
+# Where the FFmpeg bindings find headers and import libraries (scripts/get-ffmpeg.ps1), and
+# where bindgen finds libclang to generate them (scripts/get-libclang.ps1).
+[env]
+FFMPEG_DIR = { value = "third_party/ffmpeg", relative = true }
+LIBCLANG_PATH = { value = "third_party/llvm/bin", relative = true }

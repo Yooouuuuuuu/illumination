@@ -3,7 +3,9 @@
 //! pattern, cursor shapes and scaling for display. Platform-independent.
 
 pub mod clock;
+pub mod codec;
 pub mod cursor;
+pub mod fec;
 pub mod frame;
 pub mod pacer;
 pub mod packets;

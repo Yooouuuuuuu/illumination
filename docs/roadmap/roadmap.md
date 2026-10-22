@@ -132,12 +132,15 @@ Architecture §4.4, §5.3, §5.6, §8.
 - audio: Opus 80 kb/s, 5 ms frames, 4+2 parity groups, ~40 ms viewer buffer; "send audio: off"
 - a fixed bitrate target for now (the ladder's top rung), so M4 can be judged on its own
 
-**Status:** two slices. **v0.5.0** shipped the UDP media path, keys exported from TLS, port
+**Status:** three slices. **v0.5.0** shipped the UDP media path, keys exported from TLS, port
 28326, packetisation, pacing, keyframe-on-loss and the loss report, still carrying the tile
-codec. **v0.5.1** is the codec, parity FEC and reference invalidation; audio follows as v0.5.2.
+codec. **v0.5.1** shipped the codec (AV1 / H.265 through FFmpeg 8.1, chosen per direction from
+the hello, tiles as fallback) and parity FEC at the 5 % floor; a broken frame is answered with a
+keyframe because FFmpeg exposes no reference-invalidation control for the hardware encoders
+(architecture §13). Audio follows as **v0.5.2**.
 Measured in v0.5.0 on this PC over its Tailscale address: test pattern 59 fps, 9 ms, 0% loss;
 real screen at a 6 Mb/s cap paced to ~6 Mb/s with RTT flat (no queue) but only 2–4 fps, because
-lossless tiles of a full-screen change are ~2 MB per frame.
+lossless tiles of a full-screen change are ~2 MB per frame. v0.5.1 is not yet measured live.
 
 **Check:**
 - [ ] This PC → laptop streams **AV1**, laptop → this PC streams **H.265**, both in hardware;
@@ -147,8 +150,8 @@ lossless tiles of a full-screen change are ~2 MB per frame.
 - [ ] At a fixed 6 Mb/s from the laptop, a 1080p60 desktop with scrolling stays at 60 fps with no
   queue build-up: RTT during the stream within 5 ms of `tailscale ping` idle.
 - [ ] With 3% simulated random loss, no visible broken frames (parity repairs them) and the
-  log shows zero reference-invalidation requests; at 10% loss, the picture heals within one round
-  trip after each broken frame.
+  log shows zero keyframe requests; at 10% loss, the picture heals within one round trip after
+  each broken frame (with a keyframe until true reference invalidation exists).
 - [ ] Audio plays with no gaps at 3% loss; "send audio: off" sends zero audio packets.
 
 ## M5: Adaptation and the simulated-link harness

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/illum", "crates/illum-core", "crates/illum-media", "crates/illum-net", "crates/illum-ui", "crates/illum-win"]
+members = ["crates/illum", "crates/illum-core", "crates/illum-ffmpeg", "crates/illum-media", "crates/illum-net", "crates/illum-ui", "crates/illum-win"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/Yooouuuuuuu/illumination"
@@ -15,3 +15,4 @@ illum-net = { path = "crates/illum-net" }
 illum-media = { path = "crates/illum-media" }
 illum-win = { path = "crates/illum-win" }
 illum-ui = { path = "crates/illum-ui" }
+illum-ffmpeg = { path = "crates/illum-ffmpeg" }

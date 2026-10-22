@@ -9,20 +9,26 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 - **Written in Rust.**
 - **Free:** GPL-3.0-only.
 
-> Status: milestone M3. You can see and control another machine (keyboard, mouse, IME text).
-> It still runs from a console, not yet as a Windows service. See
+> Status: milestone M4 in progress. You can see and control another machine (keyboard, mouse,
+> IME text) with AV1 / H.265 video over UDP. It still runs from a console, not yet as a Windows
+> service. See
 > [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
 
 ## Try it (console)
 
-Build on each machine (needs [Rust](https://rustup.rs)):
+Build on each machine (needs [Rust](https://rustup.rs) and, once, two downloads: a prebuilt
+FFmpeg for the AV1 / H.265 codecs and libclang for generating its bindings; the second script
+needs [7-Zip](https://www.7-zip.org) at its default location):
 ```powershell
 git clone https://github.com/Yooouuuuuuu/illumination
 cd illumination
+powershell -ExecutionPolicy Bypass -File scripts\get-ffmpeg.ps1
+powershell -ExecutionPolicy Bypass -File scripts\get-libclang.ps1
 cargo build --release
 cd target\release
 ```
-PowerShell only runs programs from the current folder with `.\` in front, hence `.\illum.exe`.
+The build copies FFmpeg's DLLs next to `illum.exe`. PowerShell only runs programs from the
+current folder with `.\` in front, hence `.\illum.exe`.
 
 On the machine to be reached (the host):
 ```powershell
@@ -37,9 +43,13 @@ that you connect without prompts, and a changed key is refused. The window title
 rate, bandwidth, latency and packet loss.
 
 Control and input travel over TLS on TCP; video travels over **UDP on the same port number**
-and is never resent. `--max-bitrate 6` (Mb/s) caps the video rate; the default is 20. Until the
-hardware codec lands (v0.5.1) the picture is lossless tiles, which is sharp but heavy when the
-whole screen changes, so a low cap means a low frame rate.
+and is never resent; 5 % parity lets the viewer rebuild lost packets. `--max-bitrate 6` (Mb/s)
+caps the video rate; the default is 20.
+
+**Codec:** AV1 if the host can encode it and the viewer decode it, otherwise H.265, otherwise
+lossless tiles (sharp, but heavy when the whole screen changes). The title bar names the one in
+use. `illum codecs` shows what this machine can do and why a hardware encoder was skipped; the
+NVIDIA encoders need driver **570 or newer**.
 
 You may need to allow `illum.exe` through Windows Firewall on the host; one answer covers TCP
 and UDP.
@@ -67,6 +77,7 @@ illum --backend        # per-session worker, started by the service (later miles
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only, --max-bitrate Mb/s)
 illum displays         # list this machine's displays
+illum codecs           # which video codecs this machine can encode and decode
 illum connect <host>   # dial a host and measure round-trip time
 illum fingerprint      # show this device's key fingerprint
 illum list             # pinned hosts and paired devices

@@ -1,0 +1,15 @@
+[package]
+name = "illum-ffmpeg"
+description = "Video encoding and decoding for Illumination through FFmpeg (AV1 / H.265, hardware where available)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+illum-media.workspace = true
+ffmpeg-the-third = "6.0"
+libc = "0.2"
+thiserror = "2"
+tracing = "0.1"

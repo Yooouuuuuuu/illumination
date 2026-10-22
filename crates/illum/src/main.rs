@@ -107,6 +107,8 @@ enum Command {
     },
     /// List this machine's displays.
     Displays,
+    /// Show which video codecs this machine can encode and decode (AV1, H.265).
+    Codecs,
     /// Show this device's key fingerprint.
     Fingerprint,
     /// List pinned hosts and paired devices.
@@ -222,6 +224,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
         (Role::Frontend, Some(Command::View { .. })) => unreachable!("handled in main"),
         (Role::Frontend, Some(Command::Displays)) => list_displays(),
+        (Role::Frontend, Some(Command::Codecs)) => {
+            list_codecs();
+            Ok(())
+        }
         (Role::Frontend, Some(Command::Fingerprint)) => {
             let ep = endpoint(&home)?;
             println!("{}", ep.identity.fingerprint);
@@ -298,10 +304,37 @@ fn host_config(test_pattern: bool) -> HostConfig {
     };
     #[cfg(not(windows))]
     let (input, layout) = (None, None);
+    let mut codecs: Vec<_> = illum_ffmpeg::probe()
+        .encoders
+        .iter()
+        .map(|e| e.codec)
+        .collect();
+    codecs.dedup();
     HostConfig {
         screen: Some(source_factory(test_pattern)),
         input,
         layout,
+        codecs,
+    }
+}
+
+/// What the FFmpeg probe found on this machine, with FFmpeg's own reasons for each encoder it
+/// could not open (e.g. an NVIDIA driver too old for this build's NVENC).
+fn list_codecs() {
+    illum_ffmpeg::set_verbose(true);
+    let p = illum_ffmpeg::probe();
+    illum_ffmpeg::set_verbose(false);
+    println!("Encoders (best first per codec):");
+    if p.encoders.is_empty() {
+        println!("  none — the screen will be sent as lossless tiles");
+    }
+    for e in &p.encoders {
+        let kind = if e.hardware { "hardware" } else { "software" };
+        println!("  {:<6} {:<12} {kind}", e.codec.name(), e.name);
+    }
+    println!("Decoders:");
+    for (codec, name) in &p.decoders {
+        println!("  {:<6} {name}", codec.name());
     }
 }
 
@@ -354,6 +387,8 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
         "input" => config.input.is_some(),
         _ => true,
     });
+    // "enc:av1" etc.: the viewer's hello says what it decodes, ours what we encode (§5.3).
+    ep.capabilities.extend(illum_ffmpeg::probe().capabilities());
     let addrs = if bind_to.is_empty() {
         bind::tailscale_addresses()
     } else {
@@ -419,8 +454,15 @@ fn run_view(
     target: &str,
     args: ViewArgs,
 ) -> Result<()> {
-    let ep = endpoint(home)?;
+    let mut ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
+    // Tell the host which lossy codecs we can decode; it picks AV1, else H.265, else tiles.
+    ep.capabilities.extend(
+        illum_ffmpeg::probe()
+            .capabilities()
+            .into_iter()
+            .filter(|c| c.starts_with("dec:")),
+    );
     println!("Connecting to {}…", normalize_target(target));
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));

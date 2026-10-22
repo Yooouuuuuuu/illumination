@@ -11,10 +11,11 @@ pub mod input;
 pub use input::{InputOut, KeyboardMode};
 
 use illum_core::input::{InputMsg, Key, MouseButton};
+use illum_media::Frame;
 use illum_media::clock::{ClockSync, now_us};
+use illum_media::codec::VideoCodec;
 use illum_media::cursor::{CursorPosition, CursorShape};
 use illum_media::scale::{Placement, ViewMode, blit_fit, blit_original, draw_cursor};
-use illum_media::tiles::TileDecoder;
 use input::{KeyPress, Modifiers, key_from_scancode, translate_key};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
@@ -38,6 +39,7 @@ pub struct Stats {
     latencies_ms: Vec<f64>,
     datagrams: u64,
     lost: u64,
+    repaired: u64,
     pub summary: String,
 }
 
@@ -51,6 +53,7 @@ impl Default for Stats {
             latencies_ms: Vec::new(),
             datagrams: 0,
             lost: 0,
+            repaired: 0,
             summary: "waiting for the first frame…".into(),
         }
     }
@@ -62,10 +65,12 @@ impl Stats {
         self.encode_us += encode_us as u64;
     }
 
-    /// Datagrams received and lost (before any repair) since the last call.
-    pub fn packets(&mut self, received: u32, lost: u32) {
+    /// Datagrams received and lost (before any repair), and frames rebuilt from parity, since
+    /// the last call.
+    pub fn packets(&mut self, received: u32, lost: u32, repaired: u32) {
         self.datagrams += u64::from(received);
         self.lost += u64::from(lost);
+        self.repaired += u64::from(repaired);
     }
 
     fn presented(&mut self, latency_ms: Option<f64>) {
@@ -105,6 +110,9 @@ impl Stats {
             let pct = self.lost as f64 * 100.0 / (self.datagrams + self.lost) as f64;
             parts.push(format!("loss {pct:.1}%"));
         }
+        if self.repaired > 0 {
+            parts.push(format!("{} repaired", self.repaired));
+        }
         self.summary = parts.join(" · ");
         *self = Stats {
             summary: std::mem::take(&mut self.summary),
@@ -117,9 +125,15 @@ impl Stats {
 /// Everything the network side and the window share.
 #[derive(Default)]
 pub struct ViewState {
-    pub decoder: TileDecoder,
+    /// The newest decoded picture.
+    pub frame: Option<Arc<Frame>>,
+    /// The codec the host is sending (shown in the title).
+    pub codec: Option<VideoCodec>,
     /// Sequence number and host capture time of the newest decoded frame.
     pub latest: Option<(u64, u64)>,
+    /// Session totals: frames rebuilt from parity, and frames that could not be assembled.
+    pub frames_repaired: u64,
+    pub frames_lost: u64,
     pub cursor: CursorPosition,
     pub cursor_shape: Option<CursorShape>,
     pub clock: ClockSync,
@@ -129,6 +143,12 @@ pub struct ViewState {
     /// Keyboard layouts, for the Auto keyboard mode.
     pub host_layout: Option<String>,
     pub local_layout: Option<String>,
+}
+
+impl ViewState {
+    pub fn frame(&self) -> Option<&Frame> {
+        self.frame.as_deref()
+    }
 }
 
 pub type Shared = Arc<Mutex<ViewState>>;
@@ -266,8 +286,9 @@ impl App {
             return;
         };
         let mut state = self.shared.lock().expect("view state lock");
-        let presented = match state.decoder.frame() {
+        let presented = match state.frame.clone() {
             Some(frame) => {
+                let frame: &Frame = &frame;
                 let p = match self.view_mode {
                     ViewMode::Fit => blit_fit(frame, &mut buffer, w.get(), h.get()),
                     ViewMode::Original => {
@@ -316,7 +337,11 @@ impl App {
             Some(format!("{} — {status}", self.options.title))
         } else if state.stats.tick(rtt) {
             tracing::debug!(target: "viewer", "{}", state.stats.summary); // shown with -v
-            Some(format!("{} — {}", self.options.title, state.stats.summary))
+            let codec = state.codec.map_or("", |c| c.name());
+            Some(format!(
+                "{} — {codec} · {}",
+                self.options.title, state.stats.summary
+            ))
         } else {
             None
         };

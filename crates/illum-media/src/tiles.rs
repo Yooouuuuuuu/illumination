@@ -12,6 +12,7 @@
 //! tile_count × { u16 x | u16 y | u16 w | u16 h | u32 len | len bytes LZ4(size-prepended BGR) }
 //! ```
 
+use crate::codec::{EncodedFrame, VideoCodec, VideoDecoder, VideoEncoder};
 use crate::frame::{BYTES_PER_PIXEL, Frame};
 use crate::{MediaError, Reader};
 use std::time::Instant;
@@ -248,11 +249,79 @@ impl TileDecoder {
     }
 }
 
+/// The tile codec behind the common [`VideoEncoder`] interface, so the host treats it like any
+/// other codec. The packet header carries sequence and timing; the tile header's copies are 0.
+#[derive(Default)]
+pub struct TilesEncoder {
+    inner: TileEncoder,
+}
+
+impl VideoEncoder for TilesEncoder {
+    fn codec(&self) -> VideoCodec {
+        VideoCodec::Tiles
+    }
+
+    fn encode(
+        &mut self,
+        frame: &Frame,
+        force_keyframe: bool,
+    ) -> Result<Option<EncodedFrame>, MediaError> {
+        if force_keyframe {
+            self.inner.reset();
+        }
+        Ok(self.inner.encode(frame, 0, 0).map(|vf| EncodedFrame {
+            data: vf.to_bytes(),
+            keyframe: vf.keyframe,
+            encode_us: vf.encode_us,
+        }))
+    }
+}
+
+/// The tile codec behind the common [`VideoDecoder`] interface. Each decoded frame is a copy of
+/// the reconstructed screen (the lossy codecs produce a fresh picture per frame anyway).
+#[derive(Default)]
+pub struct TilesDecoder {
+    inner: TileDecoder,
+}
+
+impl VideoDecoder for TilesDecoder {
+    fn codec(&self) -> VideoCodec {
+        VideoCodec::Tiles
+    }
+
+    fn decode(&mut self, data: &[u8], _keyframe: bool) -> Result<Option<Frame>, MediaError> {
+        let vf = VideoFrame::from_bytes(data)?;
+        Ok(Some(self.inner.apply(&vf)?.clone()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::frame::Bgra;
     use crate::pattern::TestPattern;
+
+    #[test]
+    fn generic_interface_round_trips() {
+        let (mut enc, mut dec) = (TilesEncoder::default(), TilesDecoder::default());
+        let mut pattern = TestPattern::new(256, 128);
+        let first = pattern.next_frame();
+        let e = enc.encode(&first, false).unwrap().unwrap();
+        assert!(e.keyframe);
+        assert_eq!(dec.decode(&e.data, e.keyframe).unwrap().unwrap(), first);
+        let second = pattern.next_frame();
+        let e = enc.encode(&second, false).unwrap().unwrap();
+        assert!(!e.keyframe);
+        assert_eq!(dec.decode(&e.data, e.keyframe).unwrap().unwrap(), second);
+        assert!(
+            enc.encode(&second, false).unwrap().is_none(),
+            "no change, nothing to send"
+        );
+        assert!(
+            enc.encode(&second, true).unwrap().unwrap().keyframe,
+            "forced keyframe"
+        );
+    }
 
     fn round_trip(
         enc: &mut TileEncoder,
