@@ -11,6 +11,16 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-28
+
+### Fixed
+
+- `scripts/get-libclang.ps1` fetches LLVM's `.tar.xz` instead of `.tar.zst`
+  and unpacks it with Windows' own `tar.exe` (7-Zip only as a fallback): the
+  `.zst` asset needs 7-Zip 23.01+, which the laptop didn't have. Both fetch
+  scripts also turn off PowerShell's progress bar, which made the downloads
+  several times slower, and the libclang script reuses a finished download.
+
 ## [0.5.2] - 2026-10-28
 
 ### Removed

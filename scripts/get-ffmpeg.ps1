@@ -13,6 +13,7 @@ param(
     [string]$Asset = "ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
 )
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"   # the progress bar makes Invoke-WebRequest very slow
 $root = Split-Path -Parent $PSScriptRoot
 $dest = Join-Path $root "third_party\ffmpeg"
 $zip = Join-Path $root "third_party\$Asset"

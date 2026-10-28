@@ -17,8 +17,8 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 ## Try it (console)
 
 Build on each machine (needs [Rust](https://rustup.rs) and, once, two downloads: a prebuilt
-FFmpeg for the AV1 / H.265 codecs and libclang for generating its bindings; the second script
-needs [7-Zip](https://www.7-zip.org) at its default location):
+FFmpeg for the AV1 / H.265 codecs and libclang for generating its bindings; nothing else to
+install on Windows 10/11):
 ```powershell
 git clone https://github.com/Yooouuuuuuu/illumination
 cd illumination
