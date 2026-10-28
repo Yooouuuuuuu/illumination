@@ -11,6 +11,14 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-28
+
+### Fixed
+
+- The viewer's "no video within 5 s" message no longer replaces an error the
+  host already reported (on the laptop it hid the real capture failure behind
+  a firewall guess), and it is worded as the guess it is.
+
 ## [0.5.5] - 2026-10-28
 
 ### Fixed

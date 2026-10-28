@@ -216,12 +216,15 @@ fn media_loop(
         if !got_video && !blocked_reported && now.duration_since(started) > MEDIA_DEADLINE {
             blocked_reported = true;
             let mut state = shared.lock().expect("view state lock");
-            state.status = Some(
-                "the UDP media path is blocked: no video arrived. Allow the host's UDP port through the firewall."
-                    .into(),
-            );
-            drop(state);
-            notify();
+            // A reason the host already gave (e.g. capture failed) stays; this is only a guess.
+            if state.status.is_none() {
+                state.status = Some(
+                    "no video arrived within 5 s. If the host reports no error, its UDP port is probably blocked by a firewall."
+                        .into(),
+                );
+                drop(state);
+                notify();
+            }
         }
         if now >= next_report {
             next_report = now + REPORT_INTERVAL;
