@@ -11,6 +11,15 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-28
+
+### Fixed
+
+- `scripts/get-libclang.ps1` falls back to 7-Zip when Windows' `tar.exe`
+  exists but cannot unpack `.xz` (older builds shell out to a missing `xz`
+  program), and `-Use7Zip` forces that path. A finished download is reused
+  across attempts.
+
 ## [0.5.3] - 2026-10-28
 
 ### Fixed

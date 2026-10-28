@@ -2,13 +2,14 @@
 # third_party/llvm without installing LLVM system-wide. .cargo/config.toml points LIBCLANG_PATH
 # at it.
 #
-# Takes only bin/libclang.dll and lib/clang/<ver>/include out of the official LLVM archive.
-# Uses the .tar.xz asset so Windows' own tar.exe (Windows 10 1803+) can unpack it; 7-Zip is the
-# fallback. (The .tar.zst asset needs 7-Zip 23.01+, which many machines don't have.)
+# Takes only bin/libclang.dll and lib/clang/<ver>/include out of the official LLVM archive
+# (the .tar.xz asset). Unpacks with Windows' own tar.exe where that build has xz support, and
+# with 7-Zip otherwise (any 7-Zip version reads .xz; the .zst asset would need 7-Zip 23.01+).
 #
-# Usage:  powershell -ExecutionPolicy Bypass -File scripts/get-libclang.ps1
+# Usage:  powershell -ExecutionPolicy Bypass -File scripts/get-libclang.ps1 [-Use7Zip]
 param(
-    [string]$Version = "23.1.4"
+    [string]$Version = "23.1.4",
+    [switch]$Use7Zip
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # the progress bar makes Invoke-WebRequest very slow
@@ -29,28 +30,45 @@ Get-ChildItem $tp -Filter "clang+llvm-*.tar.zst" -ErrorAction SilentlyContinue |
 if (-not (Test-Path $archive) -or (Get-Item $archive).Length -lt 100MB) {
     Write-Host "Downloading $url (about 900 MB; only ~100 MB of it is kept)"
     Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+} else {
+    Write-Host "Using the already downloaded $archive"
 }
 $tmp = Join-Path $tp "_llvm"
 if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
 New-Item -ItemType Directory -Force $tmp | Out-Null
-Write-Host "Extracting bin\libclang.dll and lib\clang (this takes a minute)"
-# Windows' own tar (bsdtar). Not whatever `tar` is first on PATH: Git's GNU tar reads "D:\..."
-# as a host name.
+$wanted = @("$name/bin/libclang.dll", "$name/lib/clang")
+$dll = Join-Path $tmp "$name\bin\libclang.dll"
+$done = $false
+
+# 1. Windows' own tar (bsdtar). Not whatever `tar` is first on PATH: Git's GNU tar reads
+#    "D:\..." as a host name. Some Windows builds of tar.exe lack xz support; then 7-Zip.
 $tar = Join-Path $env:SystemRoot "System32\tar.exe"
-if (Test-Path $tar) {
-    & $tar -xf $archive -C $tmp "$name/bin/libclang.dll" "$name/lib/clang"
-    if ($LASTEXITCODE -ne 0) { throw "tar.exe failed with exit code $LASTEXITCODE" }
-} else {
+if (-not $Use7Zip -and (Test-Path $tar)) {
+    Write-Host "Extracting bin\libclang.dll and lib\clang with tar.exe (this takes a minute)"
+    & $tar -xf $archive -C $tmp $wanted
+    $done = ($LASTEXITCODE -eq 0) -and (Test-Path $dll)
+    if (-not $done) {
+        Write-Host "This tar.exe cannot unpack .xz; trying 7-Zip instead."
+        Remove-Item -Recurse -Force $tmp
+        New-Item -ItemType Directory -Force $tmp | Out-Null
+    }
+}
+
+# 2. 7-Zip, in two steps (.xz -> .tar, then the two entries). The .tar is a few GB for a moment.
+if (-not $done) {
     $sevenZip = "C:\Program Files\7-Zip\7z.exe"
     if (-not (Test-Path $sevenZip)) {
-        throw "Neither tar.exe nor 7-Zip ($sevenZip) found. Install 7-Zip, or install LLVM and set LIBCLANG_PATH to its bin folder."
+        throw "7-Zip not found at $sevenZip. Install it (winget install 7zip.7zip) and run this again; the download is kept."
     }
+    Write-Host "Extracting with 7-Zip (writes a few GB temporarily; takes a few minutes)"
     & $sevenZip x -y "-o$tmp" $archive | Out-Null
     $inner = Get-ChildItem $tmp -Filter *.tar | Select-Object -First 1
-    & $sevenZip x -y "-o$tmp" $inner.FullName "$name/bin/libclang.dll" "$name/lib/clang" | Out-Null
+    if (-not $inner) { throw "7-Zip did not produce a .tar from $archive" }
+    & $sevenZip x -y "-o$tmp" $inner.FullName $wanted | Out-Null
     Remove-Item $inner.FullName
+    $done = Test-Path $dll
 }
-if (-not (Test-Path (Join-Path $tmp "$name\bin\libclang.dll"))) {
+if (-not $done) {
     throw "libclang.dll was not extracted; the archive may be incomplete. Delete $archive and run again."
 }
 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
