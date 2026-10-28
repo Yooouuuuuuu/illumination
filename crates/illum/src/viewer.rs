@@ -32,6 +32,8 @@ const PUNCH_SLOW: Duration = Duration::from_secs(2);
 /// No video within this long of learning the host's UDP port means the path is blocked.
 const MEDIA_DEADLINE: Duration = Duration::from_secs(5);
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
+/// While waiting for a keyframe, ask again this often if non-keyframes keep arriving.
+const KEYFRAME_REMINDER: Duration = Duration::from_secs(1);
 
 /// What the viewer asks for.
 #[derive(Debug, Clone)]
@@ -111,6 +113,9 @@ fn media_loop(
     let mut got_video = false;
     let mut blocked_reported = false;
     let mut awaiting_keyframe = true;
+    // When the last keyframe request went out; repeated while frames keep arriving without one
+    // (the host's answer may itself have been lost in full, which no reassembler can notice).
+    let mut last_keyframe_request = Instant::now();
     let mut expected_seq: Option<u64> = None;
     let (mut received, mut lost, mut frames_lost, mut repaired) = (0u32, 0u32, 0u32, 0u32);
     let mut next_report = Instant::now() + REPORT_INTERVAL;
@@ -153,6 +158,7 @@ fn media_loop(
                     frames_lost += 1;
                     shared.lock().expect("view state lock").frames_lost += 1;
                     awaiting_keyframe = true;
+                    last_keyframe_request = Instant::now();
                     sender.send_control(&ControlMsg::FrameLost { seq: seq as u64 });
                 }
                 Assembled::Frame {
@@ -165,7 +171,16 @@ fn media_loop(
                         shared.lock().expect("view state lock").frames_repaired += 1;
                     }
                     if awaiting_keyframe && !meta.keyframe {
-                        continue; // keep showing the last good frame until the keyframe arrives
+                        // Keep showing the last good frame until the keyframe arrives; remind
+                        // the host if it is taking long.
+                        if last_keyframe_request.elapsed() >= KEYFRAME_REMINDER {
+                            last_keyframe_request = Instant::now();
+                            tracing::debug!(target: "media", "Still waiting for a keyframe at frame {}; asking again.", meta.seq);
+                            sender.send_control(&ControlMsg::FrameLost {
+                                seq: meta.seq as u64,
+                            });
+                        }
+                        continue;
                     }
                     if decoder.as_ref().is_none_or(|d| d.codec() != meta.codec) {
                         match open_decoder(meta.codec) {

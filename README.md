@@ -52,7 +52,11 @@ use. `illum codecs` shows what this machine can do and why a hardware encoder wa
 NVIDIA encoders need driver **570 or newer**.
 
 You may need to allow `illum.exe` through Windows Firewall on the host; one answer covers TCP
-and UDP.
+and UDP. (Over Tailscale this is usually not needed: its Windows client permits traffic on its
+own interface.)
+
+Each role also writes a debug-level log file: `%ProgramData%\Illumination\logs\service.log` on
+the host and `…\viewer.log` on the viewer. Send those when something looks wrong.
 
 To check colours, run the host with `--test-pattern`. The top half shows eight patches, left to
 right: **red, green, blue, cyan, magenta, yellow, white, black**.

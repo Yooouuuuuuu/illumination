@@ -11,6 +11,25 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-10-28
+
+### Fixed
+
+- **Stream dying for good after a lost frame.** The viewer asks for a
+  keyframe when a frame is lost; the host honours that at most twice a
+  second — and a request arriving inside that window was *dropped*, leaving
+  the viewer skipping every frame until the end of time. The request now stays
+  pending until it is served, and the viewer repeats it once a second while
+  non-keyframes keep arriving (which also covers a keyframe lost in full).
+- Media sockets ask for 4 MB kernel buffers instead of Windows' 64 KB
+  default, so a keyframe burst no longer overflows the receive buffer.
+
+### Added
+
+- **Log files.** Each role writes `<home>\logs\<role>.log` at debug level
+  (`service.log`, `viewer.log`; home is `%ProgramData%\Illumination`), next
+  to the console output. The path is printed at start.
+
 ## [0.5.7] - 2026-10-28
 
 ### Added

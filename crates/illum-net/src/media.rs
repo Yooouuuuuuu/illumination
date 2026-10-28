@@ -270,6 +270,21 @@ struct Registered {
     tx: mpsc::Sender<Inbound>,
 }
 
+/// Kernel buffer size for the media sockets. A keyframe is a burst of a few hundred datagrams;
+/// with Windows' default of 64 KB the receive buffer overflows before the reader wakes up, and
+/// that is loss we inflict on ourselves.
+const SOCKET_BUFFER: usize = 4 << 20;
+
+fn enlarge_buffers(socket: &UdpSocket) {
+    let s = socket2::SockRef::from(socket);
+    if let Err(e) = s.set_recv_buffer_size(SOCKET_BUFFER) {
+        tracing::debug!(target: "media", "Could not enlarge the receive buffer: {e}");
+    }
+    if let Err(e) = s.set_send_buffer_size(SOCKET_BUFFER) {
+        tracing::debug!(target: "media", "Could not enlarge the send buffer: {e}");
+    }
+}
+
 /// Host side: the UDP sockets (one per listening address) and the sessions behind them.
 pub struct MediaHub {
     sockets: Vec<Arc<UdpSocket>>,
@@ -283,6 +298,7 @@ impl MediaHub {
         let mut sockets = Vec::new();
         for ip in addrs {
             let socket = UdpSocket::bind(SocketAddr::new(*ip, port))?;
+            enlarge_buffers(&socket);
             sockets.push(Arc::new(socket));
         }
         let bound_port = sockets
@@ -402,6 +418,7 @@ impl MediaClient {
             "[::]:0"
         };
         let socket = UdpSocket::bind(bind)?;
+        enlarge_buffers(&socket);
         socket.connect(target)?;
         // The receive thread wakes up regularly to notice that the client was dropped.
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;

@@ -345,9 +345,12 @@ impl MediaLink {
                         let Some((frame, captured_us)) = latest.take_wait(Duration::from_millis(50)) else {
                             continue;
                         };
-                        if want_keyframe.swap(false, Ordering::SeqCst)
+                        // A request inside the minimum interval stays pending until it can be
+                        // honoured; dropping it would leave the viewer waiting for ever.
+                        if want_keyframe.load(Ordering::SeqCst)
                             && last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_MIN_INTERVAL)
                         {
+                            want_keyframe.store(false, Ordering::SeqCst);
                             force_keyframe = true;
                         }
                         if encoder.is_none() || encoder_size != (frame.width, frame.height) {

@@ -161,19 +161,65 @@ fn endpoint(home: &Path) -> Result<Endpoint> {
     })
 }
 
-fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
-    tracing_subscriber::fmt()
+/// Console at info (debug with `-v`), plus one file per role under `<home>/logs` at debug
+/// level, so a problem seen once can be read afterwards. Returns the file's path.
+fn init_logging(cli: &Cli) -> Option<PathBuf> {
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let console = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_writer(std::io::stderr)
         // Colour codes only where they are understood: classic Windows consoles print them raw.
         .with_ansi(!cfg!(windows) && std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .with_max_level(if cli.verbose {
-            tracing::Level::DEBUG
+        .with_filter(if cli.verbose {
+            LevelFilter::DEBUG
         } else {
-            tracing::Level::INFO
+            LevelFilter::INFO
+        });
+    let role = match (&cli.command, cli.role()) {
+        (Some(Command::View { .. }), Role::Frontend) => "viewer".to_string(),
+        (_, role) => format!("{role:?}").to_lowercase(),
+    };
+    let path = cli
+        .home
+        .clone()
+        .unwrap_or_else(default_home)
+        .join("logs")
+        .join(format!("{role}.log"));
+    let file = std::fs::create_dir_all(path.parent().expect("logs directory"))
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
         })
+        .ok();
+    let opened = file.is_some();
+    let file_layer = file.map(|f| {
+        tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(Arc::new(f))
+            .with_filter(LevelFilter::DEBUG)
+    });
+    tracing_subscriber::registry()
+        .with(console)
+        .with(file_layer)
         .init();
+    opened.then_some(path)
+}
+
+fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+    let log_path = init_logging(&cli);
+    if let Some(path) = &log_path
+        && (cli.role() == Role::Service || matches!(cli.command, Some(Command::View { .. })))
+    {
+        tracing::info!(target: "illum", "Log file: {} (debug level).", path.display());
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

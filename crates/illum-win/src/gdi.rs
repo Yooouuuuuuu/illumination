@@ -213,7 +213,7 @@ fn bitmap_bits(
     h: u32,
     bits_per_pixel: u16,
 ) -> Option<(usize, Vec<u8>)> {
-    let pitch = ((w as usize * bits_per_pixel as usize + 31) / 32) * 4;
+    let pitch = (w as usize * bits_per_pixel as usize).div_ceil(32) * 4; // rows end on 4 bytes
     let mut data = vec![0u8; pitch * h as usize];
     let mut bmi = MonoBitmapInfo {
         header: BITMAPINFOHEADER {
