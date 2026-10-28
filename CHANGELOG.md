@@ -11,6 +11,22 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-10-28
+
+### Added
+
+- **GDI capture fallback.** When Desktop Duplication is not available from
+  the host process (on the laptop, Windows had bound illum to the discrete
+  GPU, which cannot duplicate the panel), capture switches to GDI the way
+  RustDesk does: `BitBlt` at up to ~60 fps, unchanged frames dropped, cursor
+  from `GetCursorInfo`. Slower than duplication, but it streams without any
+  Windows setting. The host log says which method is in use.
+
+### Changed
+
+- The "set Power saving in Windows graphics settings" advice is gone from the
+  error path; it is a log hint only.
+
 ## [0.5.6] - 2026-10-28
 
 ### Fixed

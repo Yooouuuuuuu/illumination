@@ -160,6 +160,8 @@ pub struct DdaSource {
     pointer_buf: Vec<u8>,
     last_cursor: CursorPosition,
     retry_at: Instant,
+    /// Set once every adapter that lists the display has refused to duplicate it.
+    unsupported: bool,
 }
 
 impl DdaSource {
@@ -193,11 +195,18 @@ impl DdaSource {
             pointer_buf: Vec::new(),
             last_cursor: CursorPosition::default(),
             retry_at: Instant::now(),
+            unsupported: false,
         })
     }
 
     pub fn display_index(&self) -> usize {
         self.index
+    }
+
+    /// True when Desktop Duplication cannot work for this display from this process (every
+    /// adapter refused), so a different capture method is needed.
+    pub fn is_unsupported(&self) -> bool {
+        self.unsupported
     }
 
     /// Moves the device to the next adapter that lists this display. False when none is left.
@@ -237,8 +246,9 @@ impl DdaSource {
                             .iter()
                             .map(|c| c.adapter_name.as_str())
                             .collect();
+                        self.unsupported = true;
                         return Err(MediaError::Capture(format!(
-                            "Desktop Duplication of {} is not supported from any GPU here ({}). On a laptop with two GPUs, make Windows run illum on the GPU that drives the display: Settings → System → Display → Graphics → add illum.exe → Power saving, then start the host again.",
+                            "Desktop Duplication of {} is not available from this process ({})",
                             self.name,
                             names.join(", ")
                         )));

@@ -347,7 +347,7 @@ fn source_factory(test_pattern: bool) -> SourceFactory {
             }
             #[cfg(windows)]
             {
-                Ok(Box::new(illum_win::DdaSource::new(display as usize)?))
+                Ok(Box::new(illum_win::ScreenCapture::new(display as usize)?))
             }
             #[cfg(not(windows))]
             {

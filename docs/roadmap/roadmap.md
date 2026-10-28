@@ -140,7 +140,10 @@ keyframe because FFmpeg exposes no reference-invalidation control for the hardwa
 (architecture §13). Audio follows as **v0.5.2**.
 Measured in v0.5.0 on this PC over its Tailscale address: test pattern 59 fps, 9 ms, 0% loss;
 real screen at a 6 Mb/s cap paced to ~6 Mb/s with RTT flat (no queue) but only 2–4 fps, because
-lossless tiles of a full-screen change are ~2 MB per frame. v0.5.1 is not yet measured live.
+lossless tiles of a full-screen change are ~2 MB per frame. First live run from the laptop
+(2026-10-28) found no NVENC there (driver API 12.2; `hevc_qsv` serves) and Desktop Duplication
+refused from the GPU Windows bound the process to; **v0.5.7** added the GDI fallback
+(architecture §5.1). Codec and FEC are not yet measured live.
 
 **Check:**
 - [ ] This PC → laptop streams **AV1**, laptop → this PC streams **H.265**, both in hardware;

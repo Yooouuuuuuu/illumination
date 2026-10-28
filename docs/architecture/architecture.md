@@ -173,6 +173,22 @@ See [`video-pipeline.d2`](video-pipeline.d2).
 - The cursor is **not** in the captured image (DDA leaves the pointer out), so moving the mouse
   over a still screen produces no video frames at all.
 
+**Implemented (v0.5.5–v0.5.7)**, `illum_win::ScreenCapture`: DDA first, **GDI** when DDA is not
+available, the way RustDesk does it (`libs/scrap/src/dxgi/mod.rs`: "Fallback to GDI" when the
+device or `DuplicateOutput` fails). The case that forced this, seen on the laptop
+(2026-10-28): on a two-GPU laptop Windows may bind a process to the discrete GPU and then
+DXGI *reparents* the panel onto that adapter; `DuplicateOutput` from it answers
+`DXGI_ERROR_UNSUPPORTED`, and the integrated GPU, which really drives the panel, lists no
+outputs at all inside that process. The DDA code tries every adapter that lists the display
+(enough when both list it); when all refuse, capture switches to GDI: `BitBlt` into a top-down
+32-bit DIB at most ~60 times a second, identical frames dropped by comparison, cursor from
+`GetCursorInfo` / `GetIconInfo`. Slower (a CPU copy of the screen per frame) and blind to the
+secure desktop, but it streams. Not chosen: asking the user to set a per-app GPU preference in
+Windows settings (AnyDesk and RustDesk need no such entry), and Sunshine's approach of patching
+the GPU-preference lookup inside its own process (undocumented, fragile).
+**Windows.Graphics.Capture** stays the intended middle step of the chain: it is independent of
+GPU binding and works from a service; it comes with the capture work of M7.
+
 ### 5.2 One pixel format
 - Internally every frame is **BGRA8**, the format Windows calls `X8R8G8B8`. AnyDesk logs
   `Format changed to 1920x1080 (X8R8G8B8)`.
