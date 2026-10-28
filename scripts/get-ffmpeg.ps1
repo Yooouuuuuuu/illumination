@@ -2,7 +2,7 @@
 # third_party/ffmpeg, which .cargo/config.toml points the bindings at (FFMPEG_DIR).
 #
 # Source: BtbN/FFmpeg-Builds, the "gpl-shared" flavour (we are GPL-3.0 ourselves). The hardware
-# encoders (NVENC, AMF, QSV), libdav1d and libsvtav1 are included.
+# encoders (NVENC, AMF, QSV), libdav1d and libx265 are included.
 #
 # FFmpeg 8.1 rather than 9.0 on purpose: its NVENC needs NVIDIA driver 570+ (API 13.0), while
 # 9.0 demands 610+ (API 13.1) and would silently fall back to software encoding on a driver

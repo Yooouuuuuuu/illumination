@@ -230,7 +230,10 @@ screen stops changing is parked as a future idea.
 BtbN fetched by `scripts/get-ffmpeg.ps1`):
 - At start the host **probes** FFmpeg's encoders by opening each once at a small size, so a
   hardware encoder for a GPU that isn't there drops out; candidates in order: `av1_nvenc`,
-  `av1_amf`, `av1_qsv`, `libsvtav1`; `hevc_nvenc`, `hevc_amf`, `hevc_qsv`, `libx265`. Decoders:
+  `av1_amf`, `av1_qsv`; `hevc_nvenc`, `hevc_amf`, `hevc_qsv`, `libx265`. Software AV1
+  (`libsvtav1`) is deliberately **not** a candidate (decided 2026-10-28): the rule is AV1 in
+  hardware or else H.265, and real-time 1080p60 AV1 on a CPU would show up as encode delay;
+  `libx265` stays only as the last resort for a machine with no GPU encoder. Decoders:
   `libdav1d` for AV1, FFmpeg's `hevc`. The result becomes hello capabilities `enc:av1`,
   `enc:hevc`, `dec:av1`, `dec:hevc`; the host picks per the rule above (`choose_codec`).
   `illum codecs` prints the probe with FFmpeg's reasons for each encoder that would not open.

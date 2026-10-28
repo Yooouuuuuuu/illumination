@@ -11,6 +11,14 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-28
+
+### Removed
+
+- Software AV1 (`libsvtav1`) is no longer an encoder candidate. The rule is
+  AV1 in hardware, otherwise H.265; a machine without a hardware AV1 encoder
+  goes straight to H.265 (hardware, or `libx265` as the last resort).
+
 ## [0.5.1] - 2026-10-22
 
 Milestone M4, second slice: the video codec and parity FEC. Lossless tiles

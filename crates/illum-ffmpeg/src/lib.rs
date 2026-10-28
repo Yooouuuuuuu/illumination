@@ -48,10 +48,12 @@ pub fn set_verbose(verbose: bool) {
 }
 
 /// Encoder names to try per codec, best first. Hardware ones fail to open on machines without
-/// that vendor's GPU, which is how the probe sorts them out.
+/// that vendor's GPU, which is how the probe sorts them out. AV1 is hardware-only on purpose
+/// (§5.3: AV1 in hardware, otherwise H.265); `libx265` is the last resort for a machine with
+/// no GPU encoder at all.
 fn encoder_candidates(codec: VideoCodec) -> &'static [&'static str] {
     match codec {
-        VideoCodec::Av1 => &["av1_nvenc", "av1_amf", "av1_qsv", "libsvtav1"],
+        VideoCodec::Av1 => &["av1_nvenc", "av1_amf", "av1_qsv"],
         VideoCodec::Hevc => &["hevc_nvenc", "hevc_amf", "hevc_qsv", "libx265"],
         VideoCodec::Tiles => &[],
     }
@@ -89,9 +91,6 @@ fn encoder_options(name: &str) -> Dictionary {
         ff::dict! { "usage" => "lowlatency", "rc" => "cbr" }
     } else if name.ends_with("_qsv") {
         ff::dict! { "preset" => "veryfast" }
-    } else if name == "libsvtav1" {
-        // Low-delay prediction structure: SVT-AV1 refuses CBR in its random-access default.
-        ff::dict! { "preset" => "10", "svtav1-params" => "pred-struct=1:lookahead=0" }
     } else if name == "libx265" {
         ff::dict! { "preset" => "ultrafast", "tune" => "zerolatency", "forced-idr" => "1" }
     } else {
@@ -274,9 +273,7 @@ impl FfmpegEncoder {
         video.set_gop(u32::MAX / 2); // keyframes only when asked for
         video.set_max_b_frames(0);
         video.set_bit_rate(bitrate as usize);
-        if name != "libsvtav1" {
-            video.set_max_bit_rate(bitrate as usize); // SVT-AV1 only takes a max rate in CRF mode
-        }
+        video.set_max_bit_rate(bitrate as usize);
         video.set_flags(codec::Flags::LOW_DELAY);
         // A short rate-control buffer (100 ms) keeps frame sizes close to bitrate / fps.
         unsafe {
