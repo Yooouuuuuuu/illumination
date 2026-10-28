@@ -4,7 +4,13 @@
 //!
 //! Only `DXGI_FORMAT_B8G8R8A8_UNORM` is accepted, matching our one internal pixel format.
 //! When duplication is lost (resolution change, desktop switch) it is recreated; the
-//! suspend → switch → restart handling for the secure desktop arrives in M4.
+//! suspend → switch → restart handling for the secure desktop arrives in M7.
+//!
+//! Laptops with two GPUs: the same display can be listed under more than one adapter (the
+//! NVIDIA "Optimus" layer reports the panel under the discrete GPU when the program runs on
+//! it), and `DuplicateOutput` only works from the adapter that really drives the panel; the
+//! others answer `DXGI_ERROR_UNSUPPORTED`. So every adapter that lists the display is a
+//! candidate and the first one that duplicates wins.
 
 use crate::DisplayInfo;
 use illum_media::cursor::{CursorPosition, CursorShape};
@@ -20,8 +26,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC, IDXGIAdapter1, IDXGIFactory1,
     IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
@@ -32,22 +38,38 @@ fn err(context: &str, e: windows::core::Error) -> MediaError {
     MediaError::Capture(format!("{context}: {e}"))
 }
 
-struct Output {
+/// One adapter's view of a display.
+struct Candidate {
     adapter: IDXGIAdapter1,
+    adapter_name: String,
     output: IDXGIOutput1,
+}
+
+/// A display attached to the desktop, with every adapter that lists it.
+struct Output {
     desc: DXGI_OUTPUT_DESC,
+    candidates: Vec<Candidate>,
+}
+
+fn wide_name(name: &[u16]) -> String {
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..len])
 }
 
 /// Every display attached to the desktop, across all adapters; primary (at 0,0) first.
 fn outputs() -> Result<Vec<Output>, MediaError> {
     let factory: IDXGIFactory1 =
         unsafe { CreateDXGIFactory1() }.map_err(|e| err("CreateDXGIFactory1", e))?;
-    let mut found = Vec::new();
+    let mut found: Vec<Output> = Vec::new();
     for a in 0.. {
         let adapter = match unsafe { factory.EnumAdapters1(a) } {
             Ok(adapter) => adapter,
             Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
             Err(e) => return Err(err("EnumAdapters1", e)),
+        };
+        let adapter_name = match unsafe { adapter.GetDesc1() } {
+            Ok(adesc) => wide_name(&adesc.Description),
+            Err(_) => format!("adapter {a}"),
         };
         for o in 0.. {
             let output = match unsafe { adapter.EnumOutputs(o) } {
@@ -60,11 +82,21 @@ fn outputs() -> Result<Vec<Output>, MediaError> {
                 continue;
             }
             let output: IDXGIOutput1 = output.cast().map_err(|e| err("IDXGIOutput1", e))?;
-            found.push(Output {
+            let candidate = Candidate {
                 adapter: adapter.clone(),
+                adapter_name: adapter_name.clone(),
                 output,
-                desc,
-            });
+            };
+            match found
+                .iter_mut()
+                .find(|f| f.desc.DeviceName == desc.DeviceName)
+            {
+                Some(existing) => existing.candidates.push(candidate),
+                None => found.push(Output {
+                    desc,
+                    candidates: vec![candidate],
+                }),
+            }
         }
     }
     found.sort_by_key(|o| {
@@ -76,21 +108,35 @@ fn outputs() -> Result<Vec<Output>, MediaError> {
 
 fn info(index: usize, o: &Output) -> DisplayInfo {
     let r = o.desc.DesktopCoordinates;
-    let name_len = o
-        .desc
-        .DeviceName
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(o.desc.DeviceName.len());
     DisplayInfo {
         index,
-        name: String::from_utf16_lossy(&o.desc.DeviceName[..name_len]),
+        name: wide_name(&o.desc.DeviceName),
         x: r.left,
         y: r.top,
         width: (r.right - r.left) as u32,
         height: (r.bottom - r.top) as u32,
         primary: r.left == 0 && r.top == 0,
     }
+}
+
+fn open_device(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11DeviceContext), MediaError> {
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    }
+    .map_err(|e| err("D3D11CreateDevice", e))?;
+    Ok((device.expect("device"), context.expect("context")))
 }
 
 pub fn list_displays() -> Result<Vec<DisplayInfo>, MediaError> {
@@ -103,9 +149,12 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, MediaError> {
 
 pub struct DdaSource {
     index: usize,
+    name: String,
+    /// Adapters that list this display; `current` is the one the device belongs to.
+    candidates: Vec<Candidate>,
+    current: usize,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    output: IDXGIOutput1,
     dup: Option<IDXGIOutputDuplication>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
     pointer_buf: Vec<u8>,
@@ -124,29 +173,21 @@ impl DdaSource {
             )));
         }
         let o = all.swap_remove(index);
-        let mut device = None;
-        let mut context = None;
-        unsafe {
-            D3D11CreateDevice(
-                &o.adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        }
-        .map_err(|e| err("D3D11CreateDevice", e))?;
+        let (device, context) = open_device(&o.candidates[0].adapter)?;
         let d = info(index, &o);
-        tracing::info!(target: "capture", "Capturing {} ({}x{} at {},{}) with DXGI Desktop Duplication.", d.name, d.width, d.height, d.x, d.y);
+        let adapters: Vec<&str> = o
+            .candidates
+            .iter()
+            .map(|c| c.adapter_name.as_str())
+            .collect();
+        tracing::info!(target: "capture", "Capturing {} ({}x{} at {},{}) with DXGI Desktop Duplication on {}.", d.name, d.width, d.height, d.x, d.y, adapters.join(" / "));
         Ok(DdaSource {
             index,
-            device: device.expect("device"),
-            context: context.expect("context"),
-            output: o.output,
+            name: d.name,
+            candidates: o.candidates,
+            current: 0,
+            device,
+            context,
             dup: None,
             staging: None,
             pointer_buf: Vec::new(),
@@ -159,18 +200,55 @@ impl DdaSource {
         self.index
     }
 
+    /// Moves the device to the next adapter that lists this display. False when none is left.
+    fn next_adapter(&mut self) -> Result<bool, MediaError> {
+        if self.current + 1 >= self.candidates.len() {
+            return Ok(false);
+        }
+        self.current += 1;
+        let (device, context) = open_device(&self.candidates[self.current].adapter)?;
+        self.device = device;
+        self.context = context;
+        self.staging = None; // belongs to the old device
+        Ok(true)
+    }
+
     fn duplication(&mut self) -> Result<Option<&IDXGIOutputDuplication>, MediaError> {
         if self.dup.is_none() {
             if Instant::now() < self.retry_at {
                 return Ok(None);
             }
-            match unsafe { self.output.DuplicateOutput(&self.device) } {
-                Ok(dup) => self.dup = Some(dup),
-                Err(e) => {
-                    // E.g. the secure desktop is showing (handled properly in M4). Try again shortly.
-                    tracing::warn!(target: "capture", "DuplicateOutput failed, retrying: {e}");
-                    self.retry_at = Instant::now() + Duration::from_millis(500);
-                    return Ok(None);
+            loop {
+                let candidate = &self.candidates[self.current];
+                match unsafe { candidate.output.DuplicateOutput(&self.device) } {
+                    Ok(dup) => {
+                        self.dup = Some(dup);
+                        break;
+                    }
+                    Err(e) if e.code() == DXGI_ERROR_UNSUPPORTED => {
+                        // This adapter does not drive the panel (two-GPU laptop). Try the next.
+                        let tried = candidate.adapter_name.clone();
+                        if self.next_adapter()? {
+                            tracing::info!(target: "capture", "{} cannot duplicate {}; trying {}.", tried, self.name, self.candidates[self.current].adapter_name);
+                            continue;
+                        }
+                        let names: Vec<&str> = self
+                            .candidates
+                            .iter()
+                            .map(|c| c.adapter_name.as_str())
+                            .collect();
+                        return Err(MediaError::Capture(format!(
+                            "Desktop Duplication of {} is not supported from any GPU here ({}). On a laptop with two GPUs, make Windows run illum on the GPU that drives the display: Settings → System → Display → Graphics → add illum.exe → Power saving, then start the host again.",
+                            self.name,
+                            names.join(", ")
+                        )));
+                    }
+                    Err(e) => {
+                        // E.g. the secure desktop is showing (handled properly in M7). Try again shortly.
+                        tracing::warn!(target: "capture", "DuplicateOutput failed, retrying: {e}");
+                        self.retry_at = Instant::now() + Duration::from_millis(500);
+                        return Ok(None);
+                    }
                 }
             }
         }

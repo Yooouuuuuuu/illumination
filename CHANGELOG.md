@@ -11,6 +11,18 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-28
+
+### Fixed
+
+- **Hosting from a two-GPU laptop.** On the laptop, `DuplicateOutput` failed
+  with `DXGI_ERROR_UNSUPPORTED` and the host retried forever behind a black
+  viewer: the NVIDIA layer lists the panel under the discrete GPU when the
+  program runs on it, but only the GPU that drives the panel can duplicate
+  it. Capture now keeps every adapter that lists the display and moves to the
+  next one when one refuses; if all refuse, the viewer gets the reason and
+  the Windows graphics-settings fix instead of a black window.
+
 ## [0.5.4] - 2026-10-28
 
 ### Fixed
