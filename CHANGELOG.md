@@ -11,6 +11,18 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-30
+
+Documentation only.
+
+### Changed
+
+- `docs/architecture/adaptation.d2` redrawn as the per-second adaptation
+  cycle as built in v0.6.0: the viewer's measurement, the report, the grade
+  (with the freeze-by-loss rule), the latency controller with back-off, the
+  FEC controller with its zones and backstop, what gets applied, and the
+  `Quality` message back to the viewer.
+
 ## [0.6.0] - 2026-10-30
 
 Milestone M5: adaptation. The host now finds the quality the link can carry

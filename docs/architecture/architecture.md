@@ -8,7 +8,7 @@ Diagrams in this folder (render with `d2 <file>.d2`):
 - [`session.d2`](session.d2): connection and session start
 - [`video-pipeline.d2`](video-pipeline.d2): the media path from host to controller
 - [`media-transport.d2`](media-transport.d2): the two paths, reliable and unreliable
-- [`adaptation.d2`](adaptation.d2): the latency controller and the FEC controller
+- [`adaptation.d2`](adaptation.d2): the adaptation cycle, once a second — grade, latency controller, FEC controller, what is applied
 
 ## 1. Goals and non-goals
 

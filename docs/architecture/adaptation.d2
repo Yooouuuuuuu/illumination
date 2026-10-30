@@ -1,33 +1,104 @@
-# The two controllers on the host (architecture §5.5–5.6).
+# The adaptation cycle as built in v0.6.0 (architecture §5.5–5.6, illum_media::adapt).
+# One pass per second. The viewer measures; the host grades, decides and applies.
 
 direction: down
 
-feedback: "Viewer feedback, per frame:\nshown? latency (capture → shown), packets lost before repair" {
+viewer: Viewer — every presented frame {
+  measure: "latency = host clock now − capture time (from the packet header)\nshown += 1 · within += 1 if latency ≤ L (user limit, default 50 ms)\nunknown clock yet → counts as within"
+}
+
+report: "MediaReport, once a second\nshown · within_limit · frames_lost · received · lost (before repair)" {
   shape: document
 }
 
-lat: Latency controller (per second, user limit L = 50 ms) {
-  grade: "Grade the second from SHOWN frames\n🟢 ≥90% within L · 🟡 50–90% · 🔴 <50%\n⚪ fewer than N frames"
-  rule: "Count from the first 🔴 / 🟢\ndrop: ≥30% 🔴 in 10 s\nraise: ≥80% 🟢 in 15 s (no raise while loss > threshold)"
-  ladder: "One rung per action, start at the top\nbitrate ×0.8 → fps 60/45/30/20/15 → resolution"
-  grade -> rule -> ladder
+viewer.measure -> report
+
+host: Host — once a second {
+  direction: down
+
+  grade: Grade the second {
+    enough: "shown ≥ N ?\n(N = ¼ target fps, min 5)" {shape: diamond}
+    share: "share = within ÷ shown\n≥ 90 % → 🟢 · 50–90 % → 🟡 · < 50 % → 🔴"
+    frozen: "frames_lost ≥ N ÷ 2 ?" {shape: diamond}
+    red_freeze: "🔴 — the picture froze because of loss\n(harness rule 1)"
+    blank: "⚪ — still screen, no evidence"
+    enough -> share: yes
+    enough -> frozen: no
+    frozen -> red_freeze: yes
+    frozen -> blank: no
+  }
+
+  lat: Latency controller {
+    skip: "⚪ → not counted\nleading 🟡 → wait for the first 🔴/🟢" {shape: hexagon}
+    push: "append the grade"
+    drop_q: "🔴 in ≥ 30 % of\nthe last 10 graded s ?" {shape: diamond}
+    raise_q: "🟢 in ≥ 80 % of the last W graded s\nand loss in the last 10 s < 0.5 % ?\nW = 15 s × 2^failures of the rung above (max 120 s)" {shape: diamond}
+    drop: "DROP one rung\nhistory cleared\nif on probation (raised < 60 s ago): failures[rung] += 1\n(harness rule 2)"
+    raise: "RAISE one rung\nhistory cleared · probation starts\n(60 s held → failures[rung] = 0)"
+    hold: "hold"
+    skip -> push
+    push -> drop_q
+    drop_q -> drop: yes
+    drop_q -> raise_q: no
+    raise_q -> raise: yes
+    raise_q -> hold: no
+  }
+
+  fec: FEC controller {
+    window: "accumulate 30 s:\nloss ppm = lost ÷ (received + lost) · frames_lost"
+    zone: "loss ≥ 0.5 % ?" {shape: diamond}
+    ceiling_q: "already at the ceiling ?" {shape: diamond}
+    frames_q: "frames still lost in the window ?" {shape: diamond}
+    up: "parity + 5 (≤ ceiling)"
+    backstop: "BACKSTOP: ask the ladder\nfor one rung down\n(harness rule 3)"
+    nothing: "parity repairs everything:\npath loss, nothing more to do"
+    green_q: "loss < 0.1 % ?" {shape: diamond}
+    streak: "🟢 window streak += 1\n2nd and later → parity − 5 (≥ floor)"
+    yellow: "0.1–0.5 %: hold, streak = 0"
+    window -> zone
+    zone -> ceiling_q: yes
+    ceiling_q -> up: no
+    ceiling_q -> frames_q: yes
+    frames_q -> backstop: yes
+    frames_q -> nothing: no
+    zone -> green_q: no
+    green_q -> streak: yes
+    green_q -> yellow: no
+  }
+
+  apply: Apply the rung and the parity {
+    rung: "rung = (bitrate, fps, scale)\nladder: ×0.8 ×5 → 45/30/20/15 fps → 75 %/50 % · bottom ≈ 1 Mb/s"
+    pacer: "pacer: rate = rung bitrate\nburst = max(50 ms, 2 frames)"
+    encoder: "encoder bitrate = rung × 100 ÷ (100 + parity %) × 90 %\nlive on NVENC/AMF/QSV · reopen software encoders\nreopen on fps or scale change (one keyframe)"
+    packets: "packetiser: parity % per block\nframe-rate cap by capture time · downscale when scale < 100 %"
+    rung -> pacer
+    rung -> encoder
+    rung -> packets
+  }
+
+  quality: "Quality → viewer (title bar)\nrung i/n · Mb/s · fps · scale · parity · reason" {
+    shape: document
+  }
+
+  grade.share -> lat.skip
+  grade.red_freeze -> lat.skip
+  grade.blank -> lat.skip
+  lat.drop -> apply.rung
+  lat.raise -> apply.rung
+  fec.up -> apply.rung
+  fec.streak -> apply.rung
+  fec.backstop -> lat.drop: "one rung down" {style.stroke-dash: 3}
+  apply.rung -> quality: "on every change"
 }
 
-fec: FEC controller (30 s windows) {
-  zones: "Packet loss before repair\n🔴 ≥0.5% → +5 · 🟡 0.1–0.5% hold\n🟢 <0.1% → −5 after two 🟢 windows"
-  bounds: "floor 5% · ceiling 30% (user-changeable)"
-  backstop: "at ceiling and loss persists one more window\n→ ask for one rung down"
-  zones -> bounds -> backstop
-}
+report -> host.grade.enough: "shown, within"
+report -> host.fec.window: "received, lost, frames_lost"
+report -> host.lat.raise_q: "recent loss (gate)" {style.stroke-dash: 3}
 
-budget: "Budget: FEC bytes come out of the video target,\nnever on top → FEC can't add latency" {
+budget: "Budget-neutral: parity comes out of the rung's bitrate, never on top,\nso raising parity cannot add latency. Availability first: the FEC controller\nnever waits for the latency controller." {
   shape: hexagon
 }
 
-feedback -> lat.grade: "shown frames only"
-feedback -> fec.zones: "loss only"
-fec.backstop -> lat.ladder: "one rung down" {style.stroke-dash: 3}
-lat.ladder -> budget
-fec.bounds -> budget
-budget -> encoder: "bitrate target, fps, resolution, parity count"
-encoder: "Encoder + packetiser" {shape: rectangle}
+host.apply.encoder -> budget {style.stroke-dash: 3}
+
+host.quality -> viewer: "next second" {style.stroke-dash: 3}
