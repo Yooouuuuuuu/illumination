@@ -11,6 +11,39 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-30
+
+What the first live run of the adaptation taught (this PC → laptop over
+Wi-Fi, a two-hour session).
+
+### Fixed
+
+- **Clock drift blinded the latency controller.** The viewer's estimate of
+  the host clock came from the single fastest probe of the whole session; the
+  two machines' clocks drift apart by tens of microseconds per second, and
+  after two hours the estimate was ~80 ms stale, so the title showed
+  `latency −37 ms`, every frame counted as "within 50 ms" and the ladder never
+  moved. The offset now comes from the fastest probe of the **last minute**.
+- **Keyframes get at least 30 % parity.** A keyframe is ~180 packets; with
+  5–10 % parity on a Wi-Fi burst it mostly died, the viewer waited, the retry
+  died too — stalls of 1–20 s (the "laggy" feeling). Keyframe requests are
+  also honoured every 250 ms instead of 500 ms.
+- The "frozen by loss" grade now triggers at **2** lost frames in a second
+  with almost nothing shown (was 8): during a stall only the two keyframe
+  attempts per second die while the small frames in between arrive.
+- The frame-rate cap skipped frames captured a microsecond early; at 60 fps
+  that cost up to a third of the frames.
+- Capture times now travel through the encoder as `pts` and come back with
+  each packet, so a codec that returned frames late could not mislabel them
+  (NVENC and the decoders were tested and do not lag; the guard stays).
+
+### Verified
+
+- `cargo test`: 136 tests pass, including the new ones: clock sync follows
+  a 12 ppm drift over a simulated two hours; AV1 and H.265 encoders and
+  decoders return the frame they were given (checked by the test pattern's
+  moving bar at 1080p). `cargo clippy` is clean.
+
 ## [0.7.0] - 2026-10-30
 
 Audio, the Sunshine way (architecture §8). The host's sound reaches the

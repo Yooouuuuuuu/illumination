@@ -264,16 +264,23 @@ impl VideoEncoder for TilesEncoder {
     fn encode(
         &mut self,
         frame: &Frame,
+        capture_us: u64,
         force_keyframe: bool,
-    ) -> Result<Option<EncodedFrame>, MediaError> {
+    ) -> Result<Vec<EncodedFrame>, MediaError> {
         if force_keyframe {
             self.inner.reset();
         }
-        Ok(self.inner.encode(frame, 0, 0).map(|vf| EncodedFrame {
-            data: vf.to_bytes(),
-            keyframe: vf.keyframe,
-            encode_us: vf.encode_us,
-        }))
+        Ok(self
+            .inner
+            .encode(frame, 0, capture_us)
+            .map(|vf| EncodedFrame {
+                data: vf.to_bytes(),
+                keyframe: vf.keyframe,
+                encode_us: vf.encode_us,
+                capture_us,
+            })
+            .into_iter()
+            .collect())
     }
 }
 
@@ -306,19 +313,20 @@ mod tests {
         let (mut enc, mut dec) = (TilesEncoder::default(), TilesDecoder::default());
         let mut pattern = TestPattern::new(256, 128);
         let first = pattern.next_frame();
-        let e = enc.encode(&first, false).unwrap().unwrap();
+        let e = enc.encode(&first, 1_000, false).unwrap().remove(0);
         assert!(e.keyframe);
+        assert_eq!(e.capture_us, 1_000, "capture time passes through");
         assert_eq!(dec.decode(&e.data, e.keyframe).unwrap().unwrap(), first);
         let second = pattern.next_frame();
-        let e = enc.encode(&second, false).unwrap().unwrap();
+        let e = enc.encode(&second, 2_000, false).unwrap().remove(0);
         assert!(!e.keyframe);
         assert_eq!(dec.decode(&e.data, e.keyframe).unwrap().unwrap(), second);
         assert!(
-            enc.encode(&second, false).unwrap().is_none(),
+            enc.encode(&second, 3_000, false).unwrap().is_empty(),
             "no change, nothing to send"
         );
         assert!(
-            enc.encode(&second, true).unwrap().unwrap().keyframe,
+            enc.encode(&second, 4_000, true).unwrap()[0].keyframe,
             "forced keyframe"
         );
     }

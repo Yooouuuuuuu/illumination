@@ -364,11 +364,19 @@ fixed shape; the harness can revisit it.
 Three rules were **added from the harness** (§5.7) on 2026-10-30, each because a scenario failed
 without it:
 1. **A freeze caused by loss is 🔴, not ⚪.** When fewer than N frames are shown *and* at least
-   N ÷ 2 frames were lost, the second is 🔴. Without this an oversubscribed path (queue
+   **2** frames were lost, the second is 🔴. Without this an oversubscribed path (queue
    overflow drops 50–80 % of packets, nearly no frame completes) read as "still screen" and the
    latency controller never moved; the only way down was the FEC backstop, 150 s to the ceiling
-   plus 30 s per rung. A still screen with the odd lost frame is still ⚪. Lost frames still do
-   not count as late frames; the FEC controller is unchanged.
+   plus 30 s per rung. A still screen with one lost frame is still ⚪. Lost frames still do not
+   count as late frames; the FEC controller is unchanged. (The threshold was N ÷ 2 until the
+   first Wi-Fi log, v0.7.1: during a real stall only the two keyframe attempts per second die,
+   the small frames in between arrive, so dozens of lost frames never happen.)
+
+**The clock behind "within L"** (v0.7.1): the viewer's estimate of the host clock comes from
+the fastest probe of the **last minute**, not of the whole session. Two machines' clocks drift
+apart by 10–50 µs per second; a two-hour session with a one-shot offset read "latency −37 ms",
+graded everything 🟢 and never moved the ladder. Within a minute the drift stays under 3 ms,
+and the asymmetry of a 10 ms round trip bounds the rest.
 2. **A failed raise backs off.** A raise undone by a drop within 60 s counts as a failure of that
    rung; each failure doubles the green run it needs before the next try (15 → 30 → 60 → 120 s),
    and a raise that holds 60 s clears the count. Without this the controller hunted for ever
@@ -424,8 +432,10 @@ Defaults: **floor 5%, ceiling 30%**, both user-changeable. Fast up, slow down.
 viewer reports "frame N broken"; the host encodes its *next* frame as a difference from an older
 frame the viewer does have. No old data is resent, the viewer never waits (it keeps showing the
 last good frame), and the picture heals within one round trip. AV1 and H.265 both support this,
-and it is what Sunshine does. Extra parity for keyframes (which are larger and costlier to lose)
-is a v2 refinement.
+and it is what Sunshine does. **Extra parity for keyframes** (v0.7.1): a keyframe's blocks get at
+least 30 % parity whatever the controller set, and a request is honoured every 250 ms. A
+keyframe is ~180 packets and the one frame that must arrive; at 5–10 % parity on a Wi-Fi burst
+it mostly died, the retry died too, and the picture stalled for seconds (the first live run).
 
 **Implemented in v0.5.1** (`illum_media::fec`, `illum_media::packets`): Reed–Solomon over
 GF(2⁸) (`reed-solomon-erasure`). A frame's packets are grouped into **blocks of at most 128
@@ -691,6 +701,6 @@ Crates are added only when a milestone needs them.
 - Exact threshold for "network stall → release all keys".
 - Parked ideas (not planned, kept so they aren't lost): a **4:4:4 mode** on H.265 for sharper
   coloured text, to try once 4:2:0 is stable (§5.3); a high-quality still frame after the
-  screen stops changing; per-area encoder quality from a neighbourhood score; extra parity for
-  keyframes (v2); frame pacing to the display refresh (v2); an adaptive audio buffer; an emergency
-  drop path if the harness shows one is needed.
+  screen stops changing; per-area encoder quality from a neighbourhood score; frame pacing to
+  the display refresh (v2); an adaptive audio buffer; an emergency drop path if the harness shows
+  one is needed.

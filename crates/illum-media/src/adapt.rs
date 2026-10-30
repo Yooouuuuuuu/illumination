@@ -16,6 +16,16 @@ use std::fmt;
 /// Nothing goes below this; the bottom of every ladder.
 pub const MIN_BITRATE_BPS: u64 = 1_000_000;
 
+/// Lost frames in a second that, with almost nothing shown, mean "frozen by loss" rather than
+/// "still screen". While the viewer waits for a keyframe the host retries one every 250 ms and
+/// the small frames in between arrive fine, so a freeze shows as 2–4 lost frames a second, not
+/// dozens (the harness's 50 % loss had suggested a higher bar; the Wi-Fi log corrected it).
+pub const FREEZE_LOST_FRAMES: u32 = 2;
+
+/// Parity share a keyframe's blocks always get, whatever the controller set: a keyframe is the
+/// one frame that must arrive, and losing it costs a stall until the next one gets through.
+pub const KEYFRAME_FEC_PERCENT: u32 = 30;
+
 /// The encoder's share of a rung's bitrate: parity comes out of the budget (§5.6,
 /// budget-neutral), and 10 % stays free for datagram headers and for the pacer's bucket to
 /// refill, so frames leave in bursts instead of being spread over their own interval.
@@ -64,7 +74,7 @@ pub fn min_frames_to_grade(target_fps: u32) -> u32 {
 pub fn grade(shown: u32, within_limit: u32, frames_lost: u32, target_fps: u32) -> Grade {
     let n = min_frames_to_grade(target_fps);
     if shown < n {
-        return if frames_lost >= n.div_ceil(2) {
+        return if frames_lost >= FREEZE_LOST_FRAMES {
             Grade::Red
         } else {
             Grade::Blank
@@ -547,11 +557,11 @@ mod tests {
 
     #[test]
     fn a_freeze_caused_by_loss_is_red_not_blank() {
-        // Still screen with a couple of lost frames: blank.
-        assert_eq!(grade(0, 0, 2, 60), Grade::Blank);
-        assert_eq!(grade(3, 3, 7, 60), Grade::Blank, "7 < 8 (half of 15)");
-        // Frames were sent and mostly died: the picture froze because of loss.
-        assert_eq!(grade(0, 0, 8, 60), Grade::Red);
+        // Still screen with one lost frame: blank.
+        assert_eq!(grade(0, 0, 0, 60), Grade::Blank);
+        assert_eq!(grade(3, 3, 1, 60), Grade::Blank);
+        // Keyframe attempts keep dying while nothing reaches the screen: frozen by loss.
+        assert_eq!(grade(0, 0, 2, 60), Grade::Red);
         assert_eq!(grade(10, 10, 40, 60), Grade::Red);
         // Enough shown: graded on latency as usual, whatever was lost.
         assert_eq!(grade(15, 15, 40, 60), Grade::Green);

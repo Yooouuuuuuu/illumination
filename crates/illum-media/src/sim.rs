@@ -14,7 +14,7 @@
 //!   waits for a keyframe after a loss (the host serves at most two a second), shows complete
 //!   frames at once, and reports once a second exactly what the real viewer reports.
 
-use crate::adapt::{Adapter, Decision, Grade, Limits, Rung, SecondReport};
+use crate::adapt::{Adapter, Decision, Grade, KEYFRAME_FEC_PERCENT, Limits, Rung, SecondReport};
 use crate::fec::{MAX_DATA_SHARDS, parity_count};
 use std::collections::VecDeque;
 
@@ -329,7 +329,12 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
         let mut remaining = data_packets;
         while remaining > 0 {
             let k = remaining.min(MAX_DATA_SHARDS);
-            blocks.push((k, parity_count(k, fec)));
+            let parity = if keyframe {
+                fec.max(KEYFRAME_FEC_PERCENT)
+            } else {
+                fec
+            };
+            blocks.push((k, parity_count(k, parity)));
             remaining -= k;
         }
         let total_packets: usize = blocks.iter().map(|(k, m)| k + m).sum();

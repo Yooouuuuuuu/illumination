@@ -17,8 +17,8 @@ use illum_core::input::{InputEvent, InputSink};
 use illum_core::protocol::{Channel, ControlMsg};
 use illum_ffmpeg::opus::OpusEncoder;
 use illum_media::adapt::{
-    Adapter, DEFAULT_FEC_CEILING, DEFAULT_FEC_FLOOR, Grade, Limits, Rung, SecondReport,
-    encoder_bitrate,
+    Adapter, DEFAULT_FEC_CEILING, DEFAULT_FEC_FLOOR, Grade, KEYFRAME_FEC_PERCENT, Limits, Rung,
+    SecondReport, encoder_bitrate,
 };
 use illum_media::audio::{AudioSource, FRAME_VALUES, Grouper};
 use illum_media::clock::now_us;
@@ -47,7 +47,7 @@ pub const DEFAULT_MAX_BITRATE_KBPS: u32 = 20_000;
 /// How long the host waits for the viewer's first punch datagram before giving up on UDP.
 const PUNCH_DEADLINE: Duration = Duration::from_secs(5);
 /// A viewer's keyframe request is honoured at most this often.
-const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
+const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(250);
 /// Defaults when the viewer asks for none (§5.8).
 pub const DEFAULT_MAX_FPS: u32 = 60;
 pub const DEFAULT_LATENCY_LIMIT_MS: u32 = 50;
@@ -554,8 +554,10 @@ impl MediaLink {
                             applied = Some(current);
                         }
                         // Frame-rate cap (latest frame wins: skipped frames are simply not sent).
+                        // A frame captured a little early (jitter) still counts: skipping it
+                        // cost a third of the frames at 60 fps.
                         let period_us = 1_000_000 / u64::from(current.rung.fps.max(1));
-                        if captured_us < due_us {
+                        if captured_us + period_us / 2 < due_us {
                             continue;
                         }
                         due_us = due_us.max(captured_us.saturating_sub(period_us / 2)) + period_us;
@@ -586,9 +588,8 @@ impl MediaLink {
                             force_keyframe = true;
                         }
                         let enc = encoder.as_mut().expect("encoder open");
-                        let encoded = match enc.encode(&frame, force_keyframe) {
-                            Ok(Some(e)) => e,
-                            Ok(None) => continue, // nothing changed (tiles)
+                        let frames = match enc.encode(&frame, captured_us, force_keyframe) {
+                            Ok(frames) => frames,
                             Err(e) if enc.codec() != VideoCodec::Tiles => {
                                 tracing::warn!(target: "media", "{} encode failed ({e}); switching to tiles.", enc.codec().name());
                                 encoder = Some(Box::new(TilesEncoder::default()));
@@ -602,35 +603,48 @@ impl MediaLink {
                                 return;
                             }
                         };
+                        if frames.is_empty() {
+                            continue; // nothing changed (tiles), or the codec is still working
+                        }
                         force_keyframe = false;
-                        if encoded.keyframe {
-                            last_keyframe = Some(Instant::now());
-                        }
-                        let meta = FrameMeta {
-                            codec: enc.codec(),
-                            keyframe: encoded.keyframe,
-                            seq,
-                            capture_us: captured_us,
-                            encode_us: encoded.encode_us,
-                        };
-                        let packets = match packetize(meta, &encoded.data, MAX_PAYLOAD, current.fec_percent, &mut fec) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::warn!(target: "media", "Frame {seq} not sent: {e}");
-                                continue;
+                        let codec_used = enc.codec();
+                        for encoded in frames {
+                            if encoded.keyframe {
+                                last_keyframe = Some(Instant::now());
                             }
-                        };
-                        // The viewer may move between NATs; always send to the latest address.
-                        let to = peer.lock().expect("peer lock").unwrap_or(peer_addr);
-                        for payload in packets {
-                            let wait = bucket.take(payload.len() + HEADER_LEN + TAG_LEN, Instant::now());
-                            if !wait.is_zero() {
-                                std::thread::sleep(wait);
+                            let meta = FrameMeta {
+                                codec: codec_used,
+                                keyframe: encoded.keyframe,
+                                seq,
+                                capture_us: encoded.capture_us,
+                                encode_us: encoded.encode_us,
+                            };
+                            // A keyframe is the one frame that must arrive: it gets at least
+                            // the ceiling's parity whatever the controller set (§5.6).
+                            let parity = if encoded.keyframe {
+                                current.fec_percent.max(KEYFRAME_FEC_PERCENT)
+                            } else {
+                                current.fec_percent
+                            };
+                            let packets = match packetize(meta, &encoded.data, MAX_PAYLOAD, parity, &mut fec) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(target: "media", "Frame {seq} not sent: {e}");
+                                    continue;
+                                }
+                            };
+                            // The viewer may move between NATs; always send to the latest address.
+                            let to = peer.lock().expect("peer lock").unwrap_or(peer_addr);
+                            for payload in packets {
+                                let wait = bucket.take(payload.len() + HEADER_LEN + TAG_LEN, Instant::now());
+                                if !wait.is_zero() {
+                                    std::thread::sleep(wait);
+                                }
+                                let datagram = sealer.seal(MediaStream::Video, &payload);
+                                let _ = socket.send_to(&datagram, to);
                             }
-                            let datagram = sealer.seal(MediaStream::Video, &payload);
-                            let _ = socket.send_to(&datagram, to);
+                            seq = seq.wrapping_add(1);
                         }
-                        seq = seq.wrapping_add(1);
                     }
                 })
                 .expect("spawn media-out thread")

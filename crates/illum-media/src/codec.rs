@@ -67,16 +67,22 @@ pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
     pub encode_us: u32,
+    /// Capture time of the frame *in this packet*, carried through the encoder as its pts, so a
+    /// codec that hands frames back a call late cannot mislabel them.
+    pub capture_us: u64,
 }
 
 pub trait VideoEncoder: Send {
     fn codec(&self) -> VideoCodec;
-    /// Encodes one captured frame. `None` means nothing to send (e.g. an unchanged tile frame).
+    /// Encodes one captured frame (stamped `capture_us` on the host clock). Returns whatever the
+    /// codec hands back: nothing (an unchanged tile frame, or a codec still working on it), one
+    /// frame, or several if it caught up; each carries its own capture time.
     fn encode(
         &mut self,
         frame: &Frame,
+        capture_us: u64,
         force_keyframe: bool,
-    ) -> Result<Option<EncodedFrame>, MediaError>;
+    ) -> Result<Vec<EncodedFrame>, MediaError>;
     /// New bitrate target. Returns false if the encoder cannot take it live and must be
     /// reopened (which costs a keyframe).
     fn set_bitrate(&mut self, _bits_per_s: u64) -> bool {

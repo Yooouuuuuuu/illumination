@@ -270,7 +270,8 @@ impl FfmpegEncoder {
         video.set_width(width);
         video.set_height(height);
         video.set_format(input_format);
-        video.set_time_base(Rational::new(1, fps as i32));
+        // pts carries the capture time in microseconds; the frame rate drives rate control.
+        video.set_time_base(Rational::new(1, 1_000_000));
         video.set_frame_rate(Some(Rational::new(fps as i32, 1)));
         video.set_gop(u32::MAX / 2); // keyframes only when asked for
         video.set_max_b_frames(0);
@@ -331,8 +332,9 @@ impl VideoEncoder for FfmpegEncoder {
     fn encode(
         &mut self,
         frame: &Frame,
+        capture_us: u64,
         force_keyframe: bool,
-    ) -> Result<Option<EncodedFrame>, MediaError> {
+    ) -> Result<Vec<EncodedFrame>, MediaError> {
         let start = Instant::now();
         self.fill_input(frame)?;
         let (w, h, input_format) = (self.width, self.height, self.input_format);
@@ -350,38 +352,42 @@ impl VideoEncoder for FfmpegEncoder {
             sws.run(&self.bgra, out)?;
             out
         };
-        input.set_pts(Some(self.pts));
+        // The capture time rides along as pts (strictly increasing, which encoders require).
+        let pts = (capture_us as i64).max(self.pts + 1);
+        self.pts = pts;
+        input.set_pts(Some(pts));
         input.set_kind(if force_keyframe {
             picture::Type::I
         } else {
             picture::Type::None
         });
-        self.pts += 1;
         self.encoder
             .send_frame(input)
             .map_err(|e| err(&self.name, e))?;
 
-        let mut out: Option<EncodedFrame> = None;
+        // One packet per frame with these settings; a codec that is a call behind hands back an
+        // older frame (its pts says which), possibly followed by this one.
+        let mut out: Vec<EncodedFrame> = Vec::new();
         let mut packet = Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
                     let data = packet.data().unwrap_or(&[]).to_vec();
                     let keyframe = packet.is_key();
-                    match &mut out {
-                        // Low-latency settings give one packet per frame; if an encoder still
-                        // splits, append so the frame stays whole.
-                        Some(f) => {
+                    let packet_pts = packet.pts().unwrap_or(pts);
+                    let capture_us = u64::try_from(packet_pts).unwrap_or(capture_us);
+                    match out.last_mut() {
+                        // Two packets for the same pts: a split frame; keep it whole.
+                        Some(f) if f.capture_us == capture_us => {
                             f.data.extend_from_slice(&data);
                             f.keyframe |= keyframe;
                         }
-                        None => {
-                            out = Some(EncodedFrame {
-                                data,
-                                keyframe,
-                                encode_us: 0,
-                            })
-                        }
+                        _ => out.push(EncodedFrame {
+                            data,
+                            keyframe,
+                            encode_us: 0,
+                            capture_us,
+                        }),
                     }
                 }
                 Err(Error::Other { errno }) if errno == EAGAIN => break,
@@ -389,8 +395,9 @@ impl VideoEncoder for FfmpegEncoder {
                 Err(e) => return Err(err(&self.name, e)),
             }
         }
-        if let Some(f) = &mut out {
-            f.encode_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        let encode_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        for f in &mut out {
+            f.encode_us = encode_us;
         }
         Ok(out)
     }
@@ -551,9 +558,9 @@ mod tests {
         eprintln!("{}: decoder {} open", codec.name(), dec.name());
         let mut pattern = TestPattern::new(w, h);
         let mut shown = None;
-        for i in 0..20 {
+        for i in 0..20u64 {
             let frame = pattern.next_frame();
-            if let Some(encoded) = enc.encode(&frame, i == 0).unwrap() {
+            for encoded in enc.encode(&frame, 1_000 + i * 33_333, i == 0).unwrap() {
                 if i == 0 {
                     assert!(encoded.keyframe, "first frame is a keyframe");
                     eprintln!(
@@ -582,6 +589,115 @@ mod tests {
                 info.name
             );
         }
+    }
+
+    /// Each encode call must hand back the frame it was given, with that frame's capture time —
+    /// not the previous one. A codec that lags a call would mislabel every frame's latency.
+    fn no_lag(codec: VideoCodec) {
+        let Some(info) = probe().best_encoder(codec).cloned() else {
+            eprintln!("no {} encoder here; skipping", codec.name());
+            return;
+        };
+        let (w, h) = (1920, 1080);
+        let mut enc = FfmpegEncoder::open_named(codec, &info.name, w, h, 60, 17_000_000).unwrap();
+        let mut pattern = TestPattern::new(w, h);
+        let mut late = 0;
+        for i in 0..30u64 {
+            let frame = pattern.next_frame();
+            let stamp = 5_000 + i * 16_667;
+            let out = enc.encode(&frame, stamp, false).unwrap();
+            let stamps: Vec<u64> = out.iter().map(|f| f.capture_us).collect();
+            if stamps != vec![stamp] {
+                late += 1;
+                eprintln!(
+                    "{} ({}): frame {i} stamped {stamp} came back as {stamps:?}",
+                    codec.name(),
+                    info.name
+                );
+            }
+        }
+        assert_eq!(
+            late,
+            0,
+            "{} via {} hands frames back late",
+            codec.name(),
+            info.name
+        );
+    }
+
+    #[test]
+    fn av1_encoder_does_not_lag() {
+        no_lag(VideoCodec::Av1);
+    }
+
+    /// Which pattern tick a decoded picture shows: the white bar in the bottom band moves 16 px
+    /// per frame, so its position says which frame this is.
+    fn tick_of(frame: &Frame) -> Option<u64> {
+        let y = frame.height * 7 / 8;
+        let bright: Vec<u32> = (0..frame.width)
+            .filter(|&x| {
+                let p = frame.pixel(x, y);
+                u32::from(p.r) + u32::from(p.g) + u32::from(p.b) > 384
+            })
+            .collect();
+        if bright.is_empty() {
+            return None;
+        }
+        let mean = bright.iter().map(|&x| f64::from(x)).sum::<f64>() / bright.len() as f64;
+        Some(((mean - 7.5) / 16.0).round().max(0.0) as u64)
+    }
+
+    /// The decoder must give back the picture of the packet it was just fed, not an earlier one:
+    /// the viewer labels the picture with the packet's capture time.
+    fn decoder_lag(codec: VideoCodec) {
+        let Some(info) = probe().best_encoder(codec).cloned() else {
+            eprintln!("no {} encoder here; skipping", codec.name());
+            return;
+        };
+        let (w, h) = (1920, 1080);
+        let mut enc = FfmpegEncoder::open_named(codec, &info.name, w, h, 60, 17_000_000).unwrap();
+        let mut dec = FfmpegDecoder::open(codec).unwrap();
+        let mut pattern = TestPattern::new(w, h);
+        let mut lags = Vec::new();
+        for i in 0..30u64 {
+            let frame = pattern.next_frame();
+            for encoded in enc.encode(&frame, 5_000 + i * 16_667, i == 0).unwrap() {
+                match dec.decode(&encoded.data, encoded.keyframe).unwrap() {
+                    Some(out) => lags.push(tick_of(&out).map(|t| i as i64 - t as i64)),
+                    None => lags.push(None),
+                }
+            }
+        }
+        eprintln!(
+            "{} via {} → {}: lag per frame {:?}",
+            codec.name(),
+            info.name,
+            dec.name(),
+            lags
+        );
+        let late = lags.iter().filter(|l| **l != Some(0)).count();
+        assert_eq!(
+            late,
+            0,
+            "{} decoder ({}) returns pictures late: {lags:?}",
+            codec.name(),
+            dec.name()
+        );
+    }
+
+    #[test]
+    fn av1_decoder_does_not_lag() {
+        decoder_lag(VideoCodec::Av1);
+    }
+
+    #[test]
+    fn hevc_decoder_does_not_lag() {
+        decoder_lag(VideoCodec::Hevc);
+    }
+
+    #[test]
+    fn hevc_encoder_does_not_lag() {
+        no_lag(VideoCodec::Hevc);
     }
 
     #[test]
