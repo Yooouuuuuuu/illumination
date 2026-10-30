@@ -311,13 +311,16 @@ async fn lossy_codec_is_chosen_and_keeps_colours() {
         eprintln!("no AV1/H.265 encoder on this machine; skipping");
         return;
     }
-    let expected = codecs[0];
-    let addr = start_host_with("host-e", Some(pattern_factory()), codecs).await;
-    let decodes: Vec<String> = probe
-        .capabilities()
-        .into_iter()
-        .filter(|c| c.starts_with("dec:"))
+    // What the viewer offers: AV1 only with hardware decoding (none in this build yet), so on
+    // this machine the expected pick is H.265 even when the host could send AV1.
+    let decodes = probe.decode_capabilities(true);
+    let host_caps: Vec<String> = codecs
+        .iter()
+        .map(|c| c.encode_capability().to_string())
         .collect();
+    let expected = illum_media::codec::choose_codec(&host_caps, &decodes);
+    assert_ne!(expected, VideoCodec::Tiles, "a lossy codec is negotiated");
+    let addr = start_host_with("host-e", Some(pattern_factory()), codecs).await;
     let conn = connect(&endpoint_with("ctl-e", &decodes), &addr.to_string())
         .await
         .unwrap();

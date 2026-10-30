@@ -253,6 +253,12 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
   `libdav1d` for AV1, FFmpeg's `hevc`. The result becomes hello capabilities `enc:av1`,
   `enc:hevc`, `dec:av1`, `dec:hevc`; the host picks per the rule above (`choose_codec`).
   `illum codecs` prints the probe with FFmpeg's reasons for each encoder that would not open.
+  **A viewer offers `dec:av1` only when it decodes AV1 in hardware** (v0.7.2): from v0.5.1 to
+  v0.7.1 the software decoder counted, the laptop received AV1 and spent ~20 ms a frame on it —
+  half the lag of the first live runs. Until the hardware decode path exists (M8) every viewer
+  therefore gets H.265. The user's **hardware decode** setting (default on; `--software-decode`)
+  turns the GPU decoders off, which also removes AV1 from the offer. NVENC AV1 is encoded in
+  4 tile columns so a software decoder can use several cores without a frame of delay.
 - Encoder settings are all about delay: no B-frames, no lookahead, one thread, a 100 ms
   rate-control buffer, `LOW_DELAY`, keyframes only on request (`forced-idr`), NVENC preset p4 /
   tune ll / CBR. The encoder gets 85 % of the bitrate cap; packet headers and parity take the
@@ -505,14 +511,16 @@ Two main numbers, and a few under "advanced":
 | FEC range (advanced) | 5–30% | floor and ceiling |
 | Max frame rate (advanced) | 60 | some people want 30 to save bandwidth |
 | Send audio | on | off means nothing is captured or sent |
+| Hardware decode (viewer) | on | off = CPU decoders only, so never AV1 (decided 2026-10-30) |
 
 Plus one message the app shows rather than asks: "best possible on this link: X ms" when L is out
 of reach.
 
 **Implemented in v0.6.0** as viewer flags, sent to the host in `ScreenStart` (0 = host default,
 and the host clamps: bitrate to its own ceiling, parity to 0–50 %, frame rate to 15–240):
-`--latency-limit 50`, `--max-bitrate 20`, `--max-fps 60`, `--fec-min 5 --fec-max 30`. "Send
-audio" arrives with audio; the "best possible on this link" message is still to do.
+`--latency-limit 50`, `--max-bitrate 20`, `--max-fps 60`, `--fec-min 5 --fec-max 30`,
+`--mute` (v0.7.0), `--software-decode` (v0.7.2; the host side has `--no-audio`). The "best
+possible on this link" message is still to do.
 
 ## 6. Input
 

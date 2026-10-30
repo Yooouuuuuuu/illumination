@@ -48,6 +48,8 @@ pub struct ViewParams {
     pub latency_limit_ms: u32,
     /// Ask for the host's sound and play it.
     pub audio: bool,
+    /// Use the GPU's decoder where it exists (and offer AV1 only then); off = CPU decoding only.
+    pub hw_decode: bool,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
     pub media_target: Option<SocketAddr>,
 }
@@ -62,6 +64,7 @@ impl ViewParams {
             fec_max: 0,
             latency_limit_ms: 0,
             audio: true,
+            hw_decode: true,
             media_target: None,
         }
     }
@@ -246,14 +249,18 @@ fn media_loop(
                         }
                     }
                     let dec = decoder.as_mut().expect("decoder open");
+                    let decode_start = Instant::now();
                     match dec.decode(&data, meta.keyframe) {
                         Ok(Some(frame)) => {
                             awaiting_keyframe = false;
+                            let decode_us =
+                                decode_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                             let mut state = shared.lock().expect("view state lock");
                             state.frame = Some(Arc::new(frame));
                             state.codec = Some(meta.codec);
                             state.latest = Some((meta.seq as u64, meta.capture_us));
                             state.stats.frame_received(data.len(), meta.encode_us);
+                            state.stats.decoded(decode_us);
                             drop(state);
                             notify();
                         }

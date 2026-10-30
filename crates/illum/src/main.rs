@@ -123,6 +123,10 @@ enum Command {
         /// Don't ask for the host's sound.
         #[arg(long)]
         mute: bool,
+        /// Decode on the CPU only (the default uses the GPU's decoder where it exists, and
+        /// offers AV1 only then).
+        #[arg(long)]
+        software_decode: bool,
     },
     /// List this machine's displays.
     Displays,
@@ -256,6 +260,7 @@ fn main() -> std::process::ExitCode {
             fec_min,
             fec_max,
             mute,
+            software_decode,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
@@ -268,6 +273,7 @@ fn main() -> std::process::ExitCode {
                     fec_max: *fec_max,
                     latency_limit_ms: *latency_limit,
                     audio: !*mute,
+                    hw_decode: !*software_decode,
                     ..ViewParams::new(*screen)
                 },
             };
@@ -559,13 +565,10 @@ fn run_view(
 ) -> Result<()> {
     let mut ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
-    // Tell the host which lossy codecs we can decode; it picks AV1, else H.265, else tiles.
-    ep.capabilities.extend(
-        illum_ffmpeg::probe()
-            .capabilities()
-            .into_iter()
-            .filter(|c| c.starts_with("dec:")),
-    );
+    // Tell the host which lossy codecs we can decode (AV1 only in hardware); it picks AV1,
+    // else H.265, else tiles.
+    ep.capabilities
+        .extend(illum_ffmpeg::probe().decode_capabilities(args.params.hw_decode));
     println!("Connecting to {}…", normalize_target(target));
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));

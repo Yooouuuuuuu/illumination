@@ -36,6 +36,9 @@ pub struct Stats {
     frames: u32,
     bytes: u64,
     encode_us: u64,
+    decode_us: u64,
+    decoded: u32,
+    draw_us: u64,
     latencies_ms: Vec<f64>,
     datagrams: u64,
     lost: u64,
@@ -51,6 +54,9 @@ impl Default for Stats {
             frames: 0,
             bytes: 0,
             encode_us: 0,
+            decode_us: 0,
+            decoded: 0,
+            draw_us: 0,
             latencies_ms: Vec::new(),
             datagrams: 0,
             lost: 0,
@@ -65,6 +71,12 @@ impl Stats {
     pub fn frame_received(&mut self, bytes: usize, encode_us: u32) {
         self.bytes += bytes as u64;
         self.encode_us += encode_us as u64;
+    }
+
+    /// Time the viewer spent decoding one frame.
+    pub fn decoded(&mut self, decode_us: u32) {
+        self.decode_us += u64::from(decode_us);
+        self.decoded += 1;
     }
 
     /// One 5 ms audio frame arrived.
@@ -85,6 +97,11 @@ impl Stats {
         if let Some(l) = latency_ms {
             self.latencies_ms.push(l);
         }
+    }
+
+    /// Time the window spent turning the newest frame into pixels (scale, cursor, copy).
+    fn drawn(&mut self, draw_us: u64) {
+        self.draw_us += draw_us;
     }
 
     /// Recomputes the summary once a second. Returns true if it changed.
@@ -108,6 +125,18 @@ impl Stats {
             parts.push(format!(
                 "encode {:.1} ms",
                 self.encode_us as f64 / self.frames as f64 / 1000.0
+            ));
+        }
+        if self.decoded > 0 {
+            parts.push(format!(
+                "decode {:.1} ms",
+                self.decode_us as f64 / f64::from(self.decoded) / 1000.0
+            ));
+        }
+        if self.frames > 0 {
+            parts.push(format!(
+                "draw {:.1} ms",
+                self.draw_us as f64 / self.frames as f64 / 1000.0
             ));
         }
         if let Some(rtt) = rtt {
@@ -351,6 +380,7 @@ impl App {
             return;
         };
         let mut state = self.shared.lock().expect("view state lock");
+        let draw_start = Instant::now();
         let presented = match state.frame.clone() {
             Some(frame) => {
                 let frame: &Frame = &frame;
@@ -396,6 +426,9 @@ impl App {
         });
         if new_frame.is_some() {
             state.mark_presented(latency_ms);
+            state
+                .stats
+                .drawn(draw_start.elapsed().as_micros().min(u64::MAX as u128) as u64);
         }
         let rtt = state.clock.last_rtt;
         let title = if let Some(status) = state.status.clone() {

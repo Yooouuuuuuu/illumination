@@ -88,6 +88,11 @@ fn encoder_options(name: &str) -> Dictionary {
         if name == "hevc_nvenc" {
             d.set("profile", "main");
         }
+        if name == "av1_nvenc" {
+            // Tiles let a software decoder (dav1d) use several cores without frame delay;
+            // a hardware decoder doesn't mind. Costs about 2 % in bits.
+            d.set("tile_columns", "4");
+        }
         d
     } else if name.ends_with("_amf") {
         ff::dict! { "usage" => "lowlatency", "rc" => "cbr" }
@@ -110,20 +115,38 @@ pub struct EncoderInfo {
 #[derive(Debug, Clone, Default)]
 pub struct Probe {
     pub encoders: Vec<EncoderInfo>,
+    /// Software decoders (dav1d, FFmpeg's hevc), always present in this build.
     pub decoders: Vec<(VideoCodec, String)>,
+    /// Codecs the GPU decodes here. Empty until the hardware decode path (D3D11VA) lands in M8.
+    pub hardware_decoders: Vec<VideoCodec>,
 }
 
 impl Probe {
-    /// Capability strings for the hello: `enc:av1` when some AV1 encoder opens here, etc.
+    /// Capability strings for the hello: `enc:av1` when some AV1 encoder opens here, plus what
+    /// this side can decode with hardware decoding on.
     pub fn capabilities(&self) -> Vec<String> {
         let mut caps = Vec::new();
         for codec in [VideoCodec::Av1, VideoCodec::Hevc] {
             if self.encoders.iter().any(|e| e.codec == codec) {
                 caps.push(codec.encode_capability().to_string());
             }
-            if self.decoders.iter().any(|(c, _)| *c == codec) {
-                caps.push(codec.decode_capability().to_string());
-            }
+        }
+        caps.extend(self.decode_capabilities(true));
+        caps
+    }
+
+    /// What a viewer may offer to decode (§5.3): H.265 always (its software decoder is cheap);
+    /// AV1 **only in hardware** — decoded on a CPU it costs more than it saves, which is why the
+    /// rule says "AV1 if both sides can use it in hardware". `hardware` is the user's
+    /// "hardware decode" setting (default on); off means software decoders only.
+    pub fn decode_capabilities(&self, hardware: bool) -> Vec<String> {
+        let mut caps = Vec::new();
+        let hw = |c: VideoCodec| hardware && self.hardware_decoders.contains(&c);
+        if hw(VideoCodec::Av1) {
+            caps.push(VideoCodec::Av1.decode_capability().to_string());
+        }
+        if hw(VideoCodec::Hevc) || self.decoders.iter().any(|(c, _)| *c == VideoCodec::Hevc) {
+            caps.push(VideoCodec::Hevc.decode_capability().to_string());
         }
         caps
     }

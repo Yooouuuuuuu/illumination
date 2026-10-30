@@ -11,6 +11,32 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-30
+
+The codec rule enforced as written, and the numbers to judge the viewer by.
+
+### Changed
+
+- **A viewer offers AV1 only when it decodes AV1 in hardware.** Since v0.5.1
+  the viewer advertised `dec:av1` on the strength of the software decoder
+  (`dav1d`), so the laptop received AV1 and spent ~20 ms per 1080p frame
+  decoding it on the CPU — the main part of the lag next to RustDesk. The
+  rule (§5.3) was always "AV1 if both sides can use it in hardware"; until the
+  GPU decode path lands (M8) every viewer therefore gets H.265, whose software
+  decoder costs half as much, and AV1 comes back the day the hardware path
+  exists.
+- New viewer setting **hardware decode**, default on: `illum view
+  --software-decode` turns it off (CPU decoders only, so never AV1).
+- NVENC encodes AV1 in 4 tile columns, so a software decoder can use several
+  cores without adding a frame of delay (~2 % more bits).
+- The title bar and viewer log now show `decode x ms` and `draw y ms` next to
+  `encode`, so the viewer's own cost is visible.
+
+### Verified
+
+- `cargo test`: 136 tests pass (the end-to-end codec test now expects what
+  the rule yields on the test machine); `cargo clippy` is clean.
+
 ## [0.7.1] - 2026-10-30
 
 What the first live run of the adaptation taught (this PC → laptop over
