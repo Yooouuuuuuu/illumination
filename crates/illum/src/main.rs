@@ -104,6 +104,17 @@ enum Command {
         /// Cap on the host's media rate in Mb/s (the top of the ladder; default 20).
         #[arg(long, default_value_t = 20.0)]
         max_bitrate: f64,
+        /// Highest frame rate to ask for (the top of the ladder; default 60).
+        #[arg(long, default_value_t = 60)]
+        max_fps: u32,
+        /// Frames arriving later than this after capture count as late (default 50 ms).
+        #[arg(long, default_value_t = 50)]
+        latency_limit: u32,
+        /// Parity range in percent for the loss controller (default 5 to 30).
+        #[arg(long, default_value_t = 5)]
+        fec_min: u32,
+        #[arg(long, default_value_t = 30)]
+        fec_max: u32,
     },
     /// List this machine's displays.
     Displays,
@@ -232,13 +243,23 @@ fn main() -> std::process::ExitCode {
             keyboard,
             view_only,
             max_bitrate,
+            max_fps,
+            latency_limit,
+            fec_min,
+            fec_max,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
-                screen: *screen,
                 keyboard: *keyboard,
                 view_only: *view_only,
-                max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
+                params: ViewParams {
+                    max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
+                    max_fps: *max_fps,
+                    fec_min: *fec_min,
+                    fec_max: *fec_max,
+                    latency_limit_ms: *latency_limit,
+                    ..ViewParams::new(*screen)
+                },
             };
             run_view(&runtime, &home, target, options)
         }
@@ -487,10 +508,9 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
 }
 
 struct ViewArgs {
-    screen: u32,
     keyboard: KeyboardMode,
     view_only: bool,
-    max_bitrate_kbps: u32,
+    params: ViewParams,
 }
 
 /// Connects, then shows the host's screen in a window until it is closed.
@@ -541,11 +561,7 @@ fn run_view(
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
         let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
-        let params = ViewParams {
-            display: args.screen,
-            max_bitrate_kbps: args.max_bitrate_kbps,
-            media_target: None,
-        };
+        let params = args.params.clone();
         runtime.spawn(async move {
             let result = run_viewer_session(conn, params, shared, notify).await;
             waker.wake(UiEvent::Exit);

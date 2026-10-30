@@ -11,6 +11,58 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-30
+
+Milestone M5: adaptation. The host now finds the quality the link can carry
+instead of sending the cap and hoping.
+
+### Added
+
+- **The ladder and the latency controller** (architecture §5.5). Every
+  second the viewer reports how many frames it showed and how many arrived
+  within the latency limit (default 50 ms). The host grades the second
+  🟢/🟡/🔴/⚪ and walks a ladder — bitrate × 0.8 steps, then 60/45/30/20/15 fps,
+  then 75 % and 50 % resolution, bottom ~1 Mb/s — one rung down when 🔴 fills
+  30 % of the last 10 graded seconds, one rung up when 🟢 fills 80 % of the
+  last 15, never while the path is losing packets. Starts at the top.
+- **The FEC controller** (§5.6): packet loss before repair over 30 s windows
+  moves parity +5 points per 🔴 window (≥ 0.5 %) up to the ceiling, −5 per 🟢
+  window (< 0.1 %) after two in a row down to the floor; defaults 5–30 %.
+  Parity comes out of the rung's budget. At the ceiling with frames still
+  dying, it asks the ladder for one rung down.
+- **Simulated link** (`illum_media::sim`, §5.7) and six scored scenarios in
+  `crates/illum-media/tests/harness.rs`: utilisation, flaps, recovery time,
+  false drops, seconds over the limit.
+- Viewer settings as flags: `--latency-limit <ms>`, `--max-fps`,
+  `--fec-min`, `--fec-max` (with the existing `--max-bitrate`).
+- The host tells the viewer its rung and parity (`Quality`); the title bar
+  shows `rung 3/11: 12.8 Mb/s 60 fps, parity 10 %`, the host log says why
+  each change happened.
+
+### Changed
+
+- Three rules that the harness forced, all recorded in §5.5: a second with
+  almost nothing shown is ⚪ only if nothing was lost — if at least half the
+  grading threshold of frames were *lost*, it is 🔴 (an oversubscribed path
+  otherwise left the controller blind for minutes); a raise that is undone
+  within 60 s backs off (the green run needed doubles, 15 → 30 → 60 → 120 s),
+  which stops the hunting between the rung that fits and the one above; the
+  backstop fires only while frames are still being lost.
+- The pacer's burst now holds at least two frames (was a fixed 50 ms), and the
+  encoder gets `rung × 100 / (100 + parity) × 90 %` instead of a fixed 85 %:
+  frames leave at link speed, and parity really is budget-neutral.
+- Encoders are reopened when the rung changes frame rate or resolution
+  (hardware encoders take bitrate changes live; software ones are reopened).
+- Protocol version 6: `ScreenStart` carries the settings, `MediaReport` the
+  shown/within counts, and `Quality` is new.
+
+### Verified
+
+- `cargo test`: 122 tests pass, including the six harness scenarios and the
+  end-to-end run that checks the host's first `Quality` (top rung, 5 %
+  parity). `cargo clippy` is clean.
+- Not yet measured live between the two machines.
+
 ## [0.5.8] - 2026-10-28
 
 ### Fixed

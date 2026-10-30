@@ -96,11 +96,7 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
     let conn = connect(&endpoint("ctl"), &addr.to_string()).await.unwrap();
     let sender = conn.sender();
     let shared: Shared = Arc::default();
-    let params = ViewParams {
-        display: 0,
-        max_bitrate_kbps: 0,
-        media_target: None,
-    };
+    let params = ViewParams::new(0);
     let session = tokio::spawn(run_viewer_session(
         conn,
         params,

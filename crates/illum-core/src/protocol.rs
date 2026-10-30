@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
@@ -101,11 +101,30 @@ pub enum ControlMsg {
     Pong {
         seq: u64,
     },
-    /// Controller → host: start streaming display `display` (0 = primary). `max_bitrate_kbps`
-    /// caps the host's media rate (0 = the host's default).
+    /// Controller → host: start streaming display `display` (0 = primary). The viewer's
+    /// settings (architecture §5.8) travel with it; 0 means the host's default.
     ScreenStart {
         display: u32,
+        /// Top of the ladder.
         max_bitrate_kbps: u32,
+        max_fps: u32,
+        /// Parity range for the FEC controller, in percent.
+        fec_min: u32,
+        fec_max: u32,
+        /// The viewer's latency limit (for the host's log; the viewer grades against it).
+        latency_limit_ms: u32,
+    },
+    /// Host → controller: the rung and parity in use (shown in the title bar). Sent when the
+    /// stream starts and whenever the controllers change something.
+    Quality {
+        rung: u32,
+        rungs: u32,
+        bitrate_kbps: u32,
+        fps: u32,
+        scale_percent: u32,
+        fec_percent: u32,
+        /// Why, in a few words (empty at start).
+        reason: String,
     },
     /// Host → controller: send media datagrams to the host's address on this UDP port.
     MediaEndpoint {
@@ -115,14 +134,18 @@ pub enum ControlMsg {
     FrameLost {
         seq: u64,
     },
-    /// Controller → host, once a second: datagrams received and lost (before any repair), and
-    /// frames that could not be assembled.
+    /// Controller → host, once a second: datagrams received and lost (before any repair),
+    /// frames that could not be assembled, and what reached the screen — the input of the
+    /// controllers (architecture §5.5).
     MediaReport {
         received: u32,
         lost: u32,
         frames_lost: u32,
         /// Frames that arrived incomplete and were rebuilt from parity.
         repaired: u32,
+        /// Frames presented, and how many of them within the viewer's latency limit.
+        shown: u32,
+        within_limit: u32,
     },
     /// Controller → host: stop streaming.
     ScreenStop,
@@ -195,6 +218,19 @@ mod tests {
             ControlMsg::ScreenStart {
                 display: 1,
                 max_bitrate_kbps: 6000,
+                max_fps: 60,
+                fec_min: 5,
+                fec_max: 30,
+                latency_limit_ms: 50,
+            },
+            ControlMsg::Quality {
+                rung: 2,
+                rungs: 11,
+                bitrate_kbps: 12_800,
+                fps: 60,
+                scale_percent: 100,
+                fec_percent: 10,
+                reason: "🔴 in ≥ 30 % of the last 10 s".into(),
             },
             ControlMsg::MediaEndpoint { port: 28326 },
             ControlMsg::FrameLost { seq: 5 },
@@ -203,6 +239,8 @@ mod tests {
                 lost: 2,
                 frames_lost: 1,
                 repaired: 3,
+                shown: 58,
+                within_limit: 55,
             },
             ControlMsg::ScreenStop,
             ControlMsg::ScreenError {

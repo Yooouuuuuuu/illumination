@@ -12,7 +12,7 @@ use illum_media::cursor::CursorMsg;
 use illum_media::packets::{Assembled, Reassembler};
 use illum_media::tiles::TilesDecoder;
 use illum_net::{Connection, MediaClient, MediaStream, NetError, Sender};
-use illum_ui::Shared;
+use illum_ui::{Quality, Shared};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,13 +35,32 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// While waiting for a keyframe, ask again this often if non-keyframes keep arriving.
 const KEYFRAME_REMINDER: Duration = Duration::from_secs(1);
 
-/// What the viewer asks for.
+/// What the viewer asks for (architecture §5.8; 0 = the host's default).
 #[derive(Debug, Clone)]
 pub struct ViewParams {
     pub display: u32,
     pub max_bitrate_kbps: u32,
+    pub max_fps: u32,
+    pub fec_min: u32,
+    pub fec_max: u32,
+    /// Frames presented later than this after capture count as late.
+    pub latency_limit_ms: u32,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
     pub media_target: Option<SocketAddr>,
+}
+
+impl ViewParams {
+    pub fn new(display: u32) -> ViewParams {
+        ViewParams {
+            display,
+            max_bitrate_kbps: 0,
+            max_fps: 0,
+            fec_min: 0,
+            fec_max: 0,
+            latency_limit_ms: 0,
+            media_target: None,
+        }
+    }
 }
 
 fn protocol(e: impl std::fmt::Display) -> NetError {
@@ -243,16 +262,18 @@ fn media_loop(
         }
         if now >= next_report {
             next_report = now + REPORT_INTERVAL;
-            shared
-                .lock()
-                .expect("view state lock")
-                .stats
-                .packets(received, lost, repaired);
+            let (shown, within_limit) = {
+                let mut state = shared.lock().expect("view state lock");
+                state.stats.packets(received, lost, repaired);
+                state.take_presented()
+            };
             sender.send_control(&ControlMsg::MediaReport {
                 received,
                 lost,
                 frames_lost,
                 repaired,
+                shown,
+                within_limit,
             });
             received = 0;
             lost = 0;
@@ -268,9 +289,16 @@ pub async fn run_viewer_session(
     shared: Shared,
     notify: Notify,
 ) -> Result<(), NetError> {
+    if params.latency_limit_ms > 0 {
+        shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
+    }
     conn.send_control(&ControlMsg::ScreenStart {
         display: params.display,
         max_bitrate_kbps: params.max_bitrate_kbps,
+        max_fps: params.max_fps,
+        fec_min: params.fec_min,
+        fec_max: params.fec_max,
+        latency_limit_ms: params.latency_limit_ms,
     });
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.
@@ -339,6 +367,28 @@ pub async fn run_viewer_session(
                             notify();
                         }
                     }
+                }
+                Ok(ControlMsg::Quality {
+                    rung,
+                    rungs,
+                    bitrate_kbps,
+                    fps,
+                    scale_percent,
+                    fec_percent,
+                    reason,
+                }) => {
+                    if !reason.is_empty() {
+                        tracing::info!(target: "media", "Host now sends rung {rung}/{rungs}: {:.1} Mb/s {fps} fps {scale_percent} %, parity {fec_percent} % — {reason}.", f64::from(bitrate_kbps) / 1000.0);
+                    }
+                    shared.lock().expect("view state lock").quality = Some(Quality {
+                        rung,
+                        rungs,
+                        bitrate_kbps,
+                        fps,
+                        scale_percent,
+                        fec_percent,
+                    });
+                    notify();
                 }
                 Ok(ControlMsg::TimeReply { seq, host_us }) => {
                     if let Some(sent) = probes.lock().expect("probes lock").remove(&seq) {

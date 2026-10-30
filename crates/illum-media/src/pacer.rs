@@ -30,6 +30,19 @@ impl TokenBucket {
         self.rate_bytes_per_s = bits_per_s as f64 / 8.0;
     }
 
+    /// Changes the burst allowance (as a duration at the current rate).
+    pub fn set_burst(&mut self, burst: Duration) {
+        self.burst_bytes = (self.rate_bytes_per_s * burst.as_secs_f64()).max(1500.0);
+        self.tokens = self.tokens.min(self.burst_bytes);
+    }
+
+    /// The burst allowance for a frame rate: at least 50 ms, and at least two frames, so a
+    /// frame leaves at link speed instead of being spread over its own interval (which would
+    /// put every frame at the low rungs over the latency limit on its own).
+    pub fn burst_for(fps: u32) -> Duration {
+        Duration::from_millis(50).max(Duration::from_secs_f64(2.0 / f64::from(fps.max(1))))
+    }
+
     pub fn rate_bits_per_s(&self) -> u64 {
         (self.rate_bytes_per_s * 8.0) as u64
     }

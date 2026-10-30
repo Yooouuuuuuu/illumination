@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Media for Illumination (architecture §5): one pixel format, the tile codec, the colour test
-//! pattern, cursor shapes and scaling for display. Platform-independent.
+//! Media for Illumination (architecture §5): one pixel format, codec interfaces and the tile
+//! codec, packetisation with parity, the adaptation controllers and their simulated link, the
+//! colour test pattern, cursor shapes and scaling. Platform-independent.
 
+pub mod adapt;
 pub mod clock;
 pub mod codec;
 pub mod cursor;
@@ -11,6 +13,7 @@ pub mod pacer;
 pub mod packets;
 pub mod pattern;
 pub mod scale;
+pub mod sim;
 pub mod source;
 pub mod tiles;
 

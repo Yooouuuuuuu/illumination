@@ -77,8 +77,11 @@ pub trait VideoEncoder: Send {
         frame: &Frame,
         force_keyframe: bool,
     ) -> Result<Option<EncodedFrame>, MediaError>;
-    /// New bitrate target, if the codec has one.
-    fn set_bitrate(&mut self, _bits_per_s: u64) {}
+    /// New bitrate target. Returns false if the encoder cannot take it live and must be
+    /// reopened (which costs a keyframe).
+    fn set_bitrate(&mut self, _bits_per_s: u64) -> bool {
+        true
+    }
 }
 
 pub trait VideoDecoder: Send {

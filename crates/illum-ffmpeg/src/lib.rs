@@ -393,15 +393,19 @@ impl VideoEncoder for FfmpegEncoder {
         Ok(out)
     }
 
-    fn set_bitrate(&mut self, bits_per_s: u64) {
-        // Hardware encoders pick these up live; whether software ones need a reopen is for the
-        // adaptation milestone to find out.
+    fn set_bitrate(&mut self, bits_per_s: u64) -> bool {
+        // NVENC, AMF and QSV reconfigure from these fields on the next frame; the software
+        // encoders do not, so the host reopens them.
+        if !is_hardware(&self.name) {
+            return false;
+        }
         unsafe {
             let ctx = self.encoder.as_mut_ptr();
             (*ctx).bit_rate = bits_per_s as i64;
             (*ctx).rc_max_rate = bits_per_s as i64;
             (*ctx).rc_buffer_size = (bits_per_s / 10) as i32;
         }
+        true
     }
 }
 

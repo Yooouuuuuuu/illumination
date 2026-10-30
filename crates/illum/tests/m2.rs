@@ -142,9 +142,9 @@ fn lossy_relay(host: SocketAddr, drop_per_mille: u32) -> (SocketAddr, Arc<Atomic
 
 fn params(media_target: Option<SocketAddr>) -> ViewParams {
     ViewParams {
-        display: 0,
         max_bitrate_kbps: 20_000,
         media_target,
+        ..ViewParams::new(0)
     }
 }
 
@@ -223,6 +223,16 @@ async fn test_pattern_arrives_bit_exact_over_udp() {
     })
     .await;
     assert!(shared.lock().unwrap().status.is_none(), "no error status");
+    let quality = shared
+        .lock()
+        .unwrap()
+        .quality
+        .expect("the host announced its rung");
+    assert_eq!(
+        (quality.rung, quality.bitrate_kbps, quality.fps),
+        (0, 20_000, 60)
+    );
+    assert_eq!(quality.fec_percent, 5);
 
     sender.send_control(&ControlMsg::Bye);
     let ended = tokio::time::timeout(Duration::from_secs(5), session)

@@ -350,6 +350,39 @@ band and (as far as its log shows) never moves again. Moonlight never adapts and
 lower the bitrate. RustDesk adapts on queue delay above a 150 ms threshold and starts low. Ours
 works in the user's own terms (a latency number), keeps adapting, and starts high.
 
+**Implemented in v0.6.0** (`illum_media::adapt`; the host runs it, the viewer measures). The
+viewer counts, per second, frames presented and frames presented within L (its clock estimate
+against the capture time in the packet header) and reports both with the loss counts; the host
+grades and decides, applies the rung to the pacer, the encoder (bitrate live on hardware
+encoders; frame rate and resolution by reopening, which costs a keyframe) and the packetiser's
+parity, and tells the viewer (`Quality`, shown in the title). The ladder as built: five bitrate
+rungs (×0.8 each, so down to 0.41 × cap), then 45/30/20/15 fps with bitrate scaled with the
+frame rate, then 75 % and 50 % of the native size, never below 1 Mb/s — 11 rungs from a
+20 Mb/s cap. The resolution floor per bitrate of the plan above was dropped in favour of this
+fixed shape; the harness can revisit it.
+
+Three rules were **added from the harness** (§5.7) on 2026-10-30, each because a scenario failed
+without it:
+1. **A freeze caused by loss is 🔴, not ⚪.** When fewer than N frames are shown *and* at least
+   N ÷ 2 frames were lost, the second is 🔴. Without this an oversubscribed path (queue
+   overflow drops 50–80 % of packets, nearly no frame completes) read as "still screen" and the
+   latency controller never moved; the only way down was the FEC backstop, 150 s to the ceiling
+   plus 30 s per rung. A still screen with the odd lost frame is still ⚪. Lost frames still do
+   not count as late frames; the FEC controller is unchanged.
+2. **A failed raise backs off.** A raise undone by a drop within 60 s counts as a failure of that
+   rung; each failure doubles the green run it needs before the next try (15 → 30 → 60 → 120 s),
+   and a raise that holds 60 s clears the count. Without this the controller hunted for ever
+   between the rung that fits and the one just above it (10.24 vs 8.19 Mb/s on a 10 Mb/s path).
+3. **The backstop needs frames still dying**, not merely loss above the threshold: with parity
+   at the ceiling repairing every frame, persistent random loss is path loss, fully handled, and
+   walking the ladder down would only lower the picture for nothing.
+
+Two facts about the pacer came out of the same runs and apply to the host: the encoder's share
+is `rung × 100 / (100 + parity %) × 90 %` (parity truly budget-neutral, 10 % left for headers
+and for the bucket to refill), and the burst allowance is at least **two frames** (was 50 ms),
+otherwise a frame at the low frame-rate rungs is spread over its own interval by our own pacer
+and can never be within a 50 ms limit.
+
 ### 5.6 Loss: parity FEC, never resend
 Pixels are never resent (§2). Loss is handled in two layers.
 
@@ -436,6 +469,22 @@ One parameter changes per run; everything else stays fixed. The tunables, with t
 | FEC decay wait | 2 clean windows |
 | FEC backstop wait | 1 window at ceiling |
 
+**Implemented in v0.6.0** (`illum_media::sim`, `crates/illum-media/tests/harness.rs`). A model
+of host, path and viewer runs the real `Adapter` in model time: frames of bitrate ÷ fps bytes
+(a keyframe about 100 ms of bitrate), packetised with the current parity and paced by the same
+token bucket as the host; a FIFO path with service rate, base delay, a queue limit after which
+packets drop, random per-packet loss and scripted outages; a viewer that completes frames from
+k of k + m, waits for keyframes after loss exactly like the real one, and reports once a second.
+Six scenarios, each printing its table and asserting the promised behaviour: clean LAN (no
+move, 9 ms), Wi-Fi at 10 Mb/s with a 20 Mb/s top (under the link within 90 s, ≤ 2 flaps once
+settled), 20 → 4 Mb/s and back (recovers, climbs back), 2 % random loss (parity up, ladder
+still), 100 ms outages every 4 s (picture keeps moving), a 6 Mb/s cap (never exceeded). Run with
+`cargo test -p illum-media --test harness -- --nocapture` to see the tables. Scores: utilisation
+over the last 60 s, flaps in that window, recovery time per event (first of five 🟢 seconds),
+false drops (a drop with ≥ 40 % headroom and no loss), seconds over the limit, frames lost.
+Numbers at v0.6.0 are in the roadmap's M5 status; the model's biggest simplification is that
+it has no jitter and no encoder-size variance, so real links will be a little noisier.
+
 ### 5.8 User settings
 Two main numbers, and a few under "advanced":
 
@@ -449,6 +498,11 @@ Two main numbers, and a few under "advanced":
 
 Plus one message the app shows rather than asks: "best possible on this link: X ms" when L is out
 of reach.
+
+**Implemented in v0.6.0** as viewer flags, sent to the host in `ScreenStart` (0 = host default,
+and the host clamps: bitrate to its own ceiling, parity to 0–50 %, frame rate to 15–240):
+`--latency-limit 50`, `--max-bitrate 20`, `--max-fps 60`, `--fec-min 5 --fec-max 30`. "Send
+audio" arrives with audio; the "best possible on this link" message is still to do.
 
 ## 6. Input
 

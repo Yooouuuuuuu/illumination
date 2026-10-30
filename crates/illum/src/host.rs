@@ -15,12 +15,17 @@
 use crate::input::InputState;
 use illum_core::input::{InputEvent, InputSink};
 use illum_core::protocol::{Channel, ControlMsg};
+use illum_media::adapt::{
+    Adapter, DEFAULT_FEC_CEILING, DEFAULT_FEC_FLOOR, Grade, Limits, Rung, SecondReport,
+    encoder_bitrate,
+};
 use illum_media::clock::now_us;
 use illum_media::codec::{VideoCodec, VideoEncoder, choose_codec};
 use illum_media::cursor::CursorMsg;
 use illum_media::fec;
 use illum_media::pacer::TokenBucket;
 use illum_media::packets::{FrameMeta, packetize};
+use illum_media::scale::downscale;
 use illum_media::source::{ScreenSource, SourceEvent};
 use illum_media::tiles::TilesEncoder;
 use illum_media::{Frame, MediaError};
@@ -39,18 +44,76 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 pub const DEFAULT_MAX_BITRATE_KBPS: u32 = 20_000;
 /// How long the host waits for the viewer's first punch datagram before giving up on UDP.
 const PUNCH_DEADLINE: Duration = Duration::from_secs(5);
-/// Burst allowance of the pacer.
-const PACER_BURST: Duration = Duration::from_millis(50);
 /// A viewer's keyframe request is honoured at most this often.
 const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
-/// Parity per block, as a percentage of data packets (§5.6). The floor of the 5–30 % range; the
-/// FEC controller that raises it under loss is M5.
-pub const FEC_PERCENT: u32 = 5;
-/// Nominal frame rate the encoders are opened with (the capture rate is whatever the screen
-/// gives; this only sets the codec's time base).
-const ENCODER_FPS: u32 = 60;
-/// Share of the bitrate cap given to the encoder; the rest covers packet headers and parity.
-const ENCODER_SHARE_PERCENT: u64 = 85;
+/// Defaults when the viewer asks for none (§5.8).
+pub const DEFAULT_MAX_FPS: u32 = 60;
+pub const DEFAULT_LATENCY_LIMIT_MS: u32 = 50;
+
+/// What the viewer asked for in `ScreenStart`, clamped to what the host allows (§5.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSettings {
+    pub max_bitrate_bps: u64,
+    pub max_fps: u32,
+    pub fec_floor: u32,
+    pub fec_ceiling: u32,
+    pub latency_limit_ms: u32,
+}
+
+impl StreamSettings {
+    /// Zero means "the default"; the host caps the bitrate at its own ceiling.
+    pub fn from_request(
+        max_bitrate_kbps: u32,
+        max_fps: u32,
+        fec_min: u32,
+        fec_max: u32,
+        latency_limit_ms: u32,
+    ) -> StreamSettings {
+        let kbps = if max_bitrate_kbps == 0 {
+            DEFAULT_MAX_BITRATE_KBPS
+        } else {
+            max_bitrate_kbps.min(DEFAULT_MAX_BITRATE_KBPS)
+        };
+        let fec_floor = if fec_min == 0 {
+            DEFAULT_FEC_FLOOR
+        } else {
+            fec_min.min(50)
+        };
+        let fec_ceiling = if fec_max == 0 {
+            DEFAULT_FEC_CEILING
+        } else {
+            fec_max.clamp(fec_floor, 50)
+        };
+        StreamSettings {
+            max_bitrate_bps: u64::from(kbps) * 1000,
+            max_fps: if max_fps == 0 {
+                DEFAULT_MAX_FPS
+            } else {
+                max_fps.clamp(15, 240)
+            },
+            fec_floor,
+            fec_ceiling: fec_ceiling.max(fec_floor),
+            latency_limit_ms: if latency_limit_ms == 0 {
+                DEFAULT_LATENCY_LIMIT_MS
+            } else {
+                latency_limit_ms
+            },
+        }
+    }
+}
+
+/// What the media thread is currently asked to produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Target {
+    rung: Rung,
+    fec_percent: u32,
+}
+
+/// Even dimensions at `percent` of the native size (4:2:0 needs even sizes).
+fn scaled_size(width: u32, height: u32, percent: u32) -> (u32, u32) {
+    let even = |v: u32| (v * percent / 100).max(2) & !1;
+    (even(width), even(height))
+}
 
 /// Creates the screen source for a display index, inside the capture thread.
 pub type SourceFactory =
@@ -90,13 +153,13 @@ fn open_encoder(
     codec: VideoCodec,
     width: u32,
     height: u32,
+    fps: u32,
     bitrate_bps: u64,
 ) -> Box<dyn VideoEncoder> {
     if codec != VideoCodec::Tiles {
-        let bitrate = bitrate_bps * ENCODER_SHARE_PERCENT / 100;
-        match illum_ffmpeg::FfmpegEncoder::open(codec, width, height, ENCODER_FPS, bitrate) {
+        match illum_ffmpeg::FfmpegEncoder::open(codec, width, height, fps, bitrate_bps) {
             Ok(enc) => {
-                tracing::info!(target: "media", "Encoding {width}x{height} with {} ({}).", codec.name(), enc.name());
+                tracing::info!(target: "media", "Encoding {width}x{height} at {fps} fps, {:.1} Mb/s, with {} ({}).", bitrate_bps as f64 / 1e6, codec.name(), enc.name());
                 return Box::new(enc);
             }
             Err(e) => {
@@ -261,12 +324,15 @@ fn capture_loop(
     Ok(())
 }
 
-/// The UDP side of one session: where the viewer is, and the threads that feed it.
+/// The UDP side of one session: where the viewer is, the threads that feed it, and the
+/// controllers that decide what they send (§5.5, §5.6).
 struct MediaLink {
     hub: Arc<MediaHub>,
     session_id: u64,
     stop: Arc<AtomicBool>,
     want_keyframe: Arc<AtomicBool>,
+    adapter: Arc<Mutex<Adapter>>,
+    target: Arc<Mutex<Target>>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -277,13 +343,36 @@ impl MediaLink {
         socket: Arc<UdpSocket>,
         latest: Arc<LatestFrame>,
         codec: VideoCodec,
-        bitrate_bps: u64,
+        settings: StreamSettings,
         sender: Sender,
     ) -> MediaLink {
         let inbound = hub.register(&keys);
         let stop = Arc::new(AtomicBool::new(false));
         let want_keyframe = Arc::new(AtomicBool::new(false));
         let peer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+        let adapter = Adapter::new(
+            Limits {
+                max_bitrate_bps: settings.max_bitrate_bps,
+                max_fps: settings.max_fps,
+            },
+            settings.fec_floor,
+            settings.fec_ceiling,
+        );
+        let target = Arc::new(Mutex::new(Target {
+            rung: adapter.rung(),
+            fec_percent: adapter.fec_percent(),
+        }));
+        tracing::info!(
+            target: "media",
+            "Ladder: {} rungs from {} down to {}; parity {}–{} %; viewer latency limit {} ms.",
+            adapter.ladder().len(),
+            adapter.ladder().rung(0),
+            adapter.ladder().rung(adapter.ladder().len() - 1),
+            settings.fec_floor,
+            settings.fec_ceiling,
+            settings.latency_limit_ms
+        );
+        let adapter = Arc::new(Mutex::new(adapter));
 
         // Learns the viewer's address from its punches; exits when the hub drops the channel.
         let media_in = {
@@ -305,7 +394,8 @@ impl MediaLink {
         };
 
         let media_out = {
-            let (stop, want_keyframe) = (stop.clone(), want_keyframe.clone());
+            let (stop, want_keyframe, target) =
+                (stop.clone(), want_keyframe.clone(), target.clone());
             let mut sealer = keys.sealer();
             std::thread::Builder::new()
                 .name("media-out".into())
@@ -331,19 +421,60 @@ impl MediaLink {
                         }
                         std::thread::sleep(Duration::from_millis(20));
                     };
-                    tracing::info!(target: "media", "Streaming to {peer_addr} with {} at {} kb/s.", codec.name(), bitrate_bps / 1000);
+                    let first = *target.lock().expect("target lock");
+                    tracing::info!(target: "media", "Streaming to {peer_addr} with {} at {}.", codec.name(), first.rung);
 
-                    let mut bucket = TokenBucket::new(bitrate_bps, PACER_BURST, Instant::now());
+                    let mut bucket = TokenBucket::new(
+                        first.rung.bitrate_bps,
+                        TokenBucket::burst_for(first.rung.fps),
+                        Instant::now(),
+                    );
                     let mut fec = fec::Codec::new();
-                    // Opened on the first frame, when the size is known; reopened on resize.
+                    // Opened on the first frame, when the size is known; reopened on resize and
+                    // when the rung changes frame rate or scale.
                     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
                     let mut encoder_size = (0u32, 0u32);
+                    let mut applied: Option<Target> = None;
                     let mut force_keyframe = false;
                     let mut seq: u32 = 0;
                     let mut last_keyframe: Option<Instant> = None;
+                    // Frame-rate cap: the next capture time a frame is due.
+                    let mut due_us: u64 = 0;
                     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
                         let Some((frame, captured_us)) = latest.take_wait(Duration::from_millis(50)) else {
                             continue;
+                        };
+                        // Apply what the controllers decided.
+                        let current = *target.lock().expect("target lock");
+                        let enc_bps = encoder_bitrate(current.rung.bitrate_bps, current.fec_percent);
+                        if applied != Some(current) {
+                            bucket.set_rate(current.rung.bitrate_bps);
+                            bucket.set_burst(TokenBucket::burst_for(current.rung.fps));
+                            let reopen = applied.is_none_or(|a| {
+                                a.rung.fps != current.rung.fps
+                                    || a.rung.scale_percent != current.rung.scale_percent
+                            });
+                            if reopen {
+                                encoder = None;
+                            } else if let Some(enc) = encoder.as_mut()
+                                && !enc.set_bitrate(enc_bps)
+                            {
+                                encoder = None; // this encoder needs a reopen for a new bitrate
+                            }
+                            applied = Some(current);
+                        }
+                        // Frame-rate cap (latest frame wins: skipped frames are simply not sent).
+                        let period_us = 1_000_000 / u64::from(current.rung.fps.max(1));
+                        if captured_us < due_us {
+                            continue;
+                        }
+                        due_us = due_us.max(captured_us.saturating_sub(period_us / 2)) + period_us;
+                        // Resolution rungs.
+                        let frame = if current.rung.scale_percent < 100 {
+                            let (w, h) = scaled_size(frame.width, frame.height, current.rung.scale_percent);
+                            downscale(&frame, w, h)
+                        } else {
+                            frame
                         };
                         // A request inside the minimum interval stays pending until it can be
                         // honoured; dropping it would leave the viewer waiting for ever.
@@ -354,7 +485,13 @@ impl MediaLink {
                             force_keyframe = true;
                         }
                         if encoder.is_none() || encoder_size != (frame.width, frame.height) {
-                            encoder = Some(open_encoder(codec, frame.width, frame.height, bitrate_bps));
+                            encoder = Some(open_encoder(
+                                codec,
+                                frame.width,
+                                frame.height,
+                                current.rung.fps,
+                                enc_bps,
+                            ));
                             encoder_size = (frame.width, frame.height);
                             force_keyframe = true;
                         }
@@ -386,7 +523,7 @@ impl MediaLink {
                             capture_us: captured_us,
                             encode_us: encoded.encode_us,
                         };
-                        let packets = match packetize(meta, &encoded.data, MAX_PAYLOAD, FEC_PERCENT, &mut fec) {
+                        let packets = match packetize(meta, &encoded.data, MAX_PAYLOAD, current.fec_percent, &mut fec) {
                             Ok(p) => p,
                             Err(e) => {
                                 tracing::warn!(target: "media", "Frame {seq} not sent: {e}");
@@ -414,12 +551,46 @@ impl MediaLink {
             session_id: keys.session_id,
             stop,
             want_keyframe,
+            adapter,
+            target,
             threads: vec![media_in, media_out],
         }
     }
 
     fn request_keyframe(&self) {
         self.want_keyframe.store(true, Ordering::SeqCst);
+    }
+
+    /// The rung and parity in use, for the viewer's title bar.
+    fn quality(&self, reason: &str) -> ControlMsg {
+        let adapter = self.adapter.lock().expect("adapter lock");
+        let rung = adapter.rung();
+        ControlMsg::Quality {
+            rung: adapter.rung_index() as u32,
+            rungs: adapter.ladder().len() as u32,
+            bitrate_kbps: (rung.bitrate_bps / 1000) as u32,
+            fps: rung.fps,
+            scale_percent: rung.scale_percent,
+            fec_percent: adapter.fec_percent(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Feeds one second of the viewer's report to the controllers. Returns the grade and, when
+    /// something changed, the new `Quality` to tell the viewer.
+    fn report(&self, report: SecondReport) -> (Grade, Option<ControlMsg>) {
+        let decision = self.adapter.lock().expect("adapter lock").observe(report);
+        let changed = decision.rung.is_some() || decision.fec_percent.is_some();
+        if changed {
+            let adapter = self.adapter.lock().expect("adapter lock");
+            *self.target.lock().expect("target lock") = Target {
+                rung: adapter.rung(),
+                fec_percent: adapter.fec_percent(),
+            };
+        }
+        let grade = decision.grade.unwrap_or(Grade::Blank);
+        let quality = changed.then(|| self.quality(&decision.reason));
+        (grade, quality)
     }
 }
 
@@ -478,24 +649,30 @@ pub async fn serve_session(
             ControlMsg::ScreenStart {
                 display: index,
                 max_bitrate_kbps,
+                max_fps,
+                fec_min,
+                fec_max,
+                latency_limit_ms,
             } => {
                 capture = None; // stop any previous stream first
                 link = None;
                 input = None; // and release anything held on the previous display
                 match (&config.screen, conn.media_keys.clone()) {
                     (Some(f), Some(keys)) => {
-                        let kbps = if max_bitrate_kbps == 0 {
-                            DEFAULT_MAX_BITRATE_KBPS
-                        } else {
-                            max_bitrate_kbps.min(DEFAULT_MAX_BITRATE_KBPS)
-                        };
+                        let settings = StreamSettings::from_request(
+                            max_bitrate_kbps,
+                            max_fps,
+                            fec_min,
+                            fec_max,
+                            latency_limit_ms,
+                        );
                         let viewer_caps = conn
                             .peer_hello
                             .as_ref()
                             .map(|h| h.capabilities.clone())
                             .unwrap_or_default();
                         let codec = config.codec_for(&viewer_caps);
-                        tracing::info!(target: "session", "Streaming display {index} with {} (cap {kbps} kb/s).", codec.name());
+                        tracing::info!(target: "session", "Streaming display {index} with {} (cap {} kb/s, {} fps).", codec.name(), settings.max_bitrate_bps / 1000, settings.max_fps);
                         let latest = Arc::new(LatestFrame::default());
                         capture = Some(Capture::start(
                             f.clone(),
@@ -504,16 +681,18 @@ pub async fn serve_session(
                             conn.sender(),
                         ));
                         let socket = media.socket_for(conn.local_address.ip());
-                        link = Some(MediaLink::start(
+                        let l = MediaLink::start(
                             media.clone(),
                             keys,
                             socket,
                             latest,
                             codec,
-                            u64::from(kbps) * 1000,
+                            settings,
                             conn.sender(),
-                        ));
+                        );
                         conn.send_control(&ControlMsg::MediaEndpoint { port: media.port() });
+                        conn.send_control(&l.quality(""));
+                        link = Some(l);
                     }
                     (None, _) => conn.send_control(&ControlMsg::ScreenError {
                         reason: "this host cannot share its screen".into(),
@@ -551,8 +730,34 @@ pub async fn serve_session(
                 lost,
                 frames_lost,
                 repaired,
+                shown,
+                within_limit,
             } => {
-                tracing::debug!(target: "media", "Viewer report: {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired.");
+                if let Some(l) = &link {
+                    let (grade, quality) = l.report(SecondReport {
+                        shown,
+                        within_limit,
+                        frames_lost,
+                        received,
+                        lost,
+                    });
+                    tracing::debug!(target: "media", "{} shown {shown} ok {within_limit} · {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired.", grade.symbol());
+                    if let Some(q) = quality {
+                        if let ControlMsg::Quality {
+                            rung,
+                            rungs,
+                            bitrate_kbps,
+                            fps,
+                            scale_percent,
+                            fec_percent,
+                            reason,
+                        } = &q
+                        {
+                            tracing::info!(target: "media", "Rung {rung}/{rungs}: {:.1} Mb/s {fps} fps {scale_percent} %, parity {fec_percent} % — {reason}.", *bitrate_kbps as f64 / 1000.0);
+                        }
+                        conn.send_control(&q);
+                    }
+                }
             }
             ControlMsg::VideoAck { .. } => {}
             ControlMsg::Bye => break Ok(()),

@@ -114,6 +114,36 @@ pub fn blit_fit(frame: &Frame, dst: &mut [u32], dst_w: u32, dst_h: u32) -> Place
     p
 }
 
+/// Shrinks a frame to `dst_w × dst_h` by averaging the source pixels each destination pixel
+/// covers (the resolution rungs of the ladder, §5.5). Same size returns a copy.
+pub fn downscale(frame: &Frame, dst_w: u32, dst_h: u32) -> Frame {
+    assert!(dst_w >= 1 && dst_h >= 1 && dst_w <= frame.width && dst_h <= frame.height);
+    if dst_w == frame.width && dst_h == frame.height {
+        return frame.clone();
+    }
+    let xs: Vec<(usize, usize)> = (0..dst_w).map(|x| span(x, frame.width, dst_w)).collect();
+    let mut out = Frame::new(dst_w, dst_h);
+    for y in 0..dst_h {
+        let (y0, y1) = span(y, frame.height, dst_h);
+        let row = out.row_slice_mut(0, y, dst_w);
+        for (d, &(x0, x1)) in row.chunks_exact_mut(4).zip(&xs) {
+            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                let src = frame.row_slice(0, sy as u32, frame.width);
+                for px in src[x0 * 4..x1 * 4].chunks_exact(4) {
+                    b += px[0] as u32;
+                    g += px[1] as u32;
+                    r += px[2] as u32;
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            let avg = |sum: u32| ((sum + n / 2) / n) as u8;
+            d.copy_from_slice(&[avg(b), avg(g), avg(r), 255]);
+        }
+    }
+    out
+}
+
 /// Original size. `pan` (0..=1 on each axis) picks which part shows when the frame is larger.
 pub fn blit_original(
     frame: &Frame,

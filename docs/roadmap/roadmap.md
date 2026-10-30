@@ -168,6 +168,18 @@ Architecture §5.5–5.8.
 - "best possible on this link: X ms" when the limit can't be met
 - the tuning runs: one parameter per run, scored as in §5.7
 
+**Status:** **v0.6.0** (2026-10-30) shipped the ladder, both controllers, the simulated link
+with six scored scenarios, the viewer's per-second report (frames shown, frames within the
+limit), the host's `Quality` message and the CLI settings (`--latency-limit`, `--max-fps`,
+`--fec-min/--fec-max`, `--max-bitrate`). Three rules were added from the harness, recorded in
+architecture §5.5: a freeze caused by loss grades 🔴 (not ⚪), a failed raise backs off, and
+the backstop needs frames still dying. Still open: "best possible on this link: X ms" in the
+title, and "send audio" (with audio). Harness results at v0.6.0 (`cargo test -p illum-media
+--test harness -- --nocapture`): clean LAN 0 moves, 9 ms; 10 Mb/s Wi-Fi under the link in 40 s,
+no hunting after; 20 → 4 Mb/s drop: first picture 60 s after the drop, 🟢 at 73 s, climbs back
+one rung per 15 s after the restore; 2 % random loss: parity up, ladder untouched; 100 ms
+outages every 4 s: survived. Not yet measured live.
+
 **Check:**
 - [ ] Steady 20 Mb/s link: the stream settles on the top rung and changes rungs **0 times** in
   5 minutes.

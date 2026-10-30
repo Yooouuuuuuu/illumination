@@ -43,8 +43,11 @@ that you connect without prompts, and a changed key is refused. The window title
 rate, bandwidth, latency and packet loss.
 
 Control and input travel over TLS on TCP; video travels over **UDP on the same port number**
-and is never resent; 5 % parity lets the viewer rebuild lost packets. `--max-bitrate 6` (Mb/s)
-caps the video rate; the default is 20.
+and is never resent; parity lets the viewer rebuild lost packets. The host **adapts**: it starts
+at the top of a quality ladder (`--max-bitrate 20` Mb/s, `--max-fps 60`) and steps down one rung
+at a time while frames arrive later than your limit (`--latency-limit 50` ms), back up when they
+don't; parity moves between `--fec-min 5` and `--fec-max 30` percent with the packet loss it
+sees. The title bar shows the rung in use; the host log says why it changed.
 
 **Codec:** AV1 if the host can encode it and the viewer decode it, otherwise H.265, otherwise
 lossless tiles (sharp, but heavy when the whole screen changes). The title bar names the one in
@@ -79,7 +82,8 @@ illum                  # the app window (not built yet)
 illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern)
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
-illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only, --max-bitrate Mb/s)
+illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
+                       #   --max-bitrate Mb/s, --max-fps, --latency-limit ms, --fec-min/--fec-max %)
 illum displays         # list this machine's displays
 illum codecs           # which video codecs this machine can encode and decode
 illum connect <host>   # dial a host and measure round-trip time

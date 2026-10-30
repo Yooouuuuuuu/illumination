@@ -122,18 +122,33 @@ impl Stats {
     }
 }
 
+/// The rung and parity the host is sending (architecture §5.5), for the title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quality {
+    pub rung: u32,
+    pub rungs: u32,
+    pub bitrate_kbps: u32,
+    pub fps: u32,
+    pub scale_percent: u32,
+    pub fec_percent: u32,
+}
+
 /// Everything the network side and the window share.
-#[derive(Default)]
 pub struct ViewState {
     /// The newest decoded picture.
     pub frame: Option<Arc<Frame>>,
     /// The codec the host is sending (shown in the title).
     pub codec: Option<VideoCodec>,
+    pub quality: Option<Quality>,
     /// Sequence number and host capture time of the newest decoded frame.
     pub latest: Option<(u64, u64)>,
     /// Session totals: frames rebuilt from parity, and frames that could not be assembled.
     pub frames_repaired: u64,
     pub frames_lost: u64,
+    /// Frames presented later than this after capture count as late (the user's limit, §5.5).
+    pub latency_limit_ms: u32,
+    /// Presented since the last report, and how many of them within the limit.
+    presented_tick: (u32, u32),
     pub cursor: CursorPosition,
     pub cursor_shape: Option<CursorShape>,
     pub clock: ClockSync,
@@ -145,9 +160,46 @@ pub struct ViewState {
     pub local_layout: Option<String>,
 }
 
+impl Default for ViewState {
+    fn default() -> ViewState {
+        ViewState {
+            frame: None,
+            codec: None,
+            quality: None,
+            latest: None,
+            frames_repaired: 0,
+            frames_lost: 0,
+            latency_limit_ms: 50,
+            presented_tick: (0, 0),
+            cursor: CursorPosition::default(),
+            cursor_shape: None,
+            clock: ClockSync::default(),
+            stats: Stats::default(),
+            status: None,
+            host_layout: None,
+            local_layout: None,
+        }
+    }
+}
+
 impl ViewState {
     pub fn frame(&self) -> Option<&Frame> {
         self.frame.as_deref()
+    }
+
+    /// A new frame reached the screen, `latency_ms` after capture when the clock is known.
+    /// An unknown latency (no clock sample yet) is given the benefit of the doubt.
+    pub fn mark_presented(&mut self, latency_ms: Option<f64>) {
+        self.stats.presented(latency_ms);
+        self.presented_tick.0 += 1;
+        if latency_ms.is_none_or(|l| l <= f64::from(self.latency_limit_ms)) {
+            self.presented_tick.1 += 1;
+        }
+    }
+
+    /// (shown, within limit) since the last call; for the once-a-second report.
+    pub fn take_presented(&mut self) -> (u32, u32) {
+        std::mem::take(&mut self.presented_tick)
     }
 }
 
@@ -330,7 +382,7 @@ impl App {
                 .map(|host_now| (host_now - capture_us as i64) as f64 / 1000.0)
         });
         if new_frame.is_some() {
-            state.stats.presented(latency_ms);
+            state.mark_presented(latency_ms);
         }
         let rtt = state.clock.last_rtt;
         let title = if let Some(status) = state.status.clone() {
@@ -338,8 +390,23 @@ impl App {
         } else if state.stats.tick(rtt) {
             tracing::debug!(target: "viewer", "{}", state.stats.summary); // shown with -v
             let codec = state.codec.map_or("", |c| c.name());
+            let quality = state.quality.map_or(String::new(), |q| {
+                let scale = if q.scale_percent < 100 {
+                    format!(" {} %", q.scale_percent)
+                } else {
+                    String::new()
+                };
+                format!(
+                    " · rung {}/{}: {:.1} Mb/s {} fps{scale}, parity {} %",
+                    q.rung + 1,
+                    q.rungs,
+                    f64::from(q.bitrate_kbps) / 1000.0,
+                    q.fps,
+                    q.fec_percent
+                )
+            });
             Some(format!(
-                "{} — {codec} · {}",
+                "{} — {codec}{quality} · {}",
                 self.options.title, state.stats.summary
             ))
         } else {
