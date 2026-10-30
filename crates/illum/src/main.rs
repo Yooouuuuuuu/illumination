@@ -9,7 +9,7 @@ mod prompt;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use illum::host::{HostConfig, SourceFactory, serve_session};
+use illum::host::{AudioFactory, HostConfig, SourceFactory, serve_session};
 #[cfg(windows)]
 use illum::host::{InputFactory, LayoutFn};
 use illum::viewer::{Notify, ViewParams, run_viewer_session};
@@ -22,6 +22,7 @@ use illum_core::protocol::DEFAULT_PORT;
 use illum_core::protocol::{ControlMsg, Hello};
 use illum_core::store::TrustStore;
 use illum_media::MediaError;
+use illum_media::audio::AudioSource;
 use illum_media::source::{PatternSource, ScreenSource};
 use illum_net::session::{accept, connect, normalize_target};
 use illum_net::{Endpoint, Identity, Listener, Timeouts, bind};
@@ -73,6 +74,10 @@ struct Cli {
     #[arg(long, requires = "service")]
     test_pattern: bool,
 
+    /// Never capture or send this machine's sound (with --service).
+    #[arg(long, requires = "service")]
+    no_audio: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -115,6 +120,9 @@ enum Command {
         fec_min: u32,
         #[arg(long, default_value_t = 30)]
         fec_max: u32,
+        /// Don't ask for the host's sound.
+        #[arg(long)]
+        mute: bool,
     },
     /// List this machine's displays.
     Displays,
@@ -247,6 +255,7 @@ fn main() -> std::process::ExitCode {
             latency_limit,
             fec_min,
             fec_max,
+            mute,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
@@ -258,6 +267,7 @@ fn main() -> std::process::ExitCode {
                     fec_min: *fec_min,
                     fec_max: *fec_max,
                     latency_limit_ms: *latency_limit,
+                    audio: !*mute,
                     ..ViewParams::new(*screen)
                 },
             };
@@ -279,7 +289,13 @@ async fn run(cli: Cli) -> Result<()> {
     let role = cli.role();
     match (role, cli.command) {
         (Role::Service, _) => {
-            run_service(&home, cli.port, &cli.bind, host_config(cli.test_pattern)).await
+            run_service(
+                &home,
+                cli.port,
+                &cli.bind,
+                host_config(cli.test_pattern, cli.no_audio),
+            )
+            .await
         }
         (Role::Backend | Role::Control, _) => bail!("role {role:?} is not implemented yet"),
         (Role::Frontend, None) => {
@@ -353,7 +369,7 @@ fn parse_keyboard(s: &str) -> std::result::Result<KeyboardMode, String> {
 
 /// What the host offers: its screen (or the test pattern), input injection and layout reports.
 /// With the test pattern there is no real screen, so input isn't injected either.
-fn host_config(test_pattern: bool) -> HostConfig {
+fn host_config(test_pattern: bool, no_audio: bool) -> HostConfig {
     #[cfg(windows)]
     let (input, layout): (Option<InputFactory>, Option<LayoutFn>) = if test_pattern {
         (None, None)
@@ -377,11 +393,31 @@ fn host_config(test_pattern: bool) -> HostConfig {
         .map(|e| e.codec)
         .collect();
     codecs.dedup();
+    // Sound: the test pattern hums a 440 Hz tone; the real host sends what it plays.
+    let audio: Option<AudioFactory> = if no_audio {
+        None
+    } else if test_pattern {
+        Some(Arc::new(|| {
+            Ok(Box::new(illum_media::audio::ToneSource::default()) as Box<dyn AudioSource>)
+        }))
+    } else {
+        #[cfg(windows)]
+        {
+            Some(Arc::new(|| {
+                Ok(Box::new(illum_win::LoopbackCapture::new()?) as Box<dyn AudioSource>)
+            }))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    };
     HostConfig {
         screen: Some(source_factory(test_pattern)),
         input,
         layout,
         codecs,
+        audio,
     }
 }
 
@@ -452,6 +488,7 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
     ep.capabilities.retain(|c| match c.as_str() {
         "screen" => config.screen.is_some(),
         "input" => config.input.is_some(),
+        "audio" => config.audio.is_some(),
         _ => true,
     });
     // "enc:av1" etc.: the viewer's hello says what it decodes, ours what we encode (§5.3).

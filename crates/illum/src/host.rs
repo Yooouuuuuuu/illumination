@@ -15,10 +15,12 @@
 use crate::input::InputState;
 use illum_core::input::{InputEvent, InputSink};
 use illum_core::protocol::{Channel, ControlMsg};
+use illum_ffmpeg::opus::OpusEncoder;
 use illum_media::adapt::{
     Adapter, DEFAULT_FEC_CEILING, DEFAULT_FEC_FLOOR, Grade, Limits, Rung, SecondReport,
     encoder_bitrate,
 };
+use illum_media::audio::{AudioSource, FRAME_VALUES, Grouper};
 use illum_media::clock::now_us;
 use illum_media::codec::{VideoCodec, VideoEncoder, choose_codec};
 use illum_media::cursor::CursorMsg;
@@ -58,6 +60,8 @@ pub struct StreamSettings {
     pub fec_floor: u32,
     pub fec_ceiling: u32,
     pub latency_limit_ms: u32,
+    /// The viewer wants sound.
+    pub audio: bool,
 }
 
 impl StreamSettings {
@@ -68,6 +72,7 @@ impl StreamSettings {
         fec_min: u32,
         fec_max: u32,
         latency_limit_ms: u32,
+        audio: bool,
     ) -> StreamSettings {
         let kbps = if max_bitrate_kbps == 0 {
             DEFAULT_MAX_BITRATE_KBPS
@@ -98,6 +103,7 @@ impl StreamSettings {
             } else {
                 latency_limit_ms
             },
+            audio,
         }
     }
 }
@@ -133,7 +139,12 @@ pub struct HostConfig {
     pub layout: Option<LayoutFn>,
     /// Lossy codecs this host can encode (from the FFmpeg probe). Empty means tiles only.
     pub codecs: Vec<VideoCodec>,
+    /// Where the host's sound comes from; `None` means "send audio: off" (§8).
+    pub audio: Option<AudioFactory>,
 }
+
+/// Creates the audio source, inside the audio thread.
+pub type AudioFactory = Arc<dyn Fn() -> Result<Box<dyn AudioSource>, MediaError> + Send + Sync>;
 
 impl HostConfig {
     /// The codec for a viewer with these hello capabilities (§5.3: AV1, else H.265, else tiles).
@@ -337,6 +348,7 @@ struct MediaLink {
 }
 
 impl MediaLink {
+    #[allow(clippy::too_many_arguments)] // one call site; a struct would only rename the list
     fn start(
         hub: Arc<MediaHub>,
         keys: MediaKeys,
@@ -344,6 +356,7 @@ impl MediaLink {
         latest: Arc<LatestFrame>,
         codec: VideoCodec,
         settings: StreamSettings,
+        audio: Option<AudioFactory>,
         sender: Sender,
     ) -> MediaLink {
         let inbound = hub.register(&keys);
@@ -392,6 +405,83 @@ impl MediaLink {
                 })
                 .expect("spawn media-in thread")
         };
+
+        // Sound, when the host has a source and the viewer asked for it (§8): capture →
+        // Opus 5 ms frames → 4 + 2 parity groups → the same UDP path, sent as they are made.
+        let audio_out = audio.filter(|_| settings.audio).map(|factory| {
+            let (stop, peer, socket) = (stop.clone(), peer.clone(), socket.clone());
+            let mut sealer = keys.sealer();
+            std::thread::Builder::new()
+                .name("audio-out".into())
+                .spawn(move || {
+                    let started = Instant::now();
+                    let peer_addr = loop {
+                        if stop.load(Ordering::SeqCst) || started.elapsed() > PUNCH_DEADLINE {
+                            return; // the video thread reports a blocked path
+                        }
+                        if let Some(p) = *peer.lock().expect("peer lock") {
+                            break p;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    };
+                    let mut source = match factory() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(target: "audio", "Audio capture unavailable: {e}");
+                            return;
+                        }
+                    };
+                    let mut encoder = match OpusEncoder::open() {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!(target: "audio", "Opus encoder unavailable: {e}");
+                            return;
+                        }
+                    };
+                    tracing::info!(target: "audio", "Sending audio: Opus 48 kHz stereo, 5 ms frames, 4 + 2 parity.");
+                    let mut grouper = Grouper::default();
+                    let mut pcm: Vec<i16> = Vec::new();
+                    let mut seq: u32 = 0;
+                    while !stop.load(Ordering::SeqCst) {
+                        if let Err(e) = source.read(&mut pcm) {
+                            tracing::warn!(target: "audio", "Audio capture stopped: {e}");
+                            return;
+                        }
+                        let mut offset = 0;
+                        while pcm.len() - offset >= FRAME_VALUES {
+                            let frame = &pcm[offset..offset + FRAME_VALUES];
+                            offset += FRAME_VALUES;
+                            let bytes = match encoder.encode(frame) {
+                                Ok(b) if !b.is_empty() => b,
+                                Ok(_) => continue,
+                                Err(e) => {
+                                    tracing::debug!(target: "audio", "Opus encode failed: {e}");
+                                    continue;
+                                }
+                            };
+                            match grouper.push(seq, &bytes) {
+                                Ok(packets) => {
+                                    let to = peer.lock().expect("peer lock").unwrap_or(peer_addr);
+                                    for p in packets {
+                                        let datagram = sealer.seal(MediaStream::Audio, &p);
+                                        let _ = socket.send_to(&datagram, to);
+                                    }
+                                }
+                                Err(e) => tracing::debug!(target: "audio", "Audio packetising failed: {e}"),
+                            }
+                            seq = seq.wrapping_add(1);
+                        }
+                        pcm.drain(..offset);
+                        // A backlog would only become delay: keep at most 100 ms waiting.
+                        if pcm.len() > FRAME_VALUES * 20 {
+                            let excess = pcm.len() - FRAME_VALUES * 20;
+                            pcm.drain(..excess);
+                        }
+                        std::thread::sleep(Duration::from_millis(3));
+                    }
+                })
+                .expect("spawn audio thread")
+        });
 
         let media_out = {
             let (stop, want_keyframe, target) =
@@ -546,6 +636,8 @@ impl MediaLink {
                 .expect("spawn media-out thread")
         };
 
+        let mut threads = vec![media_in, media_out];
+        threads.extend(audio_out);
         MediaLink {
             hub,
             session_id: keys.session_id,
@@ -553,7 +645,7 @@ impl MediaLink {
             want_keyframe,
             adapter,
             target,
-            threads: vec![media_in, media_out],
+            threads,
         }
     }
 
@@ -653,6 +745,7 @@ pub async fn serve_session(
                 fec_min,
                 fec_max,
                 latency_limit_ms,
+                audio,
             } => {
                 capture = None; // stop any previous stream first
                 link = None;
@@ -665,6 +758,7 @@ pub async fn serve_session(
                             fec_min,
                             fec_max,
                             latency_limit_ms,
+                            audio,
                         );
                         let viewer_caps = conn
                             .peer_hello
@@ -688,6 +782,7 @@ pub async fn serve_session(
                             latest,
                             codec,
                             settings,
+                            config.audio.clone(),
                             conn.sender(),
                         );
                         conn.send_control(&ControlMsg::MediaEndpoint { port: media.port() });

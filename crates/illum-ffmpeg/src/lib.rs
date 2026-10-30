@@ -19,6 +19,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+pub mod opus;
+
 fn err(context: &str, e: impl std::fmt::Display) -> MediaError {
     MediaError::Capture(format!("{context}: {e}"))
 }

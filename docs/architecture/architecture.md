@@ -592,6 +592,18 @@ The session stays connected throughout.
   - Fixed bitrate, not part of the adaptive budget: 0.08 Mb/s next to 2–20 Mb/s of video isn't
     worth adapting. Subtracted from the budget once as a constant.
   - **"Send audio: off"** captures and sends nothing.
+  - **Implemented in v0.7.0** as designed: `illum_win::LoopbackCapture` / `Playback` (WASAPI
+    shared mode, asking the engine for 48 kHz stereo 16-bit via `AUTOCONVERTPCM` on both
+    ends, so no resampler of our own); `illum_ffmpeg::opus` (`libopus`, `application=lowdelay`,
+    constant ~80 kb/s, 5 ms frames); `illum_media::audio` (8-byte packet header, groups of
+    4 + 2 through the same Reed–Solomon code as video, data packets sent as soon as encoded,
+    parity after the fourth; a 40 ms jitter buffer that conceals a missing frame with 5 ms of
+    silence, treats 100 ms of nothing as the host being quiet and re-primes when sound returns,
+    and skips a backlog rather than playing it late). Audio has its own stream and sequence
+    numbers on the UDP path, its own sender thread on the host (never behind the video pacer)
+    and its own thread on the viewer. Host flag `--no-audio`, viewer flag `--mute`; the
+    viewer's wish travels in `ScreenStart`. Audio is not yet subtracted from the video budget
+    (0.1 Mb/s with parity; noted for M5's follow-ups) and there is no A/V sync by design.
 - **Files:** a later milestone, on the lowest-priority channel of the TCP path.
 
 ## 9. Permissions and profiles

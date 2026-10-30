@@ -4,14 +4,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
 pub const DEFAULT_PORT: u16 = 28326;
 
 /// Capabilities this build offers. A feature is used only if both sides list it.
-pub const CAPABILITIES: &[&str] = &["ping", "screen", "input", "udp-media"];
+pub const CAPABILITIES: &[&str] = &["ping", "screen", "input", "udp-media", "audio"];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,6 +113,8 @@ pub enum ControlMsg {
         fec_max: u32,
         /// The viewer's latency limit (for the host's log; the viewer grades against it).
         latency_limit_ms: u32,
+        /// Whether the viewer wants the host's sound (architecture §8).
+        audio: bool,
     },
     /// Host → controller: the rung and parity in use (shown in the title bar). Sent when the
     /// stream starts and whenever the controllers change something.
@@ -222,6 +224,7 @@ mod tests {
                 fec_min: 5,
                 fec_max: 30,
                 latency_limit_ms: 50,
+                audio: true,
             },
             ControlMsg::Quality {
                 rung: 2,

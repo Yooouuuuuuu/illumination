@@ -137,7 +137,9 @@ Architecture §4.4, §5.3, §5.6, §8.
 codec. **v0.5.1** shipped the codec (AV1 / H.265 through FFmpeg 8.1, chosen per direction from
 the hello, tiles as fallback) and parity FEC at the 5 % floor; a broken frame is answered with a
 keyframe because FFmpeg exposes no reference-invalidation control for the hardware encoders
-(architecture §13). Audio follows as **v0.5.2**.
+(architecture §13). Audio shipped as **v0.7.0** (2026-10-30, after M5): WASAPI loopback →
+Opus 5 ms frames → 4 + 2 parity groups over the UDP path → a fixed 40 ms buffer → WASAPI
+playback; `--no-audio` on the host, `--mute` on the viewer. Not yet heard live.
 Measured in v0.5.0 on this PC over its Tailscale address: test pattern 59 fps, 9 ms, 0% loss;
 real screen at a 6 Mb/s cap paced to ~6 Mb/s with RTT flat (no queue) but only 2–4 fps, because
 lossless tiles of a full-screen change are ~2 MB per frame. First live run from the laptop
@@ -215,6 +217,12 @@ outages every 4 s: survived. Not yet measured live.
 - clipboard (text, then files) with loop prevention
 - one-controller policy with view-only extras
 - privacy mode, block input, lock on session end
+
+**Planned as v0.8.0 (decided 2026-10-30): a control review.** After audio (v0.7.0), go through
+everything the controller does to the host — keyboard, mouse, IME, system keys — against the
+A–C checklist from the first live test (clicks offset? delay? stuck or repeated keys? IME both
+ways? Alt+Tab/Win on the host? nothing held after focus loss?), and add the **clipboard** (text
+first): today a copy on one side is not seen on the other at all. Discussion starts after v0.7.0.
 
 **Check:**
 - [ ] Copy/paste text both ways 100 times: no echo, no lost copy, no hang when another app holds the clipboard.

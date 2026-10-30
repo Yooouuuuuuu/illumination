@@ -4,6 +4,7 @@
 //! view state, reports loss and shown frames back to the host, and keeps the clock estimate
 //! fresh.
 
+use crate::audio::AudioOut;
 use illum_core::protocol::{Channel, ControlMsg};
 use illum_media::MediaError;
 use illum_media::clock::now_us;
@@ -45,6 +46,8 @@ pub struct ViewParams {
     pub fec_max: u32,
     /// Frames presented later than this after capture count as late.
     pub latency_limit_ms: u32,
+    /// Ask for the host's sound and play it.
+    pub audio: bool,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
     pub media_target: Option<SocketAddr>,
 }
@@ -58,6 +61,7 @@ impl ViewParams {
             fec_min: 0,
             fec_max: 0,
             latency_limit_ms: 0,
+            audio: true,
             media_target: None,
         }
     }
@@ -92,13 +96,25 @@ impl MediaIn {
         shared: Shared,
         notify: Notify,
         sender: Sender,
+        audio: bool,
     ) -> MediaIn {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let (stop, client) = (stop.clone(), client.clone());
             std::thread::Builder::new()
                 .name("media-in".into())
-                .spawn(move || media_loop(&client, inbound, &shared, &notify, &sender, &stop))
+                .spawn(move || {
+                    let audio_out = audio.then(|| AudioOut::start(shared.clone()));
+                    media_loop(
+                        &client,
+                        inbound,
+                        &shared,
+                        &notify,
+                        &sender,
+                        &stop,
+                        audio_out.as_ref(),
+                    )
+                })
                 .expect("spawn media-in thread")
         };
         MediaIn {
@@ -125,6 +141,7 @@ fn media_loop(
     notify: &Notify,
     sender: &Sender,
     stop: &AtomicBool,
+    audio_out: Option<&AudioOut>,
 ) {
     let started = Instant::now();
     let mut reassembler = Reassembler::default();
@@ -166,6 +183,12 @@ fn media_loop(
                         Vec::new()
                     }
                 }
+            }
+            Ok(msg) if msg.stream == MediaStream::Audio => {
+                if let Some(a) = audio_out {
+                    a.push(&msg.payload);
+                }
+                Vec::new()
             }
             Ok(_) => Vec::new(),
             Err(RecvTimeoutError::Timeout) => reassembler.expire(Instant::now()),
@@ -299,6 +322,7 @@ pub async fn run_viewer_session(
         fec_min: params.fec_min,
         fec_max: params.fec_max,
         latency_limit_ms: params.latency_limit_ms,
+        audio: params.audio,
     });
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.
@@ -359,6 +383,7 @@ pub async fn run_viewer_session(
                                 shared.clone(),
                                 notify.clone(),
                                 conn.sender(),
+                                params.audio,
                             ));
                         }
                         Err(e) => {

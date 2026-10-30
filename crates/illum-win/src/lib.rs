@@ -4,12 +4,16 @@
 //! (architecture §6).
 
 #[cfg(windows)]
+mod audio;
+#[cfg(windows)]
 mod dda;
 #[cfg(windows)]
 mod gdi;
 #[cfg(windows)]
 mod input;
 
+#[cfg(windows)]
+pub use audio::{LoopbackCapture, Playback};
 #[cfg(windows)]
 pub use dda::{DdaSource, list_displays};
 #[cfg(windows)]

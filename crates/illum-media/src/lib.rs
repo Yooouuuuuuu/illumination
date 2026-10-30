@@ -4,6 +4,7 @@
 //! colour test pattern, cursor shapes and scaling. Platform-independent.
 
 pub mod adapt;
+pub mod audio;
 pub mod clock;
 pub mod codec;
 pub mod cursor;

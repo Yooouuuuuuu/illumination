@@ -49,6 +49,10 @@ at a time while frames arrive later than your limit (`--latency-limit 50` ms), b
 don't; parity moves between `--fec-min 5` and `--fec-max 30` percent with the packet loss it
 sees. The title bar shows the rung in use; the host log says why it changed.
 
+**Sound:** the host's audio output is sent too (Opus, 5 ms frames with parity, a fixed 40 ms
+buffer). `illum --service --no-audio` never captures or sends it; `illum view --mute` doesn't
+ask for it.
+
 **Codec:** AV1 if the host can encode it and the viewer decode it, otherwise H.265, otherwise
 lossless tiles (sharp, but heavy when the whole screen changes). The title bar names the one in
 use. `illum codecs` shows what this machine can do and why a hardware encoder was skipped; the
@@ -79,11 +83,11 @@ viewer.
 
 ```
 illum                  # the app window (not built yet)
-illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern)
+illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern, --no-audio)
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
-                       #   --max-bitrate Mb/s, --max-fps, --latency-limit ms, --fec-min/--fec-max %)
+                       #   --max-bitrate Mb/s, --max-fps, --latency-limit ms, --fec-min/--fec-max %, --mute)
 illum displays         # list this machine's displays
 illum codecs           # which video codecs this machine can encode and decode
 illum connect <host>   # dial a host and measure round-trip time

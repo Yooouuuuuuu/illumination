@@ -11,6 +11,43 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-30
+
+Audio, the Sunshine way (architecture §8). The host's sound reaches the
+viewer; nothing adapts, nothing waits.
+
+### Added
+
+- **Audio capture and playback** (`illum-win`): WASAPI loopback of the
+  default output on the host, WASAPI playback on the viewer, both asked for
+  48 kHz stereo 16-bit with the engine converting.
+- **Opus** through FFmpeg's `libopus` (`illum-ffmpeg::opus`): 5 ms frames,
+  ~80 kb/s, low-delay application, one packet per frame.
+- **Audio over the UDP media path** (`illum_media::audio`): an 8-byte header,
+  every 4 frames protected by 2 Reed–Solomon parity packets (a 20 ms group;
+  any 4 of 6 rebuild the rest), data packets sent the moment they are
+  encoded. Separate stream, separate sequence numbers, same keys.
+- **Fixed 40 ms jitter buffer** on the viewer; a missing frame is 5 ms of
+  silence; 100 ms of nothing means the host is quiet and the buffer
+  re-primes when sound returns; a backlog is skipped, never played late.
+- `illum --service --no-audio` ("send audio: off": nothing is captured or
+  sent); `illum view --mute` (don't ask for sound). The test pattern host
+  hums a 440 Hz tone. The title bar shows `audio` while frames arrive.
+
+### Changed
+
+- Protocol version 7: `ScreenStart` carries `audio`; capability `audio`.
+
+### Verified
+
+- `cargo test`: 131 tests pass — audio packets and parity groups (two lost
+  of six rebuilt, three lost handled), the jitter buffer (priming, holes,
+  pauses, backlog), an Opus round trip through the real encoder and decoder
+  (level within 2 dB, ~80 kb/s), and end to end over loopback UDP: a viewer
+  that asks gets ≥ 100 frames in half a second, a muted one gets none.
+  `cargo clippy` is clean.
+- Not yet heard live between the two machines.
+
 ## [0.6.1] - 2026-10-30
 
 Documentation only.

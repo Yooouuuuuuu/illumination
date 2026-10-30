@@ -6,6 +6,7 @@ use illum::host::{HostConfig, SourceFactory, serve_session};
 use illum::viewer::{Notify, ViewParams, run_viewer_session};
 use illum_core::protocol::ControlMsg;
 use illum_core::store::TrustStore;
+use illum_media::audio::{AudioSource, ToneSource};
 use illum_media::codec::VideoCodec;
 use illum_media::frame::Bgra;
 use illum_media::pattern::{PATCHES, TestPattern};
@@ -73,6 +74,9 @@ async fn start_host_with(
                     let config = HostConfig {
                         screen: factory,
                         codecs,
+                        audio: Some(Arc::new(|| {
+                            Ok(Box::new(ToneSource::default()) as Box<dyn AudioSource>)
+                        })),
                         ..HostConfig::default()
                     };
                     let _ = serve_session(conn, config, Duration::from_secs(30), media).await;
@@ -253,9 +257,13 @@ async fn one_percent_loss_is_repaired_by_parity() {
         .unwrap();
     let sender = conn.sender();
     let shared: Shared = Arc::default();
+    // Video only: with audio in the stream the relay's first drops may all hit audio packets.
     let session = tokio::spawn(run_viewer_session(
         conn,
-        params(Some(relay)),
+        ViewParams {
+            audio: false,
+            ..params(Some(relay))
+        },
         shared.clone(),
         Arc::new(|| {}),
     ));
@@ -410,5 +418,53 @@ async fn host_without_screen_says_so() {
             .as_ref()
             .unwrap()
             .contains("cannot share")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_arrives_when_asked_and_not_when_muted() {
+    // The test host hums a tone; the viewer asks for sound (the default) and 5 ms frames flow
+    // over the audio stream, parity and all. A muted viewer gets none.
+    let addr = start_host("host-g", Some(pattern_factory())).await;
+    let conn = connect(&endpoint("ctl-g"), &addr.to_string())
+        .await
+        .unwrap();
+    let sender = conn.sender();
+    let shared: Shared = Arc::default();
+    let session = tokio::spawn(run_viewer_session(
+        conn,
+        params(None),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&shared, "100 audio frames (half a second)", |s| {
+        s.audio_frames >= 100
+    })
+    .await;
+    sender.send_control(&ControlMsg::Bye);
+    let _ = tokio::time::timeout(Duration::from_secs(5), session).await;
+
+    let conn = connect(&endpoint("ctl-g2"), &addr.to_string())
+        .await
+        .unwrap();
+    let muted: Shared = Arc::default();
+    let _session = tokio::spawn(run_viewer_session(
+        conn,
+        ViewParams {
+            audio: false,
+            ..params(None)
+        },
+        muted.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&muted, "30 video frames", |s| {
+        s.latest.is_some_and(|(seq, _)| seq >= 30)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        muted.lock().unwrap().audio_frames,
+        0,
+        "muted: no audio sent"
     );
 }

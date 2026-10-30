@@ -40,6 +40,7 @@ pub struct Stats {
     datagrams: u64,
     lost: u64,
     repaired: u64,
+    audio_frames: u32,
     pub summary: String,
 }
 
@@ -54,6 +55,7 @@ impl Default for Stats {
             datagrams: 0,
             lost: 0,
             repaired: 0,
+            audio_frames: 0,
             summary: "waiting for the first frame…".into(),
         }
     }
@@ -63,6 +65,11 @@ impl Stats {
     pub fn frame_received(&mut self, bytes: usize, encode_us: u32) {
         self.bytes += bytes as u64;
         self.encode_us += encode_us as u64;
+    }
+
+    /// One 5 ms audio frame arrived.
+    pub fn audio_frame(&mut self) {
+        self.audio_frames += 1;
     }
 
     /// Datagrams received and lost (before any repair), and frames rebuilt from parity, since
@@ -113,6 +120,9 @@ impl Stats {
         if self.repaired > 0 {
             parts.push(format!("{} repaired", self.repaired));
         }
+        if self.audio_frames > 0 {
+            parts.push("audio".into());
+        }
         self.summary = parts.join(" · ");
         *self = Stats {
             summary: std::mem::take(&mut self.summary),
@@ -145,6 +155,8 @@ pub struct ViewState {
     /// Session totals: frames rebuilt from parity, and frames that could not be assembled.
     pub frames_repaired: u64,
     pub frames_lost: u64,
+    /// Audio frames (5 ms each) received this session.
+    pub audio_frames: u64,
     /// Frames presented later than this after capture count as late (the user's limit, §5.5).
     pub latency_limit_ms: u32,
     /// Presented since the last report, and how many of them within the limit.
@@ -169,6 +181,7 @@ impl Default for ViewState {
             latest: None,
             frames_repaired: 0,
             frames_lost: 0,
+            audio_frames: 0,
             latency_limit_ms: 50,
             presented_tick: (0, 0),
             cursor: CursorPosition::default(),
