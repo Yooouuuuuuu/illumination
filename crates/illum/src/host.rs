@@ -720,6 +720,7 @@ pub async fn serve_session(
     let mut capture: Option<Capture> = None;
     let mut link: Option<MediaLink> = None;
     let mut input: Option<InputWorker> = None;
+    let mut hidden_seconds = 0u32;
     let result = loop {
         let frame = match tokio::time::timeout(idle, conn.recv()).await {
             Err(_) => break Err(NetError::Timeout("session (idle)")),
@@ -841,16 +842,28 @@ pub async fn serve_session(
                 repaired,
                 shown,
                 within_limit,
+                decoded,
             } => {
                 if let Some(l) = &link {
                     let (grade, quality) = l.report(SecondReport {
                         shown,
                         within_limit,
+                        decoded,
                         frames_lost,
                         received,
                         lost,
                     });
-                    tracing::debug!(target: "media", "{} shown {shown} ok {within_limit} · {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired.", grade.symbol());
+                    tracing::debug!(target: "media", "{} shown {shown} ok {within_limit} decoded {decoded} · {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired.", grade.symbol());
+                    // A window that decodes but never presents (minimised, display off): say so
+                    // once, so a log full of ⚪ seconds is not mistaken for a still screen.
+                    if decoded >= 5 && shown == 0 {
+                        hidden_seconds += 1;
+                        if hidden_seconds == 10 {
+                            tracing::info!(target: "media", "The viewer decodes but does not present (window hidden or display off?); still streaming.");
+                        }
+                    } else {
+                        hidden_seconds = 0;
+                    }
                     if let Some(q) = quality {
                         if let ControlMsg::Quality {
                             rung,

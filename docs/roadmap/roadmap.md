@@ -200,7 +200,7 @@ outages every 4 s: survived. Not yet measured live.
 - `--control` per user
 - desktop switcher (suspend, switch, restart)
 - Ctrl+Alt+Del via `SendSAS`, hotkey Ctrl+Alt+Shift+Del
-- wake lock
+- wake lock *(done early in v0.7.3: the host holds system and display awake while a session streams)*
 - restart on session change
 - install/uninstall commands (service registration, firewall rule, `SoftwareSASGeneration`)
 

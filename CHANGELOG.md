@@ -11,6 +11,33 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-02
+
+What an hour of nobody watching taught.
+
+### Fixed
+
+- **The ladder no longer ratchets down behind a hidden window.** With the
+  viewer minimised (or its display off) nothing is presented, so almost no
+  second is graded; the laptop's Wi-Fi hiccups for 3 s every five minutes,
+  those seconds graded 🔴, and "3 of the last 10 graded seconds" was met with
+  evidence spread over twenty minutes — one rung lost per quarter hour. Two
+  rules: the 10 graded seconds of a drop must lie within 30 s (a raise's
+  within four times its window), and "frozen by loss" now looks at frames
+  **decoded**, not shown — a hidden window decodes everything and presents
+  nothing, which is no evidence about the link at all.
+- **The host stays awake while it streams** (system and display): an idle
+  hour put the host to sleep, which took the capture and the connection with
+  it. Roadmap M6's "wake lock", pulled forward.
+- An unexpected `AcquireNextFrame` error (display turned off, device state)
+  recreates the duplication instead of ending capture; capture gives up only
+  after 30 s of continuous failure.
+- The host logs once when the viewer decodes but does not present.
+
+### Changed
+
+- Protocol version 8: `MediaReport` carries `decoded`.
+
 ## [0.7.2] - 2026-10-30
 
 The codec rule enforced as written, and the numbers to judge the viewer by.

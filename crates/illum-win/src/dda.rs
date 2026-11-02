@@ -160,9 +160,15 @@ pub struct DdaSource {
     pointer_buf: Vec<u8>,
     last_cursor: CursorPosition,
     retry_at: Instant,
+    /// When `AcquireNextFrame` started failing with an unexpected error, if it is.
+    failing_since: Option<Instant>,
     /// Set once every adapter that lists the display has refused to duplicate it.
     unsupported: bool,
 }
+
+/// How long `AcquireNextFrame` may keep failing (with the duplication recreated in between)
+/// before capture gives up and the session hears about it.
+const ACQUIRE_GIVE_UP: Duration = Duration::from_secs(30);
 
 impl DdaSource {
     /// Captures display `index` from [`list_displays`].
@@ -195,6 +201,7 @@ impl DdaSource {
             pointer_buf: Vec::new(),
             last_cursor: CursorPosition::default(),
             retry_at: Instant::now(),
+            failing_since: None,
             unsupported: false,
         })
     }
@@ -360,14 +367,25 @@ impl ScreenSource for DdaSource {
         let mut resource: Option<IDXGIResource> = None;
         let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
         match unsafe { dup.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
-            Ok(()) => {}
+            Ok(()) => self.failing_since = None,
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(Vec::new()),
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 tracing::info!(target: "capture", "Duplication lost (mode change or desktop switch); recreating.");
                 self.dup = None;
                 return Ok(Vec::new());
             }
-            Err(e) => return Err(err("AcquireNextFrame", e)),
+            Err(e) => {
+                // Anything else (a display that turned off, a device in a bad state): recreate
+                // too, a little later, and give up only if it never comes back.
+                let since = *self.failing_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > ACQUIRE_GIVE_UP {
+                    return Err(err("AcquireNextFrame", e));
+                }
+                tracing::warn!(target: "capture", "AcquireNextFrame failed ({e}); recreating the duplication.");
+                self.dup = None;
+                self.retry_at = Instant::now() + Duration::from_millis(500);
+                return Ok(Vec::new());
+            }
         }
 
         let mut events = Vec::new();

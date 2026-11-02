@@ -261,6 +261,7 @@ fn media_loop(
                             state.latest = Some((meta.seq as u64, meta.capture_us));
                             state.stats.frame_received(data.len(), meta.encode_us);
                             state.stats.decoded(decode_us);
+                            state.mark_decoded();
                             drop(state);
                             notify();
                         }
@@ -292,7 +293,7 @@ fn media_loop(
         }
         if now >= next_report {
             next_report = now + REPORT_INTERVAL;
-            let (shown, within_limit) = {
+            let (shown, within_limit, decoded) = {
                 let mut state = shared.lock().expect("view state lock");
                 state.stats.packets(received, lost, repaired);
                 state.take_presented()
@@ -304,6 +305,7 @@ fn media_loop(
                 repaired,
                 shown,
                 within_limit,
+                decoded,
             });
             received = 0;
             lost = 0;

@@ -391,6 +391,15 @@ and the asymmetry of a 10 ms round trip bounds the rest.
    at the ceiling repairing every frame, persistent random loss is path loss, fully handled, and
    walking the ladder down would only lower the picture for nothing.
 
+Two more came from the first long live run (2026-10-30, viewer window hidden for an hour):
+4. **Evidence must be recent.** The 10 graded seconds of a drop must lie within the last 30 s,
+   the graded seconds of a raise within four times the raise window. A hidden window grades
+   almost nothing, and the laptop's Wi-Fi hiccups for 3 s every five minutes; those 🔴 seconds
+   added up to "3 of the last 10" across twenty minutes and cost a rung per quarter hour.
+5. **"Frozen by loss" counts frames *decoded*, not shown.** A minimised window (or one whose
+   display is off) decodes every frame and presents none: that is ⚪, no evidence about the
+   link, whatever was lost meanwhile. The viewer reports `decoded` next to `shown`.
+
 Two facts about the pacer came out of the same runs and apply to the host: the encoder's share
 is `rung × 100 / (100 + parity %) × 90 %` (parity truly budget-neutral, 10 % left for headers
 and for the bucket to refill), and the burst allowance is at least **two frames** (was 50 ms),

@@ -377,6 +377,7 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
         // Viewer side.
         let capture_ms = frame_ms;
         if complete {
+            sec.decoded += 1;
             if awaiting_keyframe && !keyframe {
                 // Skipped; remind the host once a second (mirrors the viewer).
                 if request_at_ms.is_none() && last_delivery - last_keyframe_ms > 1000.0 {
@@ -405,6 +406,7 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
             let report = SecondReport {
                 shown: sec.shown,
                 within_limit: sec.within,
+                decoded: sec.decoded,
                 frames_lost: sec.frames_lost,
                 received: sec.received,
                 lost: sec.lost,
@@ -453,6 +455,7 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
 struct SecondCounters {
     shown: u32,
     within: u32,
+    decoded: u32,
     received: u32,
     lost: u32,
     frames_lost: u32,

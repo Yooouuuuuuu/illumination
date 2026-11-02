@@ -71,14 +71,21 @@ pub fn min_frames_to_grade(target_fps: u32) -> u32 {
 /// unless at least half that many frames were *lost*: then the picture froze because of loss,
 /// which is the worst latency there is, and the second is 🔴 (decided from the harness,
 /// 2026-10-30: without this an oversubscribed path kept the latency controller blind).
-pub fn grade(shown: u32, within_limit: u32, frames_lost: u32, target_fps: u32) -> Grade {
+pub fn grade(
+    shown: u32,
+    within_limit: u32,
+    decoded: u32,
+    frames_lost: u32,
+    target_fps: u32,
+) -> Grade {
     let n = min_frames_to_grade(target_fps);
+    if decoded < n && frames_lost >= FREEZE_LOST_FRAMES {
+        return Grade::Red; // frames die before they can be decoded: frozen by loss
+    }
     if shown < n {
-        return if frames_lost >= FREEZE_LOST_FRAMES {
-            Grade::Red
-        } else {
-            Grade::Blank
-        };
+        // Nothing to judge latency by: a still screen, or a window that decodes but cannot
+        // present (minimised, display off). Not the link's fault either way.
+        return Grade::Blank;
     }
     let share = within_limit as f64 / shown as f64;
     if share >= 0.9 {
@@ -190,7 +197,10 @@ impl Ladder {
 pub struct LatencyController {
     ladder: Ladder,
     index: usize,
-    history: Vec<Grade>,
+    /// Graded seconds since the last action, with the second they were observed.
+    history: Vec<(u64, Grade)>,
+    /// Seconds observed so far (graded or not).
+    clock: u64,
     /// Per rung: raises into it that were undone within [`RAISE_HOLD_SECONDS`].
     failures: Vec<u32>,
     /// Seconds since the last raise, while the rung is on probation.
@@ -201,6 +211,12 @@ pub const DROP_WINDOW: usize = 10;
 pub const DROP_SHARE: f64 = 0.3;
 pub const RAISE_WINDOW: usize = 15;
 pub const RAISE_SHARE: f64 = 0.8;
+/// The 10 graded seconds of a drop must all lie within this many seconds; a hidden window
+/// produces almost no graded seconds, and a 3 s Wi-Fi hiccup every five minutes added up to
+/// "3 of the last 10" across twenty minutes (first live run, 2026-10-30).
+pub const DROP_RECENT_SECONDS: u64 = 30;
+/// The graded seconds of a raise must lie within this many times the raise window.
+pub const RAISE_RECENT_FACTOR: u64 = 4;
 /// A raise that survives this long clears the rung's failures.
 pub const RAISE_HOLD_SECONDS: u32 = 60;
 /// Most doublings of the green run: 15 s × 2³ = 120 s.
@@ -220,6 +236,7 @@ impl LatencyController {
             ladder,
             index: 0,
             history: Vec::new(),
+            clock: 0,
             since_raise: None,
         }
     }
@@ -245,6 +262,8 @@ impl LatencyController {
     /// Feeds one second. `loss_above_threshold`: packet loss before repair recently at or above
     /// the FEC 🔴 zone, which blocks raising. Returns the move made, if any.
     pub fn observe(&mut self, grade: Grade, loss_above_threshold: bool) -> Option<Move> {
+        self.clock += 1;
+        let clock = self.clock;
         // Probation after a raise runs on wall-clock seconds, graded or not.
         if let Some(s) = &mut self.since_raise {
             *s += 1;
@@ -256,28 +275,28 @@ impl LatencyController {
         match grade {
             Grade::Blank => return None,
             Grade::Yellow if self.history.is_empty() => return None, // count from the first 🔴/🟢
-            g => self.history.push(g),
+            g => self.history.push((clock, g)),
         }
+        // Evidence older than the longest possible window is forgotten.
+        let horizon = RAISE_RECENT_FACTOR * (RAISE_WINDOW << MAX_BACKOFF_DOUBLINGS) as u64;
+        self.history.retain(|(t, _)| clock - t < horizon);
         let n = self.history.len();
         if n >= DROP_WINDOW {
             let window = &self.history[n - DROP_WINDOW..];
-            let red = window.iter().filter(|g| **g == Grade::Red).count() as f64;
-            if red / DROP_WINDOW as f64 >= DROP_SHARE {
+            let recent = clock - window[0].0 < DROP_RECENT_SECONDS;
+            let red = window.iter().filter(|(_, g)| *g == Grade::Red).count() as f64;
+            if recent && red / DROP_WINDOW as f64 >= DROP_SHARE {
                 return self.step(Move::Down);
             }
         }
         let raise_window = self.raise_window();
         if n >= raise_window && !loss_above_threshold {
             let window = &self.history[n - raise_window..];
-            let green = window.iter().filter(|g| **g == Grade::Green).count() as f64;
-            if green / raise_window as f64 >= RAISE_SHARE {
+            let recent = clock - window[0].0 < RAISE_RECENT_FACTOR * raise_window as u64;
+            let green = window.iter().filter(|(_, g)| *g == Grade::Green).count() as f64;
+            if recent && green / raise_window as f64 >= RAISE_SHARE {
                 return self.step(Move::Up);
             }
-        }
-        // Keep the history bounded; only the last (longest possible) window matters.
-        let keep = RAISE_WINDOW << MAX_BACKOFF_DOUBLINGS;
-        if n > keep * 2 {
-            self.history.drain(..n - keep);
         }
         None
     }
@@ -409,6 +428,8 @@ impl FecController {
 pub struct SecondReport {
     pub shown: u32,
     pub within_limit: u32,
+    /// Frames decoded, presented or not.
+    pub decoded: u32,
     /// Frames that could not be assembled even with parity.
     pub frames_lost: u32,
     pub received: u32,
@@ -480,6 +501,7 @@ impl Adapter {
         let grade = grade(
             report.shown,
             report.within_limit,
+            report.decoded,
             report.frames_lost,
             self.latency.rung().fps,
         );
@@ -541,30 +563,63 @@ mod tests {
 
     #[test]
     fn grades_follow_the_thresholds() {
-        assert_eq!(grade(60, 60, 0, 60), Grade::Green);
-        assert_eq!(grade(60, 54, 0, 60), Grade::Green); // exactly 90 %
-        assert_eq!(grade(60, 53, 0, 60), Grade::Yellow);
-        assert_eq!(grade(60, 30, 0, 60), Grade::Yellow); // exactly 50 %
-        assert_eq!(grade(60, 29, 0, 60), Grade::Red);
+        assert_eq!(grade(60, 60, 60, 0, 60), Grade::Green);
+        assert_eq!(grade(60, 54, 60, 0, 60), Grade::Green); // exactly 90 %
+        assert_eq!(grade(60, 53, 60, 0, 60), Grade::Yellow);
+        assert_eq!(grade(60, 30, 60, 0, 60), Grade::Yellow); // exactly 50 %
+        assert_eq!(grade(60, 29, 60, 0, 60), Grade::Red);
         assert_eq!(
-            grade(14, 0, 0, 60),
+            grade(14, 0, 14, 0, 60),
             Grade::Blank,
             "fewer than 15 frames at 60 fps"
         );
-        assert_eq!(grade(15, 0, 0, 60), Grade::Red);
-        assert_eq!(grade(4, 4, 0, 15), Grade::Blank, "never fewer than 5");
+        assert_eq!(grade(15, 0, 15, 0, 60), Grade::Red);
+        assert_eq!(grade(4, 4, 4, 0, 15), Grade::Blank, "never fewer than 5");
     }
 
     #[test]
     fn a_freeze_caused_by_loss_is_red_not_blank() {
         // Still screen with one lost frame: blank.
-        assert_eq!(grade(0, 0, 0, 60), Grade::Blank);
-        assert_eq!(grade(3, 3, 1, 60), Grade::Blank);
-        // Keyframe attempts keep dying while nothing reaches the screen: frozen by loss.
-        assert_eq!(grade(0, 0, 2, 60), Grade::Red);
-        assert_eq!(grade(10, 10, 40, 60), Grade::Red);
-        // Enough shown: graded on latency as usual, whatever was lost.
-        assert_eq!(grade(15, 15, 40, 60), Grade::Green);
+        assert_eq!(grade(0, 0, 0, 0, 60), Grade::Blank);
+        assert_eq!(grade(3, 3, 3, 1, 60), Grade::Blank);
+        // Keyframe attempts keep dying while nothing can be decoded: frozen by loss.
+        assert_eq!(grade(0, 0, 0, 2, 60), Grade::Red);
+        assert_eq!(grade(10, 10, 10, 40, 60), Grade::Red);
+        // Enough decoded and shown: graded on latency as usual, whatever was lost.
+        assert_eq!(grade(15, 15, 15, 40, 60), Grade::Green);
+    }
+
+    #[test]
+    fn a_hidden_window_is_blank_even_when_the_wifi_hiccups() {
+        // Everything decodes, nothing is presented (minimised window, display off): no evidence
+        // about latency, and a lost frame or twenty is not a freeze.
+        assert_eq!(grade(0, 0, 60, 0, 60), Grade::Blank);
+        assert_eq!(grade(0, 0, 58, 2, 60), Grade::Blank);
+        assert_eq!(grade(0, 0, 40, 20, 60), Grade::Blank);
+    }
+
+    #[test]
+    fn stale_grades_do_not_add_up() {
+        let mut c = LatencyController::new(Ladder::new(top()));
+        // A 3 s hiccup every five minutes on a stream nobody is watching: ten graded seconds
+        // never fall within 30 s, so no drop, however long it goes on.
+        for _ in 0..6 {
+            for _ in 0..3 {
+                assert_eq!(c.observe(Grade::Red, false), None);
+            }
+            for _ in 0..297 {
+                assert_eq!(c.observe(Grade::Blank, false), None);
+            }
+        }
+        assert_eq!(c.index(), 0);
+        // Ten consecutive graded seconds with three red: the drop as designed.
+        for _ in 0..3 {
+            assert_eq!(c.observe(Grade::Red, false), None);
+        }
+        for _ in 0..6 {
+            assert_eq!(c.observe(Grade::Green, false), None);
+        }
+        assert_eq!(c.observe(Grade::Green, false), Some(Move::Down));
     }
 
     #[test]
@@ -787,6 +842,7 @@ mod tests {
             let d = a.observe(SecondReport {
                 shown: 0,
                 within_limit: 0,
+                decoded: 0,
                 frames_lost: 1,
                 received: 980,
                 lost: 20,
@@ -819,6 +875,7 @@ mod tests {
             let d = a.observe(SecondReport {
                 shown: 60,
                 within_limit: 60,
+                decoded: 60,
                 frames_lost: 0,
                 received: 990,
                 lost: 10,
@@ -831,6 +888,7 @@ mod tests {
             if a.observe(SecondReport {
                 shown: 60,
                 within_limit: 60,
+                decoded: 60,
                 frames_lost: 0,
                 received: 1000,
                 lost: 0,

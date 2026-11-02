@@ -188,8 +188,8 @@ pub struct ViewState {
     pub audio_frames: u64,
     /// Frames presented later than this after capture count as late (the user's limit, §5.5).
     pub latency_limit_ms: u32,
-    /// Presented since the last report, and how many of them within the limit.
-    presented_tick: (u32, u32),
+    /// Presented since the last report, how many of them within the limit, and decoded.
+    presented_tick: (u32, u32, u32),
     pub cursor: CursorPosition,
     pub cursor_shape: Option<CursorShape>,
     pub clock: ClockSync,
@@ -212,7 +212,7 @@ impl Default for ViewState {
             frames_lost: 0,
             audio_frames: 0,
             latency_limit_ms: 50,
-            presented_tick: (0, 0),
+            presented_tick: (0, 0, 0),
             cursor: CursorPosition::default(),
             cursor_shape: None,
             clock: ClockSync::default(),
@@ -239,8 +239,13 @@ impl ViewState {
         }
     }
 
-    /// (shown, within limit) since the last call; for the once-a-second report.
-    pub fn take_presented(&mut self) -> (u32, u32) {
+    /// A frame was decoded (whether or not the window gets to present it).
+    pub fn mark_decoded(&mut self) {
+        self.presented_tick.2 += 1;
+    }
+
+    /// (shown, within limit, decoded) since the last call; for the once-a-second report.
+    pub fn take_presented(&mut self) -> (u32, u32, u32) {
         std::mem::take(&mut self.presented_tick)
     }
 }

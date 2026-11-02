@@ -11,6 +11,8 @@ mod dda;
 mod gdi;
 #[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod power;
 
 #[cfg(windows)]
 pub use audio::{LoopbackCapture, Playback};
@@ -22,6 +24,8 @@ pub use gdi::GdiSource;
 pub use input::{
     SystemKeyHook, WinInjector, foreground_keyboard_layout, make_dpi_aware, own_keyboard_layout,
 };
+#[cfg(windows)]
+pub use power::KeepAwake;
 
 #[cfg(windows)]
 use illum_media::MediaError;
@@ -32,9 +36,17 @@ use std::time::Duration;
 
 /// The screen source for a display: Desktop Duplication, falling back to GDI when duplication
 /// is not available from this process (RustDesk does the same). The switch happens on the
-/// first failure, so a two-GPU laptop bound to the wrong GPU still streams.
+/// first failure, so a two-GPU laptop bound to the wrong GPU still streams. While it exists the
+/// host stays awake and its display on (a sleeping host ends the session; a display that turns
+/// off ends the duplication).
 #[cfg(windows)]
-pub enum ScreenCapture {
+pub struct ScreenCapture {
+    method: Method,
+    _awake: KeepAwake,
+}
+
+#[cfg(windows)]
+enum Method {
     Dda(DdaSource),
     Gdi(GdiSource),
 }
@@ -42,19 +54,23 @@ pub enum ScreenCapture {
 #[cfg(windows)]
 impl ScreenCapture {
     pub fn new(index: usize) -> Result<ScreenCapture, MediaError> {
-        match DdaSource::new(index) {
-            Ok(dda) => Ok(ScreenCapture::Dda(dda)),
+        let method = match DdaSource::new(index) {
+            Ok(dda) => Method::Dda(dda),
             Err(e) => {
                 tracing::warn!(target: "capture", "Desktop Duplication unavailable ({e}); capturing with GDI instead (slower).");
-                Ok(ScreenCapture::Gdi(GdiSource::new(index)?))
+                Method::Gdi(GdiSource::new(index)?)
             }
-        }
+        };
+        Ok(ScreenCapture {
+            method,
+            _awake: KeepAwake::new(),
+        })
     }
 
     pub fn method(&self) -> &'static str {
-        match self {
-            ScreenCapture::Dda(_) => "Desktop Duplication",
-            ScreenCapture::Gdi(_) => "GDI",
+        match self.method {
+            Method::Dda(_) => "Desktop Duplication",
+            Method::Gdi(_) => "GDI",
         }
     }
 }
@@ -62,18 +78,18 @@ impl ScreenCapture {
 #[cfg(windows)]
 impl ScreenSource for ScreenCapture {
     fn poll(&mut self, timeout: Duration) -> Result<Vec<SourceEvent>, MediaError> {
-        if let ScreenCapture::Dda(dda) = self {
+        if let Method::Dda(dda) = &mut self.method {
             match dda.poll(timeout) {
                 Err(e) if dda.is_unsupported() => {
                     tracing::warn!(target: "capture", "{e}; capturing with GDI instead (slower). On a two-GPU laptop, Desktop Duplication works when Windows runs illum on the GPU that drives the display.");
-                    *self = ScreenCapture::Gdi(GdiSource::new(dda.display_index())?);
+                    self.method = Method::Gdi(GdiSource::new(dda.display_index())?);
                 }
                 other => return other,
             }
         }
-        match self {
-            ScreenCapture::Gdi(gdi) => gdi.poll(timeout),
-            ScreenCapture::Dda(_) => unreachable!("handled above"),
+        match &mut self.method {
+            Method::Gdi(gdi) => gdi.poll(timeout),
+            Method::Dda(_) => unreachable!("handled above"),
         }
     }
 }
