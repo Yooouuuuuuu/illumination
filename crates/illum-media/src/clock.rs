@@ -76,6 +76,25 @@ impl ClockSync {
         self.best().map(|s| s.offset_us)
     }
 
+    /// The smallest round trip of the whole window (the last minute): the path without a
+    /// queue, as the probes before the stream started saw it.
+    pub fn floor_rtt(&self) -> Option<Duration> {
+        self.best().map(|s| Duration::from_micros(s.rtt_us))
+    }
+
+    /// The smallest round trip among the probes of the last `recent` (ending at the newest
+    /// probe): a queue that never drains shows in it, a burst that delayed one probe does not.
+    pub fn min_rtt_within(&self, recent: Duration) -> Option<Duration> {
+        let newest = self.samples.back()?.mid_us;
+        let recent_us = recent.as_micros() as u64;
+        self.samples
+            .iter()
+            .filter(|s| s.mid_us + recent_us >= newest)
+            .map(|s| s.rtt_us)
+            .min()
+            .map(Duration::from_micros)
+    }
+
     /// The host clock at local time `local_us`.
     pub fn host_time_at(&self, local_us: u64) -> Option<i64> {
         self.offset_us().map(|o| local_us as i64 + o)

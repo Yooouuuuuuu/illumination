@@ -1,13 +1,14 @@
-# The adaptation cycle as built in v0.6.0 (architecture §5.5–5.6, illum_media::adapt).
-# One pass per second. The viewer measures; the host grades, decides and applies.
+# The adaptation cycle as built in v0.6.0 and tuned from the measurement runs in v0.10.0
+# (architecture §5.5–5.6, illum_media::adapt). One pass per second. The viewer measures; the
+# host grades, decides and applies.
 
 direction: down
 
 viewer: Viewer — every presented frame {
-  measure: "latency = host clock now − capture time (from the packet header)\nshown += 1 · within += 1 if latency ≤ L (user limit, default 50 ms)\nunknown clock yet → counts as within"
+  measure: "latency = host clock now − capture time (from the packet header)\nshown += 1 · within += 1 if latency ≤ L (user limit, default 50 ms)\nunknown clock yet → counts as within\nclock probes 4 × per second: rtt = smallest of the last 3 s · floor = smallest of the last minute"
 }
 
-report: "MediaReport, once a second\nshown · within_limit · frames_lost · received · lost (before repair)" {
+report: "MediaReport, once a second\nshown · within_limit · decoded · frames_lost · received · lost (before repair) · rtt · rtt floor" {
   shape: document
 }
 
@@ -16,23 +17,27 @@ viewer.measure -> report
 host: Host — once a second {
   direction: down
 
+  timing: "timing rose ?\nrtt (smallest of the last 3 s of probes) ≥ 1.5 × the floor (smallest of the last minute,\nset by the probes before the stream) and ≥ +10 ms\n(a queue is building on the path)" {shape: diamond}
+
   grade: Grade the second {
     enough: "shown ≥ N ?\n(N = ¼ target fps, min 5)" {shape: diamond}
     share: "share = within ÷ shown\n≥ 90 % → 🟢 · 50–90 % → 🟡 · < 50 % → 🔴"
-    frozen: "frames_lost ≥ N ÷ 2 ?" {shape: diamond}
-    red_freeze: "🔴 — the picture froze because of loss\n(harness rule 1)"
-    blank: "⚪ — still screen, no evidence"
+    frozen: "decoded < N and frames_lost ≥ 2\nand timing rose ?" {shape: diamond}
+    red_freeze: "🔴 — the picture froze because the path is overloaded\n(harness rule 1 + live runs 2026-11-02)"
+    blank: "⚪ — still screen, hidden window, or random loss:\nno evidence about the rate"
     enough -> share: yes
     enough -> frozen: no
     frozen -> red_freeze: yes
     frozen -> blank: no
   }
 
+  fast: "FAST DROP (congestion):\nloss this second ≥ 2 % and timing rose ?\n→ one rung down at once, at most one per second\n(live runs 2026-11-02: the signature shows inside the first second above the link)" {shape: diamond}
+
   lat: Latency controller {
     skip: "⚪ → not counted\nleading 🟡 → wait for the first 🔴/🟢" {shape: hexagon}
     push: "append the grade"
-    drop_q: "🔴 in ≥ 30 % of\nthe last 10 graded s ?" {shape: diamond}
-    raise_q: "🟢 in ≥ 80 % of the last W graded s\nand loss in the last 10 s < 0.5 % ?\nW = 15 s × 2^failures of the rung above (max 120 s)" {shape: diamond}
+    drop_q: "🔴 in ≥ 30 % of\nthe last 10 graded s, all within 30 s ?" {shape: diamond}
+    raise_q: "🟢 in ≥ 80 % of the last W graded s\nand loss in the last 30 s < 0.5 % ?\nW = 15 s × 2^failures of the rung above (max 120 s)" {shape: diamond}
     drop: "DROP one rung\nhistory cleared\nif on probation (raised < 60 s ago): failures[rung] += 1\n(harness rule 2)"
     raise: "RAISE one rung\nhistory cleared · probation starts\n(60 s held → failures[rung] = 0)"
     hold: "hold"
@@ -67,10 +72,10 @@ host: Host — once a second {
   }
 
   apply: Apply the rung and the parity {
-    rung: "rung = (bitrate, fps, scale)\nladder: ×0.8 ×5 → 45/30/20/15 fps → 75 %/50 % · bottom ≈ 1 Mb/s"
+    rung: "rung = (bitrate, fps, scale)\nladder: ×0.8 ×5 → fps rungs below the cap (60/45/30/20/15) → 75 %/50 % only if the user allows\nstart at the top (cap default 20 Mb/s, 30 fps) · bottom ≈ 1 Mb/s"
     pacer: "pacer: rate = rung bitrate\nburst = max(50 ms, 2 frames)"
     encoder: "encoder bitrate = rung × 100 ÷ (100 + parity %) × 90 %\nlive on NVENC/AMF/QSV · reopen software encoders\nreopen on fps or scale change (one keyframe)"
-    packets: "packetiser: parity % per block\nframe-rate cap by capture time · downscale when scale < 100 %"
+    packets: "packetiser: parity % per block · keyframes ≥ 30 % and at most two per second\nframe-rate cap by capture time · downscale when scale < 100 %"
     rung -> pacer
     rung -> encoder
     rung -> packets
@@ -80,9 +85,13 @@ host: Host — once a second {
     shape: document
   }
 
-  grade.share -> lat.skip
-  grade.red_freeze -> lat.skip
-  grade.blank -> lat.skip
+  timing -> grade.frozen {style.stroke-dash: 3}
+  timing -> fast {style.stroke-dash: 3}
+  fast -> lat.drop: yes
+  fast -> lat.skip: no
+  grade.share -> fast
+  grade.red_freeze -> fast
+  grade.blank -> fast
   lat.drop -> apply.rung
   lat.raise -> apply.rung
   fec.up -> apply.rung
@@ -91,9 +100,16 @@ host: Host — once a second {
   apply.rung -> quality: "on every change"
 }
 
+report -> host.timing: "rtt"
 report -> host.grade.enough: "shown, within"
 report -> host.fec.window: "received, lost, frames_lost"
-report -> host.lat.raise_q: "recent loss (gate)" {style.stroke-dash: 3}
+report -> host.lat.raise_q: "loss over 30 s (gate)" {style.stroke-dash: 3}
+
+notices: "Viewer notices (title bar): no keyframe 2 s after asking → “waiting for a keyframe”;\nno media for 3 s with control alive → “re-establishing the media path”, punch fast, ask for a keyframe" {
+  shape: hexagon
+}
+
+viewer -> notices {style.stroke-dash: 3}
 
 budget: "Budget-neutral: parity comes out of the rung's bitrate, never on top,\nso raising parity cannot add latency. Availability first: the FEC controller\nnever waits for the latency controller." {
   shape: hexagon

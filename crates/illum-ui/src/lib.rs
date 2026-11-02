@@ -205,6 +205,8 @@ pub struct ViewState {
     pub stats: Stats,
     /// Shown in the title instead of the stats, e.g. "screen unavailable: …".
     pub status: Option<String>,
+    /// A passing condition shown next to the stats, e.g. "waiting for a keyframe…".
+    pub notice: Option<String>,
     /// Keyboard layouts, for the Auto keyboard mode.
     pub host_layout: Option<String>,
     pub local_layout: Option<String>,
@@ -232,6 +234,7 @@ impl Default for ViewState {
             clock: ClockSync::default(),
             stats: Stats::default(),
             status: None,
+            notice: None,
             host_layout: None,
             local_layout: None,
             recorder: None,
@@ -529,8 +532,12 @@ impl App {
                     q.fec_percent
                 )
             });
+            let notice = state
+                .notice
+                .as_ref()
+                .map_or(String::new(), |n| format!(" — {n}"));
             Some(format!(
-                "{} — {codec}{quality} · {}",
+                "{} — {codec}{quality} · {}{notice}",
                 self.options.title, state.stats.summary
             ))
         } else {

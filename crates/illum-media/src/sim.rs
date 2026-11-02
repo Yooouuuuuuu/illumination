@@ -22,8 +22,13 @@ const DATAGRAM_BYTES: u64 = 1200;
 const PAYLOAD_BYTES: u64 = 1166;
 /// Decode plus present, added to every shown frame's latency.
 const VIEWER_OVERHEAD_MS: f64 = 4.0;
-/// The host serves a keyframe request at most this often (mirrors the host).
+/// The host serves a keyframe request at most this often (mirrors the host): two a second.
+/// Four a second fed the collapse at a rung above the link (2026-11-02); one a second left a
+/// bursty link showing under half its frames (the "100 ms outage every 4 s" scenario).
 const KEYFRAME_MIN_INTERVAL_MS: f64 = 500.0;
+/// The viewer reports the smallest round trip of this many ms (mirrors the viewer).
+const RTT_RECENT_MS: f64 = 3000.0;
+const RTT_FLOOR_MS: f64 = 60_000.0;
 /// Share of a rung's bitrate the encoder gets (mirrors `adapt::encoder_bitrate`).
 fn encoder_bps(rung: Rung, fec_percent: u32) -> u64 {
     crate::adapt::encoder_bitrate(rung.bitrate_bps, fec_percent)
@@ -109,6 +114,7 @@ impl Default for Settings {
             limits: Limits {
                 max_bitrate_bps: 20_000_000,
                 max_fps: 60,
+                scale_rungs: false,
             },
             latency_limit_ms: 50.0,
             fec_floor: 5,
@@ -292,9 +298,23 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
     let mut next_second_ms = 1000.0;
     let mut t_s = 0u32;
     let mut seconds = Vec::new();
+    // Clock-probe round trips, sampled at every frame before it is sent (twice the base delay
+    // plus whatever queue the path holds then), with one probe from before the stream.
+    let mut rtts: VecDeque<(f64, f64)> = VecDeque::new();
+    rtts.push_back((0.0, 2.0 * path.link.base_delay_ms));
 
     let mut frame_ms = 0.0;
     while frame_ms < total_ms {
+        {
+            let queue_ms = (path.last_departure_ms - frame_ms).max(0.0);
+            rtts.push_back((frame_ms, 2.0 * path.link.base_delay_ms + queue_ms));
+            while rtts
+                .front()
+                .is_some_and(|(t, _)| frame_ms - t > RTT_FLOOR_MS)
+            {
+                rtts.pop_front();
+            }
+        }
         // Apply scripted path changes.
         while events
             .front()
@@ -403,6 +423,23 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
         // Second boundary: report, decide, apply.
         let next_frame_ms = (send_start / tick_ms).floor() * tick_ms + tick_ms;
         while next_second_ms <= next_frame_ms.min(total_ms) {
+            // What the viewer reports about the round trip: the smallest of the last 3 s (a
+            // queue that never drains shows; our own bursts do not) and of the last minute.
+            let min_since = |since_ms: f64| {
+                rtts.iter()
+                    .filter(|(t, _)| next_second_ms - t <= since_ms)
+                    .map(|(_, r)| *r)
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let recent = min_since(RTT_RECENT_MS);
+            let floor = min_since(RTT_FLOOR_MS).min(recent);
+            let as_ms = |v: f64| {
+                if v.is_finite() {
+                    v.round().max(1.0) as u32
+                } else {
+                    0
+                }
+            };
             let report = SecondReport {
                 shown: sec.shown,
                 within_limit: sec.within,
@@ -410,6 +447,8 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
                 frames_lost: sec.frames_lost,
                 received: sec.received,
                 lost: sec.lost,
+                rtt_ms: as_ms(recent),
+                rtt_floor_ms: as_ms(floor),
             };
             let decision = adapter.observe(report);
             let median = {

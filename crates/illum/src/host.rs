@@ -46,10 +46,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 pub const DEFAULT_MAX_BITRATE_KBPS: u32 = 20_000;
 /// How long the host waits for the viewer's first punch datagram before giving up on UDP.
 const PUNCH_DEADLINE: Duration = Duration::from_secs(5);
-/// A viewer's keyframe request is honoured at most this often.
-const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(250);
-/// Defaults when the viewer asks for none (§5.8).
-pub const DEFAULT_MAX_FPS: u32 = 60;
+/// A viewer's keyframe request is honoured at most this often: two a second however many
+/// frames die. At 250 ms, a rung above the link produced four keyframes a second, each one
+/// making the next loss likelier (measured 2026-11-02); one a second starved a bursty link.
+const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
+/// Defaults when the viewer asks for none (§5.8). 30 fps: half the bits of 60 for 3–5 ms of
+/// latency (measured 2026-11-02); the user may ask for up to 120.
+pub const DEFAULT_MAX_FPS: u32 = 30;
+pub const MAX_FPS: u32 = 120;
 pub const DEFAULT_LATENCY_LIMIT_MS: u32 = 50;
 
 /// What the viewer asked for in `ScreenStart`, clamped to what the host allows (§5.8).
@@ -65,6 +69,8 @@ pub struct StreamSettings {
     /// Measurement run: no adaptation, stream at the top values and `scale_percent` throughout.
     pub fixed: bool,
     pub scale_percent: u32,
+    /// The ladder may lower the resolution under pressure.
+    pub scale_rungs: bool,
 }
 
 impl StreamSettings {
@@ -79,6 +85,7 @@ impl StreamSettings {
         audio: bool,
         fixed: bool,
         scale_percent: u32,
+        scale_rungs: bool,
     ) -> StreamSettings {
         let kbps = if max_bitrate_kbps == 0 {
             DEFAULT_MAX_BITRATE_KBPS
@@ -100,7 +107,7 @@ impl StreamSettings {
             max_fps: if max_fps == 0 {
                 DEFAULT_MAX_FPS
             } else {
-                max_fps.clamp(15, 240)
+                max_fps.clamp(15, MAX_FPS)
             },
             fec_floor,
             fec_ceiling: fec_ceiling.max(fec_floor),
@@ -116,6 +123,7 @@ impl StreamSettings {
             } else {
                 scale_percent.clamp(25, 100)
             },
+            scale_rungs,
         }
     }
 
@@ -393,6 +401,7 @@ impl MediaLink {
             Limits {
                 max_bitrate_bps: settings.max_bitrate_bps,
                 max_fps: settings.max_fps,
+                scale_rungs: settings.scale_rungs,
             },
             settings.fec_floor,
             settings.fec_ceiling,
@@ -754,12 +763,18 @@ impl MediaLink {
     fn report(&self, report: SecondReport) -> (Grade, Option<ControlMsg>) {
         if self.fixed {
             let fps = self.target.lock().expect("target lock").rung.fps;
+            let timing_rose = self
+                .adapter
+                .lock()
+                .expect("adapter lock")
+                .timing_rose(report.rtt_ms, report.rtt_floor_ms);
             let g = grade(
                 report.shown,
                 report.within_limit,
                 report.decoded,
                 report.frames_lost,
                 fps,
+                timing_rose,
             );
             return (g, None);
         }
@@ -867,6 +882,7 @@ pub async fn serve_session(
                 audio,
                 fixed,
                 scale_percent,
+                scale_rungs,
             } => {
                 capture = None; // stop any previous stream first
                 link = None;
@@ -882,6 +898,7 @@ pub async fn serve_session(
                             audio,
                             fixed,
                             scale_percent,
+                            scale_rungs,
                         );
                         let viewer_caps = conn
                             .peer_hello
@@ -951,6 +968,8 @@ pub async fn serve_session(
                 shown,
                 within_limit,
                 decoded,
+                rtt_ms,
+                rtt_floor_ms,
             } => {
                 if let Some(l) = &link {
                     let (grade, quality) = l.report(SecondReport {
@@ -960,8 +979,10 @@ pub async fn serve_session(
                         frames_lost,
                         received,
                         lost,
+                        rtt_ms,
+                        rtt_floor_ms,
                     });
-                    tracing::debug!(target: "media", "{} shown {shown} ok {within_limit} decoded {decoded} · {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired.", grade.symbol());
+                    tracing::debug!(target: "media", "{} shown {shown} ok {within_limit} decoded {decoded} · {received} datagrams, {lost} lost, {frames_lost} frames lost, {repaired} repaired, rtt {rtt_ms} ms (floor {rtt_floor_ms}).", grade.symbol());
                     // A window that decodes but never presents (minimised, display off): say so
                     // once, so a log full of ⚪ seconds is not mistaken for a still screen.
                     if decoded >= 5 && shown == 0 {

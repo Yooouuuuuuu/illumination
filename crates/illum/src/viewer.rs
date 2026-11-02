@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
-const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+/// The round trip reported to the host is the smallest over this long (§5.5 rule 6).
+const RTT_RECENT: Duration = Duration::from_secs(3);
 /// Punch cadence before the first video datagram, and the keepalive cadence afterwards.
 const PUNCH_FAST: Duration = Duration::from_millis(200);
 const PUNCH_SLOW: Duration = Duration::from_secs(2);
@@ -35,6 +37,12 @@ const MEDIA_DEADLINE: Duration = Duration::from_secs(5);
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// While waiting for a keyframe, ask again this often if non-keyframes keep arriving.
 const KEYFRAME_REMINDER: Duration = Duration::from_secs(1);
+/// Waiting longer than this for a keyframe is shown in the title (a host that never answers
+/// looked like a frozen picture for 25 s in the runs of 2026-11-02).
+const KEYFRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// No media datagram for this long, with the control channel alive, is a path problem: punch
+/// fast again, ask for a keyframe, and say so (9 s of silence went unnoticed in those runs).
+const SILENCE_AFTER: Duration = Duration::from_secs(3);
 
 /// What the viewer asks for (architecture §5.8; 0 = the host's default).
 #[derive(Debug, Clone)]
@@ -54,6 +62,8 @@ pub struct ViewParams {
     pub fixed: bool,
     /// Resolution as a percentage of the host display (0 = native); with `fixed`.
     pub scale_percent: u32,
+    /// Let the ladder lower the resolution under pressure (`--allow-scale`).
+    pub scale_rungs: bool,
     /// Keep per-second records (`--report`).
     pub record: bool,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
@@ -73,6 +83,7 @@ impl ViewParams {
             hw_decode: true,
             fixed: false,
             scale_percent: 0,
+            scale_rungs: false,
             record: false,
             media_target: None,
         }
@@ -202,16 +213,29 @@ fn media_loop(
     let mut decoder_is_hw = false;
     // Set once a GPU decoder failed on this stream: the CPU decoder is used from then on.
     let mut cpu_fallback = false;
+    // When the last media datagram arrived, and since when a keyframe has been awaited: both
+    // become a notice in the title when they go on too long (§5.6), instead of a silent wait.
+    let mut last_media = Instant::now();
+    let mut awaiting_since: Option<Instant> = None;
+    let mut notice: Option<&'static str> = None;
+    let mut last_silence_request = Instant::now();
 
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
         let now = Instant::now();
+        let silent = got_video && now.duration_since(last_media) >= SILENCE_AFTER;
         if now >= next_punch {
             client.send(MediaStream::Punch, &[]);
-            next_punch = now + if got_video { PUNCH_SLOW } else { PUNCH_FAST };
+            next_punch = now
+                + if got_video && !silent {
+                    PUNCH_SLOW
+                } else {
+                    PUNCH_FAST
+                };
         }
         let events = match inbound.recv_timeout(Duration::from_millis(20)) {
             Ok(msg) if msg.stream == MediaStream::Video => {
                 got_video = true;
+                last_media = Instant::now();
                 received += 1;
                 match expected_seq {
                     Some(exp) if msg.seq > exp => lost += (msg.seq - exp) as u32,
@@ -340,6 +364,33 @@ fn media_loop(
             }
         }
         let now = Instant::now();
+        // Too long without a keyframe, or without any media at all: say so, and keep asking.
+        if awaiting_keyframe {
+            awaiting_since.get_or_insert(now);
+        } else {
+            awaiting_since = None;
+        }
+        let wanted = if got_video && now.duration_since(last_media) >= SILENCE_AFTER {
+            if now.duration_since(last_silence_request) >= SILENCE_AFTER {
+                last_silence_request = now;
+                sender.send_control(&ControlMsg::FrameLost {
+                    seq: expected_seq.unwrap_or(0),
+                });
+            }
+            Some("no video is arriving; re-establishing the media path…")
+        } else if awaiting_since.is_some_and(|s| now.duration_since(s) >= KEYFRAME_TIMEOUT) {
+            Some("waiting for a keyframe from the host…")
+        } else {
+            None
+        };
+        if wanted != notice {
+            notice = wanted;
+            if wanted.is_some() {
+                tracing::warn!(target: "media", "{}", wanted.unwrap_or_default());
+            }
+            shared.lock().expect("view state lock").notice = wanted.map(str::to_string);
+            notify();
+        }
         if !got_video && !blocked_reported && now.duration_since(started) > MEDIA_DEADLINE {
             blocked_reported = true;
             let mut state = shared.lock().expect("view state lock");
@@ -355,7 +406,7 @@ fn media_loop(
         }
         if now >= next_report {
             next_report = now + REPORT_INTERVAL;
-            let (shown, within_limit, decoded) = {
+            let (shown, within_limit, decoded, rtt_recent, rtt_floor) = {
                 let mut state = shared.lock().expect("view state lock");
                 state.stats.packets(received, lost, repaired);
                 let rtt = state.clock.last_rtt;
@@ -363,7 +414,15 @@ fn media_loop(
                     r.packets(received, lost, repaired, frames_lost);
                     r.tick(rtt, now);
                 }
-                state.take_presented()
+                let (shown, within_limit, decoded) = state.take_presented();
+                // The smallest round trip of the last 3 s (a queue that never drains shows;
+                // a burst that delayed one probe does not) and of the last minute (the floor).
+                let recent = state.clock.min_rtt_within(RTT_RECENT);
+                let floor = state.clock.floor_rtt();
+                (shown, within_limit, decoded, recent, floor)
+            };
+            let ms = |d: Option<Duration>| {
+                d.map_or(0, |d| d.as_millis().clamp(1, u128::from(u32::MAX)) as u32)
             };
             sender.send_control(&ControlMsg::MediaReport {
                 received,
@@ -373,6 +432,8 @@ fn media_loop(
                 shown,
                 within_limit,
                 decoded,
+                rtt_ms: ms(rtt_recent),
+                rtt_floor_ms: ms(rtt_floor),
             });
             received = 0;
             lost = 0;
@@ -401,6 +462,7 @@ pub async fn run_viewer_session(
         audio: params.audio,
         fixed: params.fixed,
         scale_percent: params.scale_percent,
+        scale_rungs: params.scale_rungs,
     });
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.

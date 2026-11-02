@@ -11,6 +11,50 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-03
+
+The adaptation tuned from the measurement runs (docs/testing/results-2026-11-02.md),
+and the settings split into "fixed at connect" and "limits for the adaptation"
+(architecture §5.8).
+
+### Added
+
+- **Fast drop for congestion**: a second with loss ≥ 2 % and a round trip at least
+  1.5× (and 10 ms above) its floor drops one rung at once, at most one per second
+  while it lasts. At a rung above the link this signature showed inside the first
+  second; the 10 s window took thirty seconds for three rungs.
+- The viewer's `MediaReport` carries two round trips (protocol 10): the smallest
+  of the last 3 s of clock probes, so a queue that never drains shows while our
+  own bursts and keyframes do not, and the smallest of the last minute as the
+  floor, which the probes before the stream started already set. Probes now go
+  four times a second.
+- **Notices in the title**: "waiting for a keyframe" 2 s after asking for one, and
+  "re-establishing the media path" when no media datagram has arrived for 3 s
+  while the control channel is alive (the viewer then punches fast again and asks
+  for a keyframe). Both went unnoticed for 9–25 s in the runs.
+- `view --allow-scale`: the ladder's resolution rungs, off by default.
+
+### Changed
+
+- **Lost frames count as 🔴 only when the path's timing rose** too. With a flat
+  round trip they are random loss, parity's business, and the second is ⚪;
+  loss-only 🔴 seconds had walked the ladder down for nothing.
+- **Raises are gated on loss over the last 30 s**, the same window as the FEC
+  controller, instead of 10 s; a backstop drop was being undone 15 s later.
+- **Keyframes at most two per second** (was four): four a second fed the collapse
+  above the link; one a second, tried first, left the harness's bursty link
+  showing under half its frames.
+- **Default frame-rate cap 30, settable up to 120**; the frame-rate rungs are
+  those below the cap (60/45/30/20/15).
+- **Resolution rungs only when allowed**: the host scales on the CPU, which
+  measured as 10–15 ms of latency and a 45–53 fps cap.
+- Parity's range is no longer a user setting; the controller keeps it between
+  5 and 30 %.
+- Harness: the round trip is modelled (base delay plus the path's queue); new
+  scenarios "congestion at the top, 12 Mb/s" (under the link within 8 s, holds)
+  and "15 s at 75 % loss with flat timing" (ladder untouched, picture back within
+  5 s); random loss must never move the ladder at all.
+
 ## [0.9.8] - 2026-11-02
 
 ### Added

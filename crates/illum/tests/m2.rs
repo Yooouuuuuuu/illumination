@@ -234,7 +234,7 @@ async fn test_pattern_arrives_bit_exact_over_udp() {
         .expect("the host announced its rung");
     assert_eq!(
         (quality.rung, quality.bitrate_kbps, quality.fps),
-        (0, 20_000, 60)
+        (0, 20_000, 30)
     );
     assert_eq!(quality.fec_percent, 5);
 

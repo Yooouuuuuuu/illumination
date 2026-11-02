@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
@@ -122,6 +122,9 @@ pub enum ControlMsg {
         /// Resolution as a percentage of the display's (0 = native); with `fixed`.
         #[serde(default)]
         scale_percent: u32,
+        /// Whether the ladder may lower the resolution under pressure (off by default).
+        #[serde(default)]
+        scale_rungs: bool,
     },
     /// Host → controller, once a second: what the host side did with the screen, so a
     /// measurement report can tell "the screen did not change" from "the link did not carry
@@ -171,6 +174,12 @@ pub enum ControlMsg {
         within_limit: u32,
         /// Frames decoded (a hidden window decodes everything and presents nothing).
         decoded: u32,
+        /// Round trip of the clock probes, ms (0 = unknown): the smallest of the last 3 s, and
+        /// the smallest of the last minute. Their difference tells congestion from random loss.
+        #[serde(default)]
+        rtt_ms: u32,
+        #[serde(default)]
+        rtt_floor_ms: u32,
     },
     /// Controller → host: stop streaming.
     ScreenStop,
@@ -250,6 +259,7 @@ mod tests {
                 audio: true,
                 fixed: true,
                 scale_percent: 75,
+                scale_rungs: false,
             },
             ControlMsg::HostStats {
                 taken: 61,
@@ -279,6 +289,8 @@ mod tests {
                 shown: 58,
                 within_limit: 55,
                 decoded: 60,
+                rtt_ms: 12,
+                rtt_floor_ms: 11,
             },
             ControlMsg::ScreenStop,
             ControlMsg::ScreenError {

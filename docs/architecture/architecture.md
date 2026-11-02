@@ -358,8 +358,8 @@ so it never changes anything.
   don't count), and loss is not above the FEC threshold.
 - After any action the count starts fresh.
 - One rung per action, never several at once: a one-second Wi-Fi accident must not cost a drop
-  that then takes a full raise window to undo. There is **no emergency path** in v1; the harness
-  (§5.7) decides whether one is needed.
+  that then takes a full raise window to undo. (The plan had no emergency path; the measurement
+  runs added one for congestion only, rule 7 below.)
 
 **The ladder.** A rung is a triple (resolution, frame rate, bitrate cap). Rungs are generated in
 the order **bitrate → frame rate → resolution**, because bitrate and frame rate are free to change
@@ -371,10 +371,11 @@ rate).
 2. Then frame rate: 60 → 45 → 30 → 20 → **15**.
 3. Then resolution drops one level, and the bitrate and frame-rate rungs repeat there.
 
-**Top rung:** native resolution, 60 fps, and a bitrate cap from a table like Moonlight's
-(1080p60 = 20 Mb/s, 1440p60 = 40, 720p60 = 10; half at 30 fps). The cap is a ceiling for the
-encoder's rate control; a still desktop uses far less.
-**Bottom rung:** 15 fps, half the native resolution, about 1 Mb/s.
+**Top rung:** native resolution, the user's frame-rate cap (default 30 since v0.10.0), and a
+bitrate cap (default 20 Mb/s). The cap is a ceiling for the encoder's rate control; a still
+desktop uses far less.
+**Bottom rung:** 15 fps, about 1 Mb/s; half the native resolution only if the user allows
+resolution rungs.
 
 **If L is below what the link can do** (half the round trip plus encode and decode is already
 higher), the controller uses that floor plus a margin and the app shows "best possible on this
@@ -428,6 +429,38 @@ Two more came from the first long live run (2026-10-30, viewer window hidden for
 5. **"Frozen by loss" counts frames *decoded*, not shown.** A minimised window (or one whose
    display is off) decodes every frame and presents none: that is ⚪, no evidence about the
    link, whatever was lost meanwhile. The viewer reports `decoded` next to `shown`.
+
+Four more came from the measurement runs of 2026-11-02 (`docs/testing/results-2026-11-02.md`),
+built in v0.10.0:
+6. **Congestion is loss *with a rising round trip*; random loss is loss with a flat one.** The
+   viewer probes four times a second and reports two numbers: the smallest round trip of the
+   last 3 s (a queue that never drains shows in it; our own bursts and keyframes, which delay
+   single probes by tens of ms, do not) and the smallest of the last minute, the floor, which
+   the probes before the stream started already set, so a session that starts above the link
+   still knows the path's clean round trip. "Risen" means at least 1.5× the floor and 10 ms
+   above it. A rung above the link showed loss of 2–12 % with the round trip going
+   12 → 35 ms inside the first second; Wi-Fi loss at a rung that fitted never moved it.
+   Rule 1 therefore needs the rise: lost frames with flat timing are ⚪ (parity's business),
+   not 🔴. Loss-only 🔴 seconds had walked the ladder down for nothing. (The harness caught
+   both refinements: with the last probe instead of the 3 s minimum, keyframe bursts on a
+   fast link read as congestion; without the pre-stream floor, a session starting above the
+   link never saw a rise.)
+7. **The fast drop.** A second with loss ≥ 2 % and a risen round trip drops one rung at once,
+   at most one per second while it lasts, before the window rules. This is the emergency path
+   the plan left out; the data made it unambiguous. Starting high stays the default because of
+   it: three rungs took thirty seconds through the 10 s window, three seconds through this.
+8. **Raises are gated on loss over the last 30 s**, the FEC controller's window, not 10 s; a
+   backstop drop was being undone by a raise 15 s later.
+9. **Keyframes at most two per second** however many frames die (was four); four a second fed
+   the collapse above the link, and one a second, tried first, left the harness's bursty link
+   showing under half its frames. With that, the viewer says what it is waiting for: a
+   keyframe unanswered for 2 s, or no media at all for 3 s with the control channel alive (then
+   it punches fast again and asks for a keyframe), both as a notice in the title.
+
+The ladder's **resolution rungs are off unless the user allows them** (§5.8): the host scales on
+the CPU, which measured as 10–15 ms of latency and a frame-rate cap of 45–53. The frame-rate
+rungs are those below the user's cap, which defaults to 30 (60/45/30/20/15 are all available
+under a 120 cap).
 
 Two facts about the pacer came out of the same runs and apply to the host: the encoder's share
 is `rung × 100 / (100 + parity %) × 90 %` (parity truly budget-neutral, 10 % left for headers
@@ -549,26 +582,45 @@ Numbers at v0.6.0 are in the roadmap's M5 status; the model's biggest simplifica
 it has no jitter and no encoder-size variance, so real links will be a little noisier.
 
 ### 5.8 User settings
-Two main numbers, and a few under "advanced":
+Decided 2026-11-03 from the measurement runs (`docs/testing/results-2026-11-02.md`). Two
+kinds: choices **fixed at connect**, which never move during a session (changing one restarts
+the stream, a short blackout, not a new connection), and **limits for the adaptation**, inside
+which the controllers move bitrate, frame rate and parity on their own. Everything else in
+§5.5–5.6 is internal and not shown.
+
+Fixed at connect:
+
+| Setting | Default | Choices |
+|---|---|---|
+| Codec | auto: AV1 if both sides do it in hardware, else H.265 | AV1 / H.265 / lossless as overrides |
+| Hardware decode (viewer) | on | off = CPU decoders only, which also removes AV1 from the offer |
+| GPU for decode and display (viewer) | auto: the discrete GPU if there is one | auto + each GPU the machine lists (one entry on a Mac) |
+| Encoder (host) | auto: the first that opens of NVENC, AMF, QSV, VideoToolbox, then CPU | auto + each GPU's encoder + CPU |
+| Display, send audio, keyboard mode | as today | |
+
+Limits for the adaptation:
 
 | Setting | Default | Notes |
 |---|---|---|
-| **Latency limit** | 50 ms | the controller's target |
-| **Max bandwidth** | from the table | the top of the ladder; lower it on a metered or slow link |
-| FEC range (advanced) | 5–30% | floor and ceiling |
-| Max frame rate (advanced) | 60 | some people want 30 to save bandwidth |
-| Send audio | on | off means nothing is captured or sent |
-| Hardware decode (viewer) | on | off = CPU decoders only, so never AV1 (decided 2026-10-30) |
+| **Latency limit** L | 50 ms | capture on the host → handed to the viewer's swap chain, decode included (not the display's scan-out, not the input path) |
+| **Max bandwidth** | 20 Mb/s | the top of the ladder; on a Wi-Fi link the fast drop finds the ceiling within seconds |
+| Max frame rate | 30, up to 120 | 30 costs 3–5 ms of latency against 60 and half the bits; the frame-rate rungs are those below the cap |
+| Lower resolution under pressure | off | the host scales on the CPU today (10–15 ms, 45–53 fps cap); on once it scales on the GPU |
+
+Not exposed: the parity range (the controller keeps it between 5 and 30 %; the runs showed 30 %
+costing 23 % of the picture bits for nothing on a clean link), the grading thresholds, the
+windows, the back-off, the keyframe policy.
 
 Plus one message the app shows rather than asks: "best possible on this link: X ms" when L is out
 of reach.
 
-**Implemented in v0.6.0** as viewer flags, sent to the host in `ScreenStart` (0 = host default,
-and the host clamps: bitrate to its own ceiling, parity to 0–50 %, frame rate to 15–240):
-`--latency-limit 50`, `--max-bitrate 20`, `--max-fps 60`, `--fec-min 5 --fec-max 30`,
-`--mute` (v0.7.0), `--software-decode` (v0.7.2; the host side has `--no-audio`),
-`--software-render` (v0.8.0, a debugging switch rather than a setting: draw on the CPU). The
-"best possible on this link" message is still to do.
+**Implemented** as viewer flags, sent to the host in `ScreenStart` (0 = host default, and the
+host clamps: bitrate to its own ceiling, frame rate to 15–120): `--latency-limit 50`,
+`--max-bitrate 20`, `--max-fps 30`, `--allow-scale` (v0.10.0), `--mute` (v0.7.0),
+`--software-decode` (v0.7.2; the host side has `--no-audio`), `--software-render` (v0.8.0, a
+debugging switch rather than a setting: draw on the CPU). `--fec-min/--fec-max` remain for
+measurement runs only. The GPU and encoder choices are the UI milestone's; the "best possible
+on this link" message is still to do.
 
 ## 6. Input
 

@@ -16,9 +16,77 @@ fn settings(max_bitrate_bps: u64) -> Settings {
         limits: Limits {
             max_bitrate_bps,
             max_fps: 60,
+            scale_rungs: false,
         },
         ..Settings::default()
     }
+}
+
+#[test]
+fn congestion_at_the_top_drops_within_seconds() {
+    // The run of 2026-11-02 at 1440p: a 20 Mb/s ladder top on a Wi-Fi path that carries 12.
+    // Loss with a rising round trip inside the first seconds; the fast drop must get under
+    // the link in a few seconds, not after three 10 s windows, and then hold.
+    let s = Scenario::new(
+        "congestion at the top, 12 Mb/s",
+        240,
+        Link {
+            base_delay_ms: 6.0,
+            ..Link::clean(12_000_000)
+        },
+    );
+    let o = run(&s, &settings(20_000_000), 7);
+    show(&o);
+    let first_fit = o
+        .seconds
+        .iter()
+        .position(|s| s.rung.bitrate_bps <= 12_000_000)
+        .expect("gets under the link");
+    assert!(first_fit <= 8, "took {first_fit} s to get under the link");
+    assert!(
+        o.seconds[..first_fit + 1]
+            .iter()
+            .any(|s| s.decision.reason.starts_with("congestion")),
+        "the fast drop did it"
+    );
+    let settled = &o.seconds[o.seconds.len() - 60..];
+    assert!(
+        settled.iter().all(|s| s.rung.bitrate_bps <= 12_000_000),
+        "stays under the link"
+    );
+    assert!(o.scores.flaps <= 2, "flaps: {}", o.scores.flaps);
+    assert!(
+        o.scores.utilisation > 0.5,
+        "utilisation {}",
+        o.scores.utilisation
+    );
+}
+
+#[test]
+fn a_loss_storm_with_flat_timing_leaves_the_ladder_alone() {
+    // Fifteen seconds at 75 % loss on a fast path (what a path flip looked like on
+    // 2026-11-02): nothing gets through, but nothing is queueing either. Parity rises, the
+    // ladder holds, and the picture is back within seconds of the storm ending.
+    let s = Scenario::new("15 s at 75 % loss", 180, Link::clean(100_000_000))
+        .then(
+            60,
+            Link {
+                loss: 0.75,
+                ..Link::clean(100_000_000)
+            },
+        )
+        .then(75, Link::clean(100_000_000));
+    let o = run(&s, &settings(20_000_000), 8);
+    show(&o);
+    assert!(
+        o.seconds.iter().all(|s| s.rung_index == 0),
+        "loss without a queue never walks the ladder down"
+    );
+    let back = o.seconds[75..]
+        .iter()
+        .position(|s| s.grade == Grade::Green)
+        .expect("green again after the storm");
+    assert!(back <= 5, "took {back} s to show again after the storm");
 }
 
 #[test]
@@ -53,10 +121,17 @@ fn wifi_at_10_mbps_settles_below_the_link() {
     );
     let o = run(&s, &settings(20_000_000), 2);
     show(&o);
+    // Settled: under the link, apart from the occasional probe of the rung just above it (the
+    // raise rule tries it again after a green run that doubles with every failure, 15 → 30 →
+    // 60 → 120 s; each probe costs about ten 🔴 seconds before the 10 s window undoes it).
     let settled = &o.seconds[o.seconds.len() - 60..];
+    let under = settled
+        .iter()
+        .filter(|s| s.rung.bitrate_bps < 10_000_000)
+        .count();
     assert!(
-        settled.iter().all(|s| s.rung.bitrate_bps < 10_000_000),
-        "ends below the link's capacity"
+        under >= 48,
+        "ends below the link's capacity for most of the time: {under}/60 s"
     );
     assert!(o.scores.flaps <= 2, "flaps: {}", o.scores.flaps);
     let first_fit = o
@@ -65,7 +140,10 @@ fn wifi_at_10_mbps_settles_below_the_link() {
         .position(|s| s.rung.bitrate_bps < 10_000_000)
         .expect("drops below 10 Mb/s");
     eprintln!("first rung under the link after {first_fit} s");
-    assert!(first_fit <= 90, "took {first_fit} s to get under the link");
+    assert!(
+        first_fit <= 15,
+        "took {first_fit} s to get under the link (the fast drop should need a few)"
+    );
     assert!(
         o.scores.utilisation > 0.5,
         "utilisation {}",
@@ -129,7 +207,7 @@ fn random_loss_raises_parity_not_the_ladder() {
         "frames lost early {early}, late {late}"
     );
     assert!(
-        o.seconds.iter().all(|s| s.rung_index <= 1),
+        o.seconds.iter().all(|s| s.rung_index == 0),
         "loss alone does not walk the ladder down while latency is fine"
     );
 }

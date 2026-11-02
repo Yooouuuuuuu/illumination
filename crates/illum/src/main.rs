@@ -109,9 +109,13 @@ enum Command {
         /// Cap on the host's media rate in Mb/s (the top of the ladder; default 20).
         #[arg(long, default_value_t = 20.0)]
         max_bitrate: f64,
-        /// Highest frame rate to ask for (the top of the ladder; default 60).
-        #[arg(long, default_value_t = 60)]
+        /// Highest frame rate to ask for (the top of the ladder; default 30, up to 120).
+        #[arg(long, default_value_t = 30)]
         max_fps: u32,
+        /// Let the host lower the resolution under pressure (off: it lowers bitrate and frame
+        /// rate only; scaling costs latency while the host scales on the CPU).
+        #[arg(long)]
+        allow_scale: bool,
         /// Frames arriving later than this after capture count as late (default 50 ms).
         #[arg(long, default_value_t = 50)]
         latency_limit: u32,
@@ -300,6 +304,7 @@ fn main() -> std::process::ExitCode {
             view_only,
             max_bitrate,
             max_fps,
+            allow_scale,
             latency_limit,
             fec_min,
             fec_max,
@@ -332,6 +337,7 @@ fn main() -> std::process::ExitCode {
                     hw_decode: !*software_decode,
                     fixed: *fixed,
                     scale_percent: *scale,
+                    scale_rungs: *allow_scale,
                     record: report.is_some(),
                     ..ViewParams::new(*screen)
                 },

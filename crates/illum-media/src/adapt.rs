@@ -36,10 +36,27 @@ pub fn encoder_bitrate(rung_bps: u64, fec_percent: u32) -> u64 {
 const BITRATE_STEP: (u64, u64) = (8, 10);
 /// Bitrate rungs before frame-rate rungs begin (top included): 1, .8, .64, .51, .41.
 const BITRATE_RUNGS: usize = 5;
-/// Frame-rate rungs, below the user's maximum.
-const FPS_RUNGS: [u32; 4] = [45, 30, 20, 15];
-/// Resolution rungs, as a percentage of the native size.
+/// Frame-rate rungs, those below the user's maximum.
+const FPS_RUNGS: [u32; 5] = [60, 45, 30, 20, 15];
+/// Resolution rungs, as a percentage of the native size (only when the user allows them: the
+/// host scales on the CPU today, which the measurement runs of 2026-11-02 showed costing
+/// 10–15 ms of latency and capping the frame rate at 45–53).
 const SCALE_RUNGS: [u32; 2] = [75, 50];
+
+/// A second with at least this much loss **and** a risen round trip is congestion: a queue is
+/// building on the path and the rate must come down now, not after the 10 s window. The runs
+/// of 2026-11-02 showed this signature inside the first second at a rung above the link (loss
+/// 2–12 %, rtt 12 → 35 ms), and random Wi-Fi loss never moving the rtt.
+pub const FAST_DROP_LOSS_PPM: u64 = 20_000;
+/// A round trip at least this many times its recent minimum, and at least [`RTT_RISE_MIN_MS`]
+/// above it, counts as risen.
+pub const RTT_RISE_FACTOR: f64 = 1.5;
+pub const RTT_RISE_MIN_MS: u32 = 10;
+/// The round trip's minimum is taken over this many seconds.
+pub const RTT_FLOOR_SECONDS: usize = 60;
+/// Loss at or above the 🔴 zone within this many seconds blocks raises: the same window the FEC
+/// controller judges by, so a backstop drop is not undone 15 s later.
+pub const RAISE_LOSS_SECONDS: usize = 30;
 
 /// The grade of one second (§5.5): the share of shown frames that arrived within the latency
 /// limit. ⚪ when too few frames were shown to judge (a still screen).
@@ -68,19 +85,22 @@ pub fn min_frames_to_grade(target_fps: u32) -> u32 {
 }
 
 /// Grades a second from the viewer's counts. Too few frames shown is ⚪ (a still screen) —
-/// unless at least half that many frames were *lost*: then the picture froze because of loss,
-/// which is the worst latency there is, and the second is 🔴 (decided from the harness,
-/// 2026-10-30: without this an oversubscribed path kept the latency controller blind).
+/// unless frames were *lost* while the path's timing rose (`timing_rose`): then the picture
+/// froze because the path is overloaded, which is the worst latency there is, and the second
+/// is 🔴. Lost frames with flat timing are random loss: parity's business, not the ladder's,
+/// and the second stays ⚪ (harness 2026-10-30 for the freeze; live runs 2026-11-02 for the
+/// timing condition, where loss-only 🔴 seconds walked the ladder down for nothing).
 pub fn grade(
     shown: u32,
     within_limit: u32,
     decoded: u32,
     frames_lost: u32,
     target_fps: u32,
+    timing_rose: bool,
 ) -> Grade {
     let n = min_frames_to_grade(target_fps);
-    if decoded < n && frames_lost >= FREEZE_LOST_FRAMES {
-        return Grade::Red; // frames die before they can be decoded: frozen by loss
+    if decoded < n && frames_lost >= FREEZE_LOST_FRAMES && timing_rose {
+        return Grade::Red; // frames die before they can be decoded: frozen by overload
     }
     if shown < n {
         // Nothing to judge latency by: a still screen, or a window that decodes but cannot
@@ -123,10 +143,12 @@ impl fmt::Display for Rung {
 pub struct Limits {
     pub max_bitrate_bps: u64,
     pub max_fps: u32,
+    /// Whether the ladder may lower the resolution below the frame-rate rungs (off by default).
+    pub scale_rungs: bool,
 }
 
-/// The quality ladder (§5.5): bitrate steps of ×0.8 first, then frame rate, then resolution;
-/// bottom 15 fps, half native, about 1 Mb/s.
+/// The quality ladder (§5.5): bitrate steps of ×0.8 first, then frame rate, then (if allowed)
+/// resolution; bottom 15 fps, about 1 Mb/s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ladder {
     rungs: Vec<Rung>,
@@ -154,14 +176,16 @@ impl Ladder {
                 scale_percent: 100,
             });
         }
-        let lowest = rungs[rungs.len() - 1];
-        for scale in SCALE_RUNGS {
-            rungs.push(Rung {
-                bitrate_bps: (lowest.bitrate_bps * u64::from(scale * scale) / 10_000)
-                    .max(MIN_BITRATE_BPS),
-                fps: lowest.fps,
-                scale_percent: scale,
-            });
+        if limits.scale_rungs {
+            let lowest = rungs[rungs.len() - 1];
+            for scale in SCALE_RUNGS {
+                rungs.push(Rung {
+                    bitrate_bps: (lowest.bitrate_bps * u64::from(scale * scale) / 10_000)
+                        .max(MIN_BITRATE_BPS),
+                    fps: lowest.fps,
+                    scale_percent: scale,
+                });
+            }
         }
         rungs.dedup();
         Ladder { rungs }
@@ -434,6 +458,14 @@ pub struct SecondReport {
     pub frames_lost: u32,
     pub received: u32,
     pub lost: u32,
+    /// Round trip of the viewer's clock probes over the last few seconds, ms (0 = unknown):
+    /// the *smallest* of them, so a queue that never drains shows and our own bursts do not.
+    /// Its rise above `rtt_floor_ms` is how congestion is told from random loss.
+    pub rtt_ms: u32,
+    /// The smallest round trip of the last minute, ms (0 = unknown): the path without a queue.
+    /// The probes before the stream started set it, so a session that starts above the link
+    /// still knows what the path looks like when it is not overloaded.
+    pub rtt_floor_ms: u32,
 }
 
 /// What changed after a second was fed.
@@ -445,12 +477,15 @@ pub struct Decision {
     pub reason: String,
 }
 
-/// Both controllers, with the recent-loss gate between them.
+/// Both controllers, with the recent-loss gate between them, the round-trip floor that tells
+/// congestion from random loss, and the fast drop for congestion.
 #[derive(Debug, Clone)]
 pub struct Adapter {
     latency: LatencyController,
     fec: FecController,
     recent_loss: std::collections::VecDeque<(u32, u32)>,
+    /// Round trips of the last [`RTT_FLOOR_SECONDS`] seconds (unknown ones left out).
+    rtts: std::collections::VecDeque<u32>,
 }
 
 impl Adapter {
@@ -459,6 +494,30 @@ impl Adapter {
             latency: LatencyController::new(Ladder::new(limits)),
             fec: FecController::new(fec_floor, fec_ceiling),
             recent_loss: std::collections::VecDeque::new(),
+            rtts: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// The smallest round trip seen recently: the path without a queue (the host's own view,
+    /// used when the viewer reports no floor).
+    pub fn rtt_floor_ms(&self) -> Option<u32> {
+        self.rtts.iter().copied().min()
+    }
+
+    /// Whether `rtt_ms` is well above the floor (`floor_ms` from the viewer, else the host's
+    /// own): a queue is building on the path.
+    pub fn timing_rose(&self, rtt_ms: u32, floor_ms: u32) -> bool {
+        let floor = if floor_ms > 0 {
+            Some(floor_ms)
+        } else {
+            self.rtt_floor_ms()
+        };
+        match floor {
+            Some(floor) if rtt_ms > 0 => {
+                rtt_ms >= floor + RTT_RISE_MIN_MS
+                    && f64::from(rtt_ms) >= f64::from(floor) * RTT_RISE_FACTOR
+            }
+            _ => false,
         }
     }
 
@@ -478,7 +537,7 @@ impl Adapter {
         self.fec.percent()
     }
 
-    /// Loss before repair over the last drop window, parts per million.
+    /// Loss before repair over the last [`RAISE_LOSS_SECONDS`], parts per million.
     pub fn recent_loss_ppm(&self) -> u64 {
         let (r, l) = self
             .recent_loss
@@ -491,8 +550,22 @@ impl Adapter {
 
     /// Feeds one second.
     pub fn observe(&mut self, report: SecondReport) -> Decision {
+        // The round trip's floor is taken from the seconds before this one, so a sudden rise
+        // is seen against the path as it was.
+        let timing_rose = self.timing_rose(report.rtt_ms, report.rtt_floor_ms);
+        if report.rtt_ms > 0 {
+            self.rtts.push_back(report.rtt_ms);
+            if self.rtts.len() > RTT_FLOOR_SECONDS {
+                self.rtts.pop_front();
+            }
+        }
+        let floor_ms = if report.rtt_floor_ms > 0 {
+            report.rtt_floor_ms
+        } else {
+            self.rtt_floor_ms().unwrap_or(0)
+        };
         self.recent_loss.push_back((report.received, report.lost));
-        if self.recent_loss.len() > DROP_WINDOW {
+        if self.recent_loss.len() > RAISE_LOSS_SECONDS {
             self.recent_loss.pop_front();
         }
         let loss_blocks_raise = self.recent_loss_ppm() >= LOSS_RED_PPM;
@@ -504,8 +577,21 @@ impl Adapter {
             report.decoded,
             report.frames_lost,
             self.latency.rung().fps,
+            timing_rose,
         );
         decision.grade = Some(grade);
+        // Congestion this second: loss with a queue building. One rung down at once, at most
+        // one per second while it lasts; the window rules take over again below.
+        let loss_now = loss_ppm(u64::from(report.received), u64::from(report.lost));
+        if loss_now >= FAST_DROP_LOSS_PPM && timing_rose && self.latency.step(Move::Down).is_some()
+        {
+            decision.rung = Some(self.latency.rung());
+            decision.reason = format!(
+                "congestion: loss {:.1} % with rtt {} ms (floor {floor_ms} ms)",
+                loss_now as f64 / 10_000.0,
+                report.rtt_ms,
+            );
+        }
         if let Some(m) = self.latency.observe(grade, loss_blocks_raise) {
             decision.rung = Some(self.latency.rung());
             decision.reason = match m {
@@ -558,44 +644,161 @@ mod tests {
         Limits {
             max_bitrate_bps: 20_000_000,
             max_fps: 60,
+            scale_rungs: true,
         }
     }
 
     #[test]
     fn grades_follow_the_thresholds() {
-        assert_eq!(grade(60, 60, 60, 0, 60), Grade::Green);
-        assert_eq!(grade(60, 54, 60, 0, 60), Grade::Green); // exactly 90 %
-        assert_eq!(grade(60, 53, 60, 0, 60), Grade::Yellow);
-        assert_eq!(grade(60, 30, 60, 0, 60), Grade::Yellow); // exactly 50 %
-        assert_eq!(grade(60, 29, 60, 0, 60), Grade::Red);
+        assert_eq!(grade(60, 60, 60, 0, 60, false), Grade::Green);
+        assert_eq!(grade(60, 54, 60, 0, 60, false), Grade::Green); // exactly 90 %
+        assert_eq!(grade(60, 53, 60, 0, 60, false), Grade::Yellow);
+        assert_eq!(grade(60, 30, 60, 0, 60, false), Grade::Yellow); // exactly 50 %
+        assert_eq!(grade(60, 29, 60, 0, 60, false), Grade::Red);
         assert_eq!(
-            grade(14, 0, 14, 0, 60),
+            grade(14, 0, 14, 0, 60, false),
             Grade::Blank,
             "fewer than 15 frames at 60 fps"
         );
-        assert_eq!(grade(15, 0, 15, 0, 60), Grade::Red);
-        assert_eq!(grade(4, 4, 4, 0, 15), Grade::Blank, "never fewer than 5");
+        assert_eq!(grade(15, 0, 15, 0, 60, false), Grade::Red);
+        assert_eq!(
+            grade(4, 4, 4, 0, 15, false),
+            Grade::Blank,
+            "never fewer than 5"
+        );
     }
 
     #[test]
-    fn a_freeze_caused_by_loss_is_red_not_blank() {
+    fn a_freeze_caused_by_overload_is_red_and_by_random_loss_blank() {
         // Still screen with one lost frame: blank.
-        assert_eq!(grade(0, 0, 0, 0, 60), Grade::Blank);
-        assert_eq!(grade(3, 3, 3, 1, 60), Grade::Blank);
-        // Keyframe attempts keep dying while nothing can be decoded: frozen by loss.
-        assert_eq!(grade(0, 0, 0, 2, 60), Grade::Red);
-        assert_eq!(grade(10, 10, 10, 40, 60), Grade::Red);
+        assert_eq!(grade(0, 0, 0, 0, 60, true), Grade::Blank);
+        assert_eq!(grade(3, 3, 3, 1, 60, true), Grade::Blank);
+        // Keyframe attempts keep dying while nothing can be decoded and the path's timing
+        // rose: frozen by overload.
+        assert_eq!(grade(0, 0, 0, 2, 60, true), Grade::Red);
+        assert_eq!(grade(10, 10, 10, 40, 60, true), Grade::Red);
+        // The same losses with flat timing are random loss: parity's business, no vote.
+        assert_eq!(grade(0, 0, 0, 2, 60, false), Grade::Blank);
+        assert_eq!(grade(10, 10, 10, 40, 60, false), Grade::Blank);
         // Enough decoded and shown: graded on latency as usual, whatever was lost.
-        assert_eq!(grade(15, 15, 15, 40, 60), Grade::Green);
+        assert_eq!(grade(15, 15, 15, 40, 60, true), Grade::Green);
     }
 
     #[test]
     fn a_hidden_window_is_blank_even_when_the_wifi_hiccups() {
         // Everything decodes, nothing is presented (minimised window, display off): no evidence
         // about latency, and a lost frame or twenty is not a freeze.
-        assert_eq!(grade(0, 0, 60, 0, 60), Grade::Blank);
-        assert_eq!(grade(0, 0, 58, 2, 60), Grade::Blank);
-        assert_eq!(grade(0, 0, 40, 20, 60), Grade::Blank);
+        assert_eq!(grade(0, 0, 60, 0, 60, true), Grade::Blank);
+        assert_eq!(grade(0, 0, 58, 2, 60, true), Grade::Blank);
+        assert_eq!(grade(0, 0, 40, 20, 60, true), Grade::Blank);
+    }
+
+    #[test]
+    fn rtt_floor_tells_congestion_from_random_loss() {
+        let mut a = Adapter::new(top(), 5, 30);
+        let second = |rtt_ms, lost| SecondReport {
+            shown: 60,
+            within_limit: 60,
+            decoded: 60,
+            frames_lost: 0,
+            received: 1000 - lost,
+            lost,
+            rtt_ms,
+            rtt_floor_ms: 0,
+        };
+        // Ten quiet seconds set the floor at 12 ms (no floor reported: the host's own view).
+        for _ in 0..10 {
+            assert_eq!(a.observe(second(12, 0)).rung, None);
+        }
+        assert_eq!(a.rtt_floor_ms(), Some(12));
+        assert!(!a.timing_rose(12, 0));
+        assert!(!a.timing_rose(17, 0), "rose by less than 10 ms");
+        assert!(a.timing_rose(35, 0));
+        // A floor the viewer reports wins over the host's view.
+        assert!(
+            !a.timing_rose(35, 30),
+            "35 against a reported floor of 30 is not a rise"
+        );
+        assert!(a.timing_rose(35, 12));
+        // 3 % loss with the rtt flat: random loss, the ladder holds.
+        for _ in 0..5 {
+            assert_eq!(a.observe(second(13, 30)).rung, None);
+        }
+        assert_eq!(a.rung_index(), 0);
+        // 3 % loss with the rtt tripled: congestion, one rung down at once, and again next second.
+        let d = a.observe(second(36, 30));
+        assert_eq!(a.rung_index(), 1);
+        assert!(d.reason.starts_with("congestion"), "{}", d.reason);
+        a.observe(second(40, 30));
+        assert_eq!(a.rung_index(), 2);
+        // Clean again: no further drop, and no raise until the loss window is clean.
+        for _ in 0..20 {
+            assert_eq!(a.observe(second(12, 0)).rung, None);
+        }
+        assert_eq!(a.rung_index(), 2);
+    }
+
+    #[test]
+    fn raise_waits_for_thirty_clean_seconds() {
+        let mut a = Adapter::new(top(), 5, 30);
+        a.latency.step(Move::Down);
+        let lossy = SecondReport {
+            shown: 60,
+            within_limit: 60,
+            decoded: 60,
+            received: 980,
+            lost: 20,
+            rtt_ms: 12,
+            rtt_floor_ms: 12,
+            ..Default::default()
+        };
+        let clean = SecondReport {
+            received: 1000,
+            lost: 0,
+            ..lossy
+        };
+        // Ten seconds at 2 % loss, then clean and green. Over the 30 s window the loss stays
+        // at or above 0.5 % for more than twenty clean seconds (200 lost of ≤ 30 000, and the
+        // lossy seconds only start leaving the window after twenty), so no raise yet, although
+        // fifteen greens are in after fifteen.
+        for _ in 0..10 {
+            a.observe(lossy);
+        }
+        for _ in 0..20 {
+            assert_eq!(a.observe(clean).rung, None);
+        }
+        // As the lossy seconds leave the window the raise follows.
+        let mut raised = false;
+        for _ in 0..15 {
+            if a.observe(clean).rung.is_some() {
+                raised = true;
+                break;
+            }
+        }
+        assert!(raised);
+        assert_eq!(a.rung_index(), 0);
+    }
+
+    #[test]
+    fn fps_rungs_follow_the_cap_and_scale_rungs_are_optional() {
+        let l = Ladder::new(Limits {
+            max_bitrate_bps: 20_000_000,
+            max_fps: 120,
+            scale_rungs: false,
+        });
+        let fps: Vec<u32> = l.rungs().iter().map(|r| r.fps).collect();
+        assert_eq!(&fps[..5], &[120; 5]);
+        assert_eq!(&fps[5..], &[60, 45, 30, 20, 15]);
+        assert!(l.rungs().iter().all(|r| r.scale_percent == 100));
+        let l = Ladder::new(Limits {
+            max_bitrate_bps: 20_000_000,
+            max_fps: 30,
+            scale_rungs: false,
+        });
+        let fps: Vec<u32> = l.rungs().iter().map(|r| r.fps).collect();
+        assert_eq!(&fps[5..], &[20, 15]);
+        let bottom = l.rung(l.len());
+        assert_eq!((bottom.fps, bottom.scale_percent), (15, 100));
     }
 
     #[test]
@@ -651,6 +854,7 @@ mod tests {
         let l = Ladder::new(Limits {
             max_bitrate_bps: 2_000_000,
             max_fps: 30,
+            scale_rungs: true,
         });
         assert_eq!(l.rung(0).bitrate_bps, 2_000_000);
         assert!(
@@ -846,6 +1050,8 @@ mod tests {
                 frames_lost: 1,
                 received: 980,
                 lost: 20,
+                rtt_ms: 12,
+                rtt_floor_ms: 12,
             });
             if let Some(r) = d.rung {
                 rung_changes.push(r);
@@ -870,7 +1076,7 @@ mod tests {
     fn adapter_blocks_raise_while_losing() {
         let mut a = Adapter::new(top(), 5, 30);
         a.latency.step(Move::Down);
-        // All green but 1 % loss in the last 10 s: no raise.
+        // All green but 1 % loss in the last 30 s: no raise.
         for _ in 0..30 {
             let d = a.observe(SecondReport {
                 shown: 60,
@@ -879,12 +1085,14 @@ mod tests {
                 frames_lost: 0,
                 received: 990,
                 lost: 10,
+                rtt_ms: 12,
+                rtt_floor_ms: 12,
             });
             assert_eq!(d.rung, None);
         }
         // Loss gone: the raise follows once the recent window is clean and 15 greens are in.
         let mut raised = false;
-        for _ in 0..30 {
+        for _ in 0..45 {
             if a.observe(SecondReport {
                 shown: 60,
                 within_limit: 60,
@@ -892,6 +1100,8 @@ mod tests {
                 frames_lost: 0,
                 received: 1000,
                 lost: 0,
+                rtt_ms: 12,
+                rtt_floor_ms: 12,
             })
             .rung
             .is_some()

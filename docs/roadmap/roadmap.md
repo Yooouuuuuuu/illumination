@@ -244,7 +244,12 @@ first): today a copy on one side is not seen on the other at all. Discussion sta
 - optional reduction of host animations (AnyDesk's `taskbar_animation_modifier`)
 - diagnostics bundle. **Measurement runs done in v0.9.0** (`view --fixed --duration --report`,
   `illum workload`, `illum report`, `scripts/measure.ps1`, docs/testing/measure.md): the tuning
-  of the ladder and parity numbers is decided from those tables, in both directions.
+  of the ladder and parity numbers is decided from those tables, in both directions. **Tuned in
+  v0.10.0** from four runs (docs/testing/results-2026-11-02.md): congestion told from random
+  loss by the round trip, a fast drop for congestion, raises gated on 30 s of loss, keyframes
+  two a second, resolution rungs off by default, frame-rate cap 30 by default, viewer notices
+  for a missing keyframe and for silence (architecture §5.5 rules 6–9, §5.8). Still to run:
+  one live session per direction on the tuned controllers.
 - try a **4:4:4 mode** (H.265) from the laptop on a page of small text, and decide whether it
   becomes a ladder rung or a user preference
 - decide the remaining open questions from architecture §13: whether the tile codec keeps a

@@ -44,10 +44,11 @@ rate, bandwidth, latency and packet loss.
 
 Control and input travel over TLS on TCP; video travels over **UDP on the same port number**
 and is never resent; parity lets the viewer rebuild lost packets. The host **adapts**: it starts
-at the top of a quality ladder (`--max-bitrate 20` Mb/s, `--max-fps 60`) and steps down one rung
-at a time while frames arrive later than your limit (`--latency-limit 50` ms), back up when they
-don't; parity moves between `--fec-min 5` and `--fec-max 30` percent with the packet loss it
-sees. The title bar shows the rung in use; the host log says why it changed. A viewer offers AV1
+at the top of a quality ladder (`--max-bitrate 20` Mb/s, `--max-fps 30`, up to 120) and steps
+down one rung at a time while frames arrive later than your limit (`--latency-limit 50` ms), at
+once when loss comes with a rising round trip (congestion), and back up when things are clean;
+parity moves between 5 and 30 percent with the packet loss it sees. Resolution only goes down if
+you allow it (`--allow-scale`). The title bar shows the rung in use; the host log says why it changed. A viewer offers AV1
 only when its GPU decodes it (`--software-decode` turns the GPU decoders off and keeps it on
 H.265). The viewer decodes and draws on the GPU; `--software-render` draws on the CPU instead,
 which is also what happens on a machine with no usable GPU.
@@ -95,7 +96,7 @@ illum --service        # host (--port, --bind <IP> to opt in to other addresses,
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
-                       #   --max-bitrate Mb/s, --max-fps, --latency-limit ms, --fec-min/--fec-max %, --mute,
+                       #   --max-bitrate Mb/s, --max-fps, --allow-scale, --latency-limit ms, --mute,
                        #   --software-decode, --software-render; measurement: --fixed, --scale,
                        #   --codec, --duration, --report, --label)
 illum workload         # the measurement screen, full size (host side); Esc closes it
