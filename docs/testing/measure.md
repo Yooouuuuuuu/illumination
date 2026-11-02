@@ -66,8 +66,10 @@ av1-06,av1,gpu,gpu,6,60,10,100,60
 
 The default plan is 24 steps of 60 s: a bitrate sweep per codec on GPU decode and GPU
 presentation, the decode and render variants at 6 Mb/s, then frame rate, parity and scale
-variants, and one tiles step. When the host cannot encode AV1 (the laptop), delete the `av1`
-lines or accept that they show up as H.265 in the table.
+variants, and one tiles step. `scripts/measure-plan-short.csv` is the 8-step subset at 6 Mb/s
+(both codecs, all four decode/render combinations) for re-checking a viewer machine. When the
+host cannot encode AV1 (the laptop), delete the `av1` lines or accept that they show up as
+H.265 in the table.
 
 ## Reading the table
 
@@ -83,10 +85,11 @@ machines straddle the boundary. Columns:
 - **rtt**: median round trip of the clock probes.
 - **loss %**: datagrams lost before any repair; **frames lost**: frames that could not be
   rebuilt; **keyframes**: how many arrived (one at the start, one per lost frame).
-- **host taken / capped / sent**: per second, frames that came out of capture, frames the
-  frame-rate cap skipped, frames encoded and sent. If `taken` is low in the still phase, the
-  screen did not change; if `sent` is far below `taken` in motion, the cap or the encoder was
-  the limit.
+- **host taken / capped / sent**: per second, frames the encoder thread took from capture
+  (latest frame wins, so fewer than were captured when it falls behind, e.g. while
+  downscaling on the CPU), frames the frame-rate cap skipped, frames encoded and sent. If
+  `taken` is low in the still phase, the screen did not change; if `sent` is far below
+  `taken` in motion, the cap or the encoder was the limit.
 
 What to look for:
 

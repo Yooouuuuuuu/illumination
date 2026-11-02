@@ -410,9 +410,19 @@ impl App {
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return; // minimised: don't ack, so the host pauses
         };
-        let mut state = self.shared.lock().expect("view state lock");
         let draw_start = Instant::now();
-        let picture = state.frame.clone();
+        // Take what this frame needs and let go of the lock: the receive thread must never wait
+        // behind the swap chain or a CPU conversion (held across a slow draw, it fell so far
+        // behind that latency read in seconds).
+        let (picture, latest, host_cursor, cursor_shape) = {
+            let state = self.shared.lock().expect("view state lock");
+            (
+                state.frame.clone(),
+                state.latest,
+                state.cursor,
+                state.cursor_shape.clone(),
+            )
+        };
         let pan = self.window_mouse.map_or((0.5, 0.5), |(x, y)| {
             (x / w.get() as f64, y / h.get() as f64)
         });
@@ -436,7 +446,7 @@ impl App {
                 x,
                 y,
             },
-            _ => state.cursor,
+            _ => host_cursor,
         };
         let shown = match &mut s.backend {
             Backend::Gpu(presenter) => {
@@ -447,9 +457,7 @@ impl App {
                         self.uploaded = Some(pic.clone());
                     }
                 }
-                presenter
-                    .renderer()
-                    .upload_cursor(state.cursor_shape.as_ref());
+                presenter.renderer().upload_cursor(cursor_shape.as_ref());
                 presenter.present((w.get(), h.get()), place, Some(cursor))
             }
             Backend::Cpu(surface) => {
@@ -469,7 +477,7 @@ impl App {
                                 blit_original(&bgra, &mut buffer, w.get(), h.get(), pan)
                             }
                         };
-                        if let Some(shape) = &state.cursor_shape {
+                        if let Some(shape) = &cursor_shape {
                             draw_cursor(&mut buffer, w.get(), h.get(), p, cursor, shape);
                         }
                     }
@@ -480,11 +488,11 @@ impl App {
         };
         if !shown {
             // The swap chain is being rebuilt; try again without acknowledging anything.
-            drop(state);
             s.window.request_redraw();
             return;
         }
-        let presented = picture.as_ref().and(state.latest);
+        let mut state = self.shared.lock().expect("view state lock");
+        let presented = picture.as_ref().and(latest);
         let new_frame = presented.filter(|(seq, _)| Some(*seq) != self.last_acked);
         let latency_ms = new_frame.and_then(|(_, capture_us)| {
             state

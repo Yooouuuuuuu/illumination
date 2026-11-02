@@ -1,0 +1,9 @@
+name,codec,decode,render,bitrate,fps,parity,scale,seconds
+av1-06,av1,gpu,gpu,6,60,10,100,60
+av1-06-cpudec,av1,cpu,gpu,6,60,10,100,60
+av1-06-cpurender,av1,gpu,cpu,6,60,10,100,60
+av1-06-cpu,av1,cpu,cpu,6,60,10,100,60
+hevc-06,hevc,gpu,gpu,6,60,10,100,60
+hevc-06-cpudec,hevc,cpu,gpu,6,60,10,100,60
+hevc-06-cpurender,hevc,gpu,cpu,6,60,10,100,60
+hevc-06-cpu,hevc,cpu,cpu,6,60,10,100,60

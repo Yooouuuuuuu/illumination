@@ -24,6 +24,10 @@ struct App {
     last_phase: Option<Phase>,
     /// Which monitor to fill (0 = the first the system lists).
     screen: usize,
+    /// What is on screen (the second while still, the millisecond otherwise), so an unchanged
+    /// picture is not presented again: the compositor would hand the capture a "new" frame of
+    /// the same pixels, and the still phase would not be still.
+    last_shown: Option<u64>,
 }
 
 impl App {
@@ -41,6 +45,7 @@ impl App {
             .is_none_or(|wl| wl.size() != (w.get(), h.get()))
         {
             self.workload = Some(Workload::new(w.get(), h.get()));
+            self.last_shown = None;
         }
         let workload = self.workload.as_ref().expect("just set");
         let unix_ms = crate::measure::unix_now().as_millis() as u64;
@@ -49,6 +54,15 @@ impl App {
             tracing::info!(target: "workload", "Phase: {}", phase.name());
             self.last_phase = Some(phase);
         }
+        let moment = if phase == Phase::Still {
+            unix_ms / 1000
+        } else {
+            unix_ms
+        };
+        if self.last_shown == Some(moment) {
+            return; // nothing changed: present nothing
+        }
+        self.last_shown = Some(moment);
         let frame = workload.frame(unix_ms);
         if surface.resize(w, h).is_err() {
             return;
@@ -151,6 +165,7 @@ pub fn run_workload(screen: usize) -> Result<(), String> {
         next_frame: Instant::now(),
         last_phase: None,
         screen,
+        last_shown: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }

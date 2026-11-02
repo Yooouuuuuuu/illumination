@@ -11,6 +11,32 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-02
+
+What the first measurement run (laptop viewing the desktop, 24 steps) showed
+about the measuring itself.
+
+### Fixed
+
+- **The viewer no longer holds the state lock while drawing.** The window took
+  the lock, converted, scaled and presented, and only then let go; the receive
+  thread waited behind every draw. On the GPU path that was a few ms, on the
+  CPU path 70–90 ms per frame, so the receive thread fell further and further
+  behind until "latency" read 30 s. The window now copies what it needs,
+  draws without the lock, and takes it again only to record the result. The
+  CPU-path rows of the first run measured this bug, not the path.
+- **The CPU YUV → BGRA conversion is integer fixed-point** instead of
+  floating point per pixel; the colours are the same to within a unit.
+- **The still phase is still.** The workload window re-presented an unchanged
+  picture 60 times a second, and the compositor handed each one to the
+  capture as a new frame, so the host sent 58 fps of identical pixels. It now
+  presents only when the picture changed: once a second while still.
+
+### Added
+
+- `scripts/measure-plan-short.csv`: the 8 steps at 6 Mb/s (both codecs, all
+  four decode/render combinations), for re-checking a viewer machine.
+
 ## [0.9.1] - 2026-11-02
 
 ### Added

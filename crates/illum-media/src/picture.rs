@@ -94,7 +94,8 @@ impl YuvPicture {
         }
     }
 
-    /// Fixed-point conversion, nearest chroma (no chroma upsampling filter).
+    /// Integer fixed-point conversion (16 fractional bits), nearest chroma, no upsampling
+    /// filter: the CPU fallback has to keep up with 1080p60, so no floating point per pixel.
     pub fn to_bgra(&self) -> Frame {
         let mut out = Frame::new(self.width, self.height);
         let (kr, kb) = match self.matrix {
@@ -103,23 +104,40 @@ impl YuvPicture {
         };
         let kg = 1.0 - kr - kb;
         let (y_off, y_scale, c_scale) = if self.full_range {
-            (0.0, 1.0, 1.0)
+            (0, 1.0, 1.0)
         } else {
-            (16.0, 255.0 / 219.0, 255.0 / 224.0)
+            (16, 255.0 / 219.0, 255.0 / 224.0)
         };
-        for y in 0..self.height {
-            let row = out.row_slice_mut(0, y, self.width);
+        let fix = |v: f64| (v * 65536.0).round() as i32;
+        let cy = fix(y_scale);
+        let crv = fix(2.0 * (1.0 - kr) * c_scale);
+        let cbu = fix(2.0 * (1.0 - kb) * c_scale);
+        let cgu = fix(2.0 * kb * (1.0 - kb) / kg * c_scale);
+        let cgv = fix(2.0 * kr * (1.0 - kr) / kg * c_scale);
+        let clamp = |v: i32| ((v + 32768) >> 16).clamp(0, 255) as u8;
+        let (ys, ystride) = (&self.planes[0], self.strides[0]);
+        for y in 0..self.height as usize {
+            let luma = &ys[y * ystride..y * ystride + self.width as usize];
+            let cy_row = y / 2;
+            let row = out.row_slice_mut(0, y as u32, self.width);
             for (x, px) in row.chunks_exact_mut(4).enumerate() {
-                let (ys, us, vs) = self.sample(x as u32, y);
-                let yy = (f64::from(ys) - y_off) * y_scale;
-                let u = (f64::from(us) - 128.0) * c_scale;
-                let v = (f64::from(vs) - 128.0) * c_scale;
-                let r = yy + 2.0 * (1.0 - kr) * v;
-                let b = yy + 2.0 * (1.0 - kb) * u;
-                let g = yy - (2.0 * kb * (1.0 - kb) * u + 2.0 * kr * (1.0 - kr) * v) / kg;
-                px[0] = b.round().clamp(0.0, 255.0) as u8;
-                px[1] = g.round().clamp(0.0, 255.0) as u8;
-                px[2] = r.round().clamp(0.0, 255.0) as u8;
+                let cx = x / 2;
+                let (u, v) = match self.layout {
+                    Planar::I420 => (
+                        self.planes[1][cy_row * self.strides[1] + cx],
+                        self.planes[2][cy_row * self.strides[2] + cx],
+                    ),
+                    Planar::Nv12 => {
+                        let o = cy_row * self.strides[1] + cx * 2;
+                        (self.planes[1][o], self.planes[1][o + 1])
+                    }
+                };
+                let yy = (i32::from(luma[x]) - y_off) * cy;
+                let u = i32::from(u) - 128;
+                let v = i32::from(v) - 128;
+                px[0] = clamp(yy + cbu * u);
+                px[1] = clamp(yy - cgu * u - cgv * v);
+                px[2] = clamp(yy + crv * v);
                 px[3] = 255;
             }
         }
