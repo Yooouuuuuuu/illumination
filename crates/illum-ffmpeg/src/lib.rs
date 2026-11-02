@@ -76,6 +76,10 @@ fn is_hardware(name: &str) -> bool {
     name.contains("nvenc") || name.contains("amf") || name.contains("qsv")
 }
 
+/// How far an encoder may round a pts (QSV: 90 kHz ticks, ≤ 11 µs) and still mean the same
+/// frame.
+const PTS_ROUNDING_US: i64 = 50;
+
 /// Low-latency options for each encoder family.
 fn encoder_options(name: &str) -> Dictionary {
     if name.ends_with("_nvenc") {
@@ -419,8 +423,14 @@ impl VideoEncoder for FfmpegEncoder {
                 Ok(()) => {
                     let data = packet.data().unwrap_or(&[]).to_vec();
                     let keyframe = packet.is_key();
+                    // QSV keeps its timestamps on a 90 kHz clock, so a pts comes back up to
+                    // 11 µs off; one that is this frame's within that is this frame's.
                     let packet_pts = packet.pts().unwrap_or(pts);
-                    let capture_us = u64::try_from(packet_pts).unwrap_or(capture_us);
+                    let capture_us = if (packet_pts - pts).abs() <= PTS_ROUNDING_US {
+                        capture_us
+                    } else {
+                        u64::try_from(packet_pts).unwrap_or(capture_us)
+                    };
                     match out.last_mut() {
                         // Two packets for the same pts: a split frame; keep it whole.
                         Some(f) if f.capture_us == capture_us => {
@@ -956,6 +966,7 @@ mod tests {
 
     /// Each encode call must hand back the frame it was given, with that frame's capture time —
     /// not the previous one. A codec that lags a call would mislabel every frame's latency.
+    /// (QSV's 90 kHz rounding of the pts is snapped back in `encode`, so exact equality holds.)
     fn no_lag(codec: VideoCodec) {
         let Some(info) = probe().best_encoder(codec).cloned() else {
             eprintln!("no {} encoder here; skipping", codec.name());

@@ -11,6 +11,15 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-02
+
+### Fixed
+
+- A pts that QSV rounded to its 90 kHz clock (up to 11 µs off) is snapped
+  back to the capture time of the frame it belongs to; the encoder lag test
+  on the laptop failed on that rounding alone, with every frame otherwise
+  coming back in its own call.
+
 ## [0.9.4] - 2026-11-02
 
 What the second reverse run (desktop viewing the laptop, now with H.265
