@@ -154,7 +154,7 @@ fn params(media_target: Option<SocketAddr>) -> ViewParams {
 
 fn check_pattern(shared: &Shared) {
     let state = shared.lock().unwrap();
-    let frame = state.frame().unwrap();
+    let frame = state.frame_bgra().unwrap();
     assert_eq!((frame.width, frame.height), (W, H));
     let pattern = TestPattern::new(W, H);
     for (i, (name, colour)) in PATCHES.iter().enumerate() {
@@ -172,7 +172,7 @@ fn distance(a: Bgra, b: Bgra) -> f64 {
 
 fn check_pattern_lossy(shared: &Shared) {
     let state = shared.lock().unwrap();
-    let frame = state.frame().unwrap();
+    let frame = state.frame_bgra().unwrap();
     assert_eq!((frame.width, frame.height), (W, H));
     let pattern = TestPattern::new(W, H);
     for (i, (name, colour)) in PATCHES.iter().enumerate() {

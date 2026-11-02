@@ -74,12 +74,31 @@ fn protocol(e: impl std::fmt::Display) -> NetError {
     NetError::Protocol(e.to_string())
 }
 
-fn open_decoder(codec: VideoCodec) -> Result<Box<dyn VideoDecoder>, MediaError> {
+/// The GPU decoder when hardware decoding is on and the probe found one for this codec,
+/// otherwise (or if that one will not open after all) the software decoder.
+fn open_decoder(codec: VideoCodec, hardware: bool) -> Result<Box<dyn VideoDecoder>, MediaError> {
     Ok(match codec {
         VideoCodec::Tiles => Box::new(TilesDecoder::default()),
         VideoCodec::Av1 | VideoCodec::Hevc => {
-            let dec = illum_ffmpeg::FfmpegDecoder::open(codec)?;
-            tracing::info!(target: "media", "Decoding {} with {}.", codec.name(), dec.name());
+            let probed = hardware
+                && illum_ffmpeg::hardware_decoders()
+                    .iter()
+                    .any(|(c, _)| *c == codec);
+            let dec = match probed.then(|| illum_ffmpeg::FfmpegDecoder::open_hardware(codec)) {
+                Some(Ok(dec)) => dec,
+                Some(Err(e)) => {
+                    tracing::warn!(target: "media", "{e}; decoding on the CPU instead.");
+                    illum_ffmpeg::FfmpegDecoder::open(codec)?
+                }
+                None => illum_ffmpeg::FfmpegDecoder::open(codec)?,
+            };
+            tracing::info!(
+                target: "media",
+                "Decoding {} with {} ({}).",
+                codec.name(),
+                dec.name(),
+                if dec.is_hardware() { "GPU" } else { "CPU" }
+            );
             Box::new(dec)
         }
     })
@@ -100,6 +119,7 @@ impl MediaIn {
         notify: Notify,
         sender: Sender,
         audio: bool,
+        hw_decode: bool,
     ) -> MediaIn {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -116,6 +136,7 @@ impl MediaIn {
                         &sender,
                         &stop,
                         audio_out.as_ref(),
+                        hw_decode,
                     )
                 })
                 .expect("spawn media-in thread")
@@ -137,6 +158,7 @@ impl Drop for MediaIn {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn media_loop(
     client: &MediaClient,
     inbound: mpsc::Receiver<illum_net::Inbound>,
@@ -145,6 +167,7 @@ fn media_loop(
     sender: &Sender,
     stop: &AtomicBool,
     audio_out: Option<&AudioOut>,
+    hw_decode: bool,
 ) {
     let started = Instant::now();
     let mut reassembler = Reassembler::default();
@@ -228,7 +251,7 @@ fn media_loop(
                         continue;
                     }
                     if decoder.as_ref().is_none_or(|d| d.codec() != meta.codec) {
-                        match open_decoder(meta.codec) {
+                        match open_decoder(meta.codec, hw_decode) {
                             Ok(d) => decoder = Some(d),
                             Err(e) => {
                                 let mut state = shared.lock().expect("view state lock");
@@ -393,6 +416,7 @@ pub async fn run_viewer_session(
                                 notify.clone(),
                                 conn.sender(),
                                 params.audio,
+                                params.hw_decode,
                             ));
                         }
                         Err(e) => {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! AV1 and H.265 through FFmpeg (architecture §5.3): hardware encoders where the GPU offers them
-//! (NVENC, AMF, QSV), software otherwise, and software decoders (dav1d, FFmpeg's HEVC) feeding
-//! BGRA frames to the viewer. Chroma is 4:2:0 in v1.
+//! (NVENC, AMF, QSV), software otherwise, and decoders (dav1d, FFmpeg's HEVC) handing the viewer
+//! their planes as they are (§5.4: the window converts on the GPU). Chroma is 4:2:0 in v1.
 //!
 //! Everything is tuned for one thing: the lowest delay between a captured frame and its bytes
 //! (no B-frames, no lookahead, no frame threading, one packet per frame).
@@ -10,11 +10,14 @@ use ff::codec::config::Supported;
 use ff::codec::{self, threading};
 use ff::format::Pixel;
 use ff::software::scaling;
-use ff::{Dictionary, Error, Packet, Rational, frame, picture};
+use ff::{Dictionary, Error, Packet, Rational, color, ffi, frame, picture};
 use ffmpeg_the_third as ff;
 use illum_media::codec::{EncodedFrame, VideoCodec, VideoDecoder, VideoEncoder};
+use illum_media::picture::{Matrix, Picture, Planar, YuvPicture};
 use illum_media::{Frame, MediaError};
 use libc::EAGAIN;
+use std::ffi::CStr;
+use std::ptr;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -115,10 +118,9 @@ pub struct EncoderInfo {
 #[derive(Debug, Clone, Default)]
 pub struct Probe {
     pub encoders: Vec<EncoderInfo>,
-    /// Software decoders (dav1d, FFmpeg's hevc), always present in this build.
+    /// Software decoders (dav1d, FFmpeg's hevc), always present in this build. What the GPU
+    /// decodes is a separate, lazier question: [`hardware_decoders`].
     pub decoders: Vec<(VideoCodec, String)>,
-    /// Codecs the GPU decodes here. Empty until the hardware decode path (D3D11VA) lands in M8.
-    pub hardware_decoders: Vec<VideoCodec>,
 }
 
 impl Probe {
@@ -141,7 +143,7 @@ impl Probe {
     /// "hardware decode" setting (default on); off means software decoders only.
     pub fn decode_capabilities(&self, hardware: bool) -> Vec<String> {
         let mut caps = Vec::new();
-        let hw = |c: VideoCodec| hardware && self.hardware_decoders.contains(&c);
+        let hw = |c: VideoCodec| hardware && hardware_decoders().iter().any(|(hc, _)| *hc == c);
         if hw(VideoCodec::Av1) {
             caps.push(VideoCodec::Av1.decode_capability().to_string());
         }
@@ -300,6 +302,10 @@ impl FfmpegEncoder {
         video.set_max_b_frames(0);
         video.set_bit_rate(bitrate as usize);
         video.set_max_bit_rate(bitrate as usize);
+        // BGRA → 4:2:0 (swscale here, or the GPU encoder's own conversion) is BT.601 limited
+        // range by default; say so in the stream, so the viewer converts back the same way.
+        video.set_colorspace(color::Space::SMPTE170M);
+        video.set_color_range(color::Range::MPEG);
         video.set_flags(codec::Flags::LOW_DELAY);
         // A short rate-control buffer (100 ms) keeps frame sizes close to bitrate / fps.
         unsafe {
@@ -441,15 +447,234 @@ impl VideoEncoder for FfmpegEncoder {
     }
 }
 
+/// GPU decode APIs to try, best first, on this operating system. FFmpeg does the OS work (the
+/// device, the surfaces, the copy back); this list is the only place the OS shows.
+fn hw_device_types() -> &'static [ffi::AVHWDeviceType] {
+    #[cfg(windows)]
+    {
+        &[ffi::AVHWDeviceType::D3D11VA, ffi::AVHWDeviceType::DXVA2]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &[ffi::AVHWDeviceType::VIDEOTOOLBOX]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &[
+            ffi::AVHWDeviceType::VAAPI,
+            ffi::AVHWDeviceType::CUDA,
+            ffi::AVHWDeviceType::VDPAU,
+        ]
+    }
+}
+
+fn hw_type_name(device: ffi::AVHWDeviceType) -> String {
+    unsafe {
+        let p = ffi::av_hwdevice_get_type_name(device);
+        if p.is_null() {
+            format!("{device:?}")
+        } else {
+            CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    }
+}
+
+/// FFmpeg's native decoders carry the hardware paths (`libdav1d` is software only; `av1` is
+/// nothing but a shell for them).
+fn hw_decoder_name(codec: VideoCodec) -> Option<&'static str> {
+    match codec {
+        VideoCodec::Av1 => Some("av1"),
+        VideoCodec::Hevc => Some("hevc"),
+        VideoCodec::Tiles => None,
+    }
+}
+
+/// The surface format `codec` decodes to on a device of this type, if it has such a path.
+unsafe fn hw_pixel_format(
+    codec: *const ffi::AVCodec,
+    device: ffi::AVHWDeviceType,
+) -> Option<ffi::AVPixelFormat> {
+    for i in 0.. {
+        let config = unsafe { ffi::avcodec_get_hw_config(codec, i) };
+        if config.is_null() {
+            return None;
+        }
+        let config = unsafe { &*config };
+        if config.device_type == device
+            && config.methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX.0 != 0
+        {
+            return Some(config.pix_fmt);
+        }
+    }
+    None
+}
+
+/// `get_format` for the GPU path: takes the device's surface format when the decoder offers
+/// it and refuses otherwise, so a GPU that cannot decode this stream fails where we can see
+/// it instead of quietly decoding on the CPU (the caller decides about falling back).
+unsafe extern "C" fn pick_hw_format(
+    ctx: *mut ffi::AVCodecContext,
+    formats: *const ffi::AVPixelFormat,
+) -> ffi::AVPixelFormat {
+    unsafe {
+        let device = (*ctx).hw_device_ctx;
+        let wanted = if device.is_null() {
+            None
+        } else {
+            let device = (*device).data as *const ffi::AVHWDeviceContext;
+            hw_pixel_format((*ctx).codec, (*device).type_)
+        };
+        let mut p = formats;
+        while *p != ffi::AVPixelFormat::NONE {
+            if Some(*p) == wanted {
+                return *p;
+            }
+            p = p.add(1);
+        }
+        ffi::AVPixelFormat::NONE
+    }
+}
+
+/// One keyframe per codec (256×144 of the test pattern), decoded through the GPU path to find
+/// out what this machine's GPU can do; see [`hardware_decoders`].
+const PROBE_AV1: &[u8] = include_bytes!("../probe/av1.obu");
+const PROBE_HEVC: &[u8] = include_bytes!("../probe/hevc.265");
+
+/// Codecs this machine's GPU decodes, with the decoder used ("hevc via d3d11va"), found by
+/// decoding one embedded keyframe per codec on it: the one check that answers the question
+/// the same way on every OS and vendor. Costs a few hundred milliseconds the first time, so
+/// only the viewer side asks; never the host.
+pub fn hardware_decoders() -> &'static [(VideoCodec, String)] {
+    static HW: OnceLock<Vec<(VideoCodec, String)>> = OnceLock::new();
+    HW.get_or_init(|| {
+        init();
+        let verbose = VERBOSE.load(Ordering::SeqCst);
+        if !verbose {
+            ff::log::set_level(ff::log::Level::Quiet);
+        }
+        let mut found = Vec::new();
+        for (codec, clip) in [(VideoCodec::Av1, PROBE_AV1), (VideoCodec::Hevc, PROBE_HEVC)] {
+            match FfmpegDecoder::open_hardware(codec) {
+                Ok(mut decoder) => match decoder.decode_one(clip) {
+                    Ok(true) => found.push((codec, decoder.name().to_string())),
+                    Ok(false) => tracing::debug!(
+                        target: "codec",
+                        "{} returned nothing for the probe frame",
+                        decoder.name()
+                    ),
+                    Err(e) => tracing::debug!(target: "codec", "{e}"),
+                },
+                Err(e) => tracing::debug!(target: "codec", "{e}"),
+            }
+        }
+        if !verbose {
+            ff::log::set_level(ff::log::Level::Error);
+        }
+        found
+    })
+}
+
 pub struct FfmpegDecoder {
     codec: VideoCodec,
     name: String,
     decoder: codec::decoder::Video,
-    decoded: frame::Video,
-    to_bgra: Option<(Scaler, frame::Video, Pixel, u32, u32)>,
+    /// Frames come back as GPU surfaces and are copied down once.
+    hardware: bool,
 }
 
 impl FfmpegDecoder {
+    /// Opens `codec` on the GPU through the first decode API of this OS that takes it.
+    pub fn open_hardware(codec: VideoCodec) -> Result<FfmpegDecoder, MediaError> {
+        init();
+        let name = hw_decoder_name(codec)
+            .ok_or_else(|| MediaError::Capture(format!("{} has no GPU decoder", codec.name())))?;
+        let found = codec::decoder::find_by_name(name).ok_or_else(|| {
+            MediaError::Capture(format!("decoder {name} is not in this FFmpeg build"))
+        })?;
+        let mut reasons = Vec::new();
+        for &device in hw_device_types() {
+            // APIs addressed by adapter index also get the second and third GPU a try: on a
+            // two-GPU laptop the default adapter may be the one that cannot decode this codec.
+            let indexed = matches!(
+                device,
+                ffi::AVHWDeviceType::D3D11VA
+                    | ffi::AVHWDeviceType::DXVA2
+                    | ffi::AVHWDeviceType::CUDA
+            );
+            let adapters: &[Option<&str>] = if indexed {
+                &[None, Some("1"), Some("2")]
+            } else {
+                &[None]
+            };
+            for &adapter in adapters {
+                match FfmpegDecoder::open_on(codec, found, name, device, adapter) {
+                    Ok(d) => return Ok(d),
+                    Err(e) => reasons.push(e.to_string()),
+                }
+            }
+        }
+        Err(MediaError::Capture(format!(
+            "no GPU decoder for {} here ({})",
+            codec.name(),
+            reasons.join("; ")
+        )))
+    }
+
+    fn open_on(
+        codec: VideoCodec,
+        found: codec::Codec,
+        name: &str,
+        device: ffi::AVHWDeviceType,
+        adapter: Option<&str>,
+    ) -> Result<FfmpegDecoder, MediaError> {
+        let api = hw_type_name(device);
+        let full_name = match adapter {
+            Some(index) => format!("{name} via {api} #{index}"),
+            None => format!("{name} via {api}"),
+        };
+        if unsafe { hw_pixel_format(found.as_ptr(), device) }.is_none() {
+            return Err(err(&full_name, "no such decode path in this FFmpeg build"));
+        }
+        let adapter = adapter.map(|a| std::ffi::CString::new(a).expect("adapter index"));
+        let mut ctx = codec::Context::new_with_codec(found);
+        ctx.set_flags(codec::Flags::LOW_DELAY);
+        unsafe {
+            let raw = ctx.as_mut_ptr();
+            let mut dev: *mut ffi::AVBufferRef = ptr::null_mut();
+            let device_name = adapter.as_ref().map_or(ptr::null(), |a| a.as_ptr());
+            let rc = ffi::av_hwdevice_ctx_create(&mut dev, device, device_name, ptr::null_mut(), 0);
+            if rc < 0 {
+                return Err(err(&full_name, format!("no device: {}", Error::from(rc))));
+            }
+            // The codec context owns this reference and frees it with itself.
+            (*raw).hw_device_ctx = dev;
+            (*raw).get_format = Some(pick_hw_format);
+            (*raw).thread_count = 1;
+        }
+        let decoder = ctx
+            .decoder()
+            .open_as(found)
+            .map_err(|e| err(&full_name, e))?
+            .video()
+            .map_err(|e| err(&full_name, e))?;
+        Ok(FfmpegDecoder {
+            codec,
+            name: full_name,
+            decoder,
+            hardware: true,
+        })
+    }
+
+    /// Feeds one packet and flushes: did a picture come out? (The probe.)
+    fn decode_one(&mut self, data: &[u8]) -> Result<bool, MediaError> {
+        if self.decode(data, true)?.is_some() {
+            return Ok(true);
+        }
+        self.decoder.send_eof().map_err(|e| err(&self.name, e))?;
+        Ok(self.receive_newest()?.is_some())
+    }
+
+    /// Opens the software decoder for `codec`.
     pub fn open(codec: VideoCodec) -> Result<FfmpegDecoder, MediaError> {
         init();
         let (_, name) = probe()
@@ -485,8 +710,7 @@ impl FfmpegDecoder {
             codec,
             name,
             decoder,
-            decoded: frame::Video::empty(),
-            to_bgra: None,
+            hardware: false,
         })
     }
 
@@ -494,31 +718,91 @@ impl FfmpegDecoder {
         &self.name
     }
 
-    /// The newest decoded picture as a BGRA [`Frame`].
-    fn convert_decoded(&mut self) -> Result<Frame, MediaError> {
-        let (w, h, fmt) = (
-            self.decoded.width(),
-            self.decoded.height(),
-            self.decoded.format(),
-        );
-        if fmt == Pixel::BGRA {
-            return Ok(Frame::from_bgra_rows(
+    pub fn is_hardware(&self) -> bool {
+        self.hardware
+    }
+
+    /// Takes every picture the decoder has ready and returns the newest, brought down from the
+    /// GPU if that is where it was decoded.
+    fn receive_newest(&mut self) -> Result<Option<Picture>, MediaError> {
+        // `avcodec_receive_frame` clears its frame on every call, including the final EAGAIN,
+        // so each picture is received into a fresh frame and the newest one is kept.
+        let mut newest = None;
+        loop {
+            let mut picture = frame::Video::empty();
+            match self.decoder.receive_frame(&mut picture) {
+                Ok(()) => newest = Some(picture),
+                Err(Error::Other { errno }) if errno == EAGAIN => break,
+                Err(Error::Eof) => break,
+                Err(e) => return Err(err(&self.name, e)),
+            }
+        }
+        let Some(decoded) = newest else {
+            return Ok(None);
+        };
+        let on_gpu = unsafe { !(*decoded.as_ptr()).hw_frames_ctx.is_null() };
+        let decoded = if on_gpu {
+            self.download(&decoded)?
+        } else {
+            decoded
+        };
+        picture_of(&decoded).map(Some)
+    }
+
+    /// GPU surface → system memory (NV12 on every API we use), one copy.
+    fn download(&self, surface: &frame::Video) -> Result<frame::Video, MediaError> {
+        let mut sw = frame::Video::empty();
+        unsafe {
+            let rc = ffi::av_hwframe_transfer_data(sw.as_mut_ptr(), surface.as_ptr(), 0);
+            if rc < 0 {
+                return Err(err(&self.name, format!("transfer: {}", Error::from(rc))));
+            }
+            // The transfer brings the pixels, not the colour description.
+            ffi::av_frame_copy_props(sw.as_mut_ptr(), surface.as_ptr());
+        }
+        Ok(sw)
+    }
+}
+
+/// The decoded frame's planes as a [`Picture`], copied once and otherwise untouched: 4:2:0
+/// stays 4:2:0 with the colour description the stream carries, BGRA stays BGRA.
+fn picture_of(frame: &frame::Video) -> Result<Picture, MediaError> {
+    let (w, h) = (frame.width(), frame.height());
+    let format = frame.format();
+    let layout = match format {
+        Pixel::BGRA => {
+            return Ok(Picture::Bgra(Frame::from_bgra_rows(
                 w,
                 h,
-                self.decoded.data(0),
-                self.decoded.stride(0),
-            ));
+                frame.data(0),
+                frame.stride(0),
+            )));
         }
-        let reusable =
-            matches!(&self.to_bgra, Some((_, _, f, cw, ch)) if *f == fmt && *cw == w && *ch == h);
-        if !reusable {
-            let sws = Scaler::new(fmt, Pixel::BGRA, w, h)?;
-            self.to_bgra = Some((sws, frame::Video::new(Pixel::BGRA, w, h), fmt, w, h));
+        Pixel::YUV420P | Pixel::YUVJ420P => Planar::I420,
+        Pixel::NV12 => Planar::Nv12,
+        other => {
+            return Err(MediaError::Capture(format!(
+                "decoder produced {other:?}, not 8-bit 4:2:0"
+            )));
         }
-        let (sws, out, _, _, _) = self.to_bgra.as_mut().expect("just set");
-        sws.run(&self.decoded, out)?;
-        Ok(Frame::from_bgra_rows(w, h, out.data(0), out.stride(0)))
-    }
+    };
+    let matrix = match frame.color_space() {
+        color::Space::BT709 => Matrix::Bt709,
+        // BT.601 (either flavour), and "unspecified", which is what our own encoders meant
+        // before they said so (and what swscale assumes).
+        _ => Matrix::Bt601,
+    };
+    let full_range = frame.color_range() == color::Range::JPEG || format == Pixel::YUVJ420P;
+    let count = frame.planes();
+    Ok(Picture::Yuv(YuvPicture {
+        width: w,
+        height: h,
+        layout,
+        planes: (0..count).map(|i| frame.data(i).to_vec()).collect(),
+        strides: (0..count).map(|i| frame.stride(i)).collect(),
+        matrix,
+        full_range,
+    }))
 }
 
 impl VideoDecoder for FfmpegDecoder {
@@ -526,30 +810,11 @@ impl VideoDecoder for FfmpegDecoder {
         self.codec
     }
 
-    fn decode(&mut self, data: &[u8], _keyframe: bool) -> Result<Option<Frame>, MediaError> {
+    fn decode(&mut self, data: &[u8], _keyframe: bool) -> Result<Option<Picture>, MediaError> {
         self.decoder
             .send_packet(&Packet::borrow(data))
             .map_err(|e| err(&self.name, e))?;
-        // `avcodec_receive_frame` clears its frame on every call, including the final EAGAIN,
-        // so each picture is received into a fresh frame and the newest one is kept.
-        let mut got = false;
-        loop {
-            let mut picture = frame::Video::empty();
-            match self.decoder.receive_frame(&mut picture) {
-                Ok(()) => {
-                    self.decoded = picture;
-                    got = true;
-                }
-                Err(Error::Other { errno }) if errno == EAGAIN => break,
-                Err(Error::Eof) => break,
-                Err(e) => return Err(err(&self.name, e)),
-            }
-        }
-        if got {
-            self.convert_decoded().map(Some)
-        } else {
-            Ok(None)
-        }
+        self.receive_newest()
     }
 }
 
@@ -564,7 +829,22 @@ mod tests {
         (d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b)).sqrt()
     }
 
-    fn round_trip(codec: VideoCodec) {
+    /// The decoder under test, or `None` (and a note) when this machine has no GPU path for
+    /// the codec.
+    fn test_decoder(codec: VideoCodec, hardware: bool) -> Option<FfmpegDecoder> {
+        if !hardware {
+            return Some(FfmpegDecoder::open(codec).unwrap());
+        }
+        match FfmpegDecoder::open_hardware(codec) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!("{e}; skipping");
+                None
+            }
+        }
+    }
+
+    fn round_trip(codec: VideoCodec, hardware: bool) {
         let Some(info) = probe().best_encoder(codec).cloned() else {
             eprintln!("no {} encoder here; skipping", codec.name());
             return;
@@ -577,7 +857,9 @@ mod tests {
             info.name,
             enc.input_format
         );
-        let mut dec = FfmpegDecoder::open(codec).unwrap();
+        let Some(mut dec) = test_decoder(codec, hardware) else {
+            return;
+        };
         eprintln!("{}: decoder {} open", codec.name(), dec.name());
         let mut pattern = TestPattern::new(w, h);
         let mut shown = None;
@@ -594,9 +876,16 @@ mod tests {
                 }
                 if let Some(out) = dec.decode(&encoded.data, encoded.keyframe).unwrap() {
                     if shown.is_none() {
-                        eprintln!("{}: first picture decoded", codec.name());
+                        eprintln!("{}: first picture decoded: {out:?}", codec.name());
                     }
-                    shown = Some(out);
+                    match &out {
+                        Picture::Yuv(p) if hardware => {
+                            assert_eq!(p.layout, Planar::Nv12, "GPU surfaces come down as NV12")
+                        }
+                        Picture::Yuv(_) => {}
+                        Picture::Bgra(_) => panic!("planes must come back untouched"),
+                    }
+                    shown = Some(out.to_bgra());
                 }
             }
         }
@@ -672,21 +961,23 @@ mod tests {
 
     /// The decoder must give back the picture of the packet it was just fed, not an earlier one:
     /// the viewer labels the picture with the packet's capture time.
-    fn decoder_lag(codec: VideoCodec) {
+    fn decoder_lag(codec: VideoCodec, hardware: bool) {
         let Some(info) = probe().best_encoder(codec).cloned() else {
             eprintln!("no {} encoder here; skipping", codec.name());
             return;
         };
         let (w, h) = (1920, 1080);
         let mut enc = FfmpegEncoder::open_named(codec, &info.name, w, h, 60, 17_000_000).unwrap();
-        let mut dec = FfmpegDecoder::open(codec).unwrap();
+        let Some(mut dec) = test_decoder(codec, hardware) else {
+            return;
+        };
         let mut pattern = TestPattern::new(w, h);
         let mut lags = Vec::new();
         for i in 0..30u64 {
             let frame = pattern.next_frame();
             for encoded in enc.encode(&frame, 5_000 + i * 16_667, i == 0).unwrap() {
                 match dec.decode(&encoded.data, encoded.keyframe).unwrap() {
-                    Some(out) => lags.push(tick_of(&out).map(|t| i as i64 - t as i64)),
+                    Some(out) => lags.push(tick_of(&out.to_bgra()).map(|t| i as i64 - t as i64)),
                     None => lags.push(None),
                 }
             }
@@ -710,12 +1001,50 @@ mod tests {
 
     #[test]
     fn av1_decoder_does_not_lag() {
-        decoder_lag(VideoCodec::Av1);
+        decoder_lag(VideoCodec::Av1, false);
     }
 
     #[test]
     fn hevc_decoder_does_not_lag() {
-        decoder_lag(VideoCodec::Hevc);
+        decoder_lag(VideoCodec::Hevc, false);
+    }
+
+    #[test]
+    fn av1_gpu_decoder_does_not_lag() {
+        decoder_lag(VideoCodec::Av1, true);
+    }
+
+    #[test]
+    fn hevc_gpu_decoder_does_not_lag() {
+        decoder_lag(VideoCodec::Hevc, true);
+    }
+
+    #[test]
+    fn gpu_probe_decodes_the_embedded_keyframes() {
+        let started = Instant::now();
+        let found = hardware_decoders();
+        eprintln!(
+            "GPU decoders: {found:?} (probed in {:?})",
+            started.elapsed()
+        );
+        for (codec, name) in found {
+            assert!(
+                name.contains(" via "),
+                "{} decoder name {name}",
+                codec.name()
+            );
+            // What the probe found must open again for real.
+            FfmpegDecoder::open_hardware(*codec).unwrap();
+        }
+        // And the capability strings follow: AV1 only with GPU decoding.
+        let caps = probe().decode_capabilities(true);
+        let has_av1 = found.iter().any(|(c, _)| *c == VideoCodec::Av1);
+        assert_eq!(caps.contains(&"dec:av1".to_string()), has_av1);
+        assert!(
+            !probe()
+                .decode_capabilities(false)
+                .contains(&"dec:av1".to_string())
+        );
     }
 
     #[test]
@@ -739,11 +1068,50 @@ mod tests {
 
     #[test]
     fn hevc_round_trip_keeps_colours() {
-        round_trip(VideoCodec::Hevc);
+        round_trip(VideoCodec::Hevc, false);
     }
 
     #[test]
     fn av1_round_trip_keeps_colours() {
-        round_trip(VideoCodec::Av1);
+        round_trip(VideoCodec::Av1, false);
+    }
+
+    #[test]
+    fn hevc_gpu_round_trip_keeps_colours() {
+        round_trip(VideoCodec::Hevc, true);
+    }
+
+    #[test]
+    fn av1_gpu_round_trip_keeps_colours() {
+        round_trip(VideoCodec::Av1, true);
+    }
+}
+
+#[cfg(test)]
+mod probe_clips {
+    use super::*;
+    use illum_media::pattern::TestPattern;
+
+    /// Writes the keyframes `hardware_decoders()` decodes to find out what the GPU can do. Run
+    /// once on a machine with hardware encoders (`cargo test -p illum-ffmpeg write_probe_clips
+    /// -- --ignored`); the files are committed and embedded.
+    #[test]
+    #[ignore]
+    fn write_probe_clips() {
+        for (codec, file) in [(VideoCodec::Av1, "av1.obu"), (VideoCodec::Hevc, "hevc.265")] {
+            let info = probe()
+                .best_encoder(codec)
+                .unwrap_or_else(|| panic!("no {} encoder here", codec.name()));
+            let (w, h) = (256, 144);
+            let mut enc = FfmpegEncoder::open_named(codec, &info.name, w, h, 30, 400_000).unwrap();
+            let mut pattern = TestPattern::new(w, h);
+            let frame = pattern.next_frame();
+            let packets = enc.encode(&frame, 1_000, true).unwrap();
+            let first = packets.first().expect("the keyframe comes straight back");
+            assert!(first.keyframe);
+            let path = format!("{}/probe/{file}", env!("CARGO_MANIFEST_DIR"));
+            std::fs::write(&path, &first.data).unwrap();
+            eprintln!("{path}: {} bytes from {}", first.data.len(), info.name);
+        }
     }
 }

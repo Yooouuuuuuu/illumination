@@ -14,6 +14,7 @@
 
 use crate::codec::{EncodedFrame, VideoCodec, VideoDecoder, VideoEncoder};
 use crate::frame::{BYTES_PER_PIXEL, Frame};
+use crate::picture::Picture;
 use crate::{MediaError, Reader};
 use std::time::Instant;
 
@@ -296,9 +297,9 @@ impl VideoDecoder for TilesDecoder {
         VideoCodec::Tiles
     }
 
-    fn decode(&mut self, data: &[u8], _keyframe: bool) -> Result<Option<Frame>, MediaError> {
+    fn decode(&mut self, data: &[u8], _keyframe: bool) -> Result<Option<Picture>, MediaError> {
         let vf = VideoFrame::from_bytes(data)?;
-        Ok(Some(self.inner.apply(&vf)?.clone()))
+        Ok(Some(Picture::Bgra(self.inner.apply(&vf)?.clone())))
     }
 }
 
@@ -316,11 +317,17 @@ mod tests {
         let e = enc.encode(&first, 1_000, false).unwrap().remove(0);
         assert!(e.keyframe);
         assert_eq!(e.capture_us, 1_000, "capture time passes through");
-        assert_eq!(dec.decode(&e.data, e.keyframe).unwrap().unwrap(), first);
+        assert_eq!(
+            dec.decode(&e.data, e.keyframe).unwrap().unwrap().to_bgra(),
+            first
+        );
         let second = pattern.next_frame();
         let e = enc.encode(&second, 2_000, false).unwrap().remove(0);
         assert!(!e.keyframe);
-        assert_eq!(dec.decode(&e.data, e.keyframe).unwrap().unwrap(), second);
+        assert_eq!(
+            dec.decode(&e.data, e.keyframe).unwrap().unwrap().to_bgra(),
+            second
+        );
         assert!(
             enc.encode(&second, 3_000, false).unwrap().is_empty(),
             "no change, nothing to send"

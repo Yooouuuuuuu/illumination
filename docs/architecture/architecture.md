@@ -249,23 +249,39 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
   `av1_amf`, `av1_qsv`; `hevc_nvenc`, `hevc_amf`, `hevc_qsv`, `libx265`. Software AV1
   (`libsvtav1`) is deliberately **not** a candidate (decided 2026-10-28): the rule is AV1 in
   hardware or else H.265, and real-time 1080p60 AV1 on a CPU would show up as encode delay;
-  `libx265` stays only as the last resort for a machine with no GPU encoder. Decoders:
+  `libx265` stays only as the last resort for a machine with no GPU encoder. Software decoders:
   `libdav1d` for AV1, FFmpeg's `hevc`. The result becomes hello capabilities `enc:av1`,
   `enc:hevc`, `dec:av1`, `dec:hevc`; the host picks per the rule above (`choose_codec`).
   `illum codecs` prints the probe with FFmpeg's reasons for each encoder that would not open.
   **A viewer offers `dec:av1` only when it decodes AV1 in hardware** (v0.7.2): from v0.5.1 to
   v0.7.1 the software decoder counted, the laptop received AV1 and spent ~20 ms a frame on it —
-  half the lag of the first live runs. Until the hardware decode path exists (M8) every viewer
-  therefore gets H.265. The user's **hardware decode** setting (default on; `--software-decode`)
-  turns the GPU decoders off, which also removes AV1 from the offer. NVENC AV1 is encoded in
-  4 tile columns so a software decoder can use several cores without a frame of delay.
+  half the lag of the first live runs. The user's **hardware decode** setting (default on;
+  `--software-decode`) turns the GPU decoders off, which also removes AV1 from the offer. NVENC
+  AV1 is encoded in 4 tile columns so a software decoder can use several cores without a frame
+  of delay.
+- **GPU decoding (v0.8.0)** goes through FFmpeg's hardware paths, the same code on every OS:
+  the decoder is FFmpeg's native `av1` / `hevc` with a hardware device attached (`D3D11VA`,
+  then `DXVA2`, on Windows; `VAAPI`, `CUDA`, `VDPAU` on Linux; `VideoToolbox` on macOS — one
+  list, the only place the OS shows), `get_format` accepts only the device's surface format
+  (a GPU that cannot decode the stream fails where we can see it instead of quietly decoding on
+  the CPU), and each surface is copied down once as NV12 (`av_hwframe_transfer_data`). On
+  two-GPU machines the second and third adapter get a try. **What the GPU can decode** is found
+  by decoding one embedded 256×144 keyframe per codec (`crates/illum-ffmpeg/probe/`) through
+  that path — the one check that gives the same answer on every vendor and OS; it takes
+  ~0.3 s, runs once, and only on the viewer side. `illum codecs` lists the result as
+  "Decoders (GPU)". If the probed decoder will not open for a session after all, the viewer
+  falls back to the software decoder and logs it.
 - Encoder settings are all about delay: no B-frames, no lookahead, one thread, a 100 ms
   rate-control buffer, `LOW_DELAY`, keyframes only on request (`forced-idr`), NVENC preset p4 /
   tune ll / CBR. The encoder gets 85 % of the bitrate cap; packet headers and parity take the
   rest. It is opened at the first frame's size and reopened on a resolution change.
 - Decoders run with slice threading only (frame threading would hold pictures back) and
-  dav1d's `max_frame_delay=1`, so every packet yields its picture at once. The decoded picture
-  is converted to BGRA with swscale; a GPU presentation path is M8.
+  dav1d's `max_frame_delay=1`, so every packet yields its picture at once. A decoder hands the
+  window its **own planes** (`Picture::Yuv`: I420 from the software decoders, NV12 from the
+  GPU, with the stream's matrix and range; the tile codec gives `Picture::Bgra`); nothing on
+  the viewer's CPU rewrites pixels (v0.8.0; before that swscale converted every frame to BGRA).
+  The encoder declares what its BGRA → 4:2:0 conversion uses, BT.601 limited range, so the
+  viewer converts back the same way (`frame.color_space()` / `color_range()` on the way out).
 - The packet header names the codec per frame, so the viewer opens the matching decoder when
   the first frame arrives and would follow a mid-session fallback to tiles (an encoder that
   fails to open or to encode is replaced by tiles rather than ending the session).
@@ -284,16 +300,29 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
   queued frame). Audio is the exception (§8).
 - The controller decodes in hardware and presents through a flip-model swap chain, not through a
   UI toolkit's image widget.
-  - **v0.3.0 stand-in:** `winit` + `softbuffer`, CPU blit. The flip-model swap chain comes with
-    the quality milestone.
+  - **GPU presentation (v0.8.0, `illum-ui::gpu`):** `wgpu` on top of the `winit` window, so
+    the same code runs on Direct3D 12, Vulkan and Metal. The decoder's planes are uploaded as
+    they are (R8 / RG8 / BGRA8 textures, any row stride) and **one shader** converts
+    (BT.601 or BT.709, limited or full range, from the picture's own description), scales
+    with bilinear filtering and blends the cursor with its alpha. The swap chain asks for the
+    **newest-frame-wins** mode (`Mailbox`, else `Immediate`, else `Fifo`) with a frame latency
+    of 1, so presenting never blocks the event loop and a late frame never queues behind an
+    older one. The picture is uploaded once per decoded frame; redraws for a moved mouse reuse
+    it. Offscreen tests render the colour pattern from I420 and NV12 planes in both matrices
+    and ranges and read the pixels back.
+  - **CPU fallback:** `softbuffer` with the v0.3.0 blit stays for a machine with no usable
+    GPU API (and behind `--software-render`); it uses the same YUV → RGB arithmetic on the
+    CPU (`YuvPicture::to_bgra`), so both paths show the same colours.
   - **View modes (v0.4.2):**
-    - **Fit:** 1:1 when the window is big enough, otherwise scaled down. Each window pixel
-      **averages** the host pixels it covers. Nearest neighbour, used until v0.4.1, dropped
-      pixel rows and columns and broke thin text strokes.
+    - **Fit:** 1:1 when the window is big enough, otherwise scaled down. On the CPU each
+      window pixel **averages** the host pixels it covers; on the GPU bilinear filtering does
+      the same down to half size (a box or mip filter for smaller windows is a follow-up).
+      Nearest neighbour, used until v0.4.1, dropped pixel rows and columns and broke thin text
+      strokes.
     - **Original:** 1:1, and the visible part follows the mouse when the host screen is larger
       than the window.
     - **Ctrl+Alt+Shift+F2** switches between them.
-  - BGRA is translated to the window's `0x00RRGGBB` in exactly one function
+  - On the CPU path BGRA is translated to the window's `0x00RRGGBB` in exactly one function
     (`illum_media::scale::bgra_to_0rgb`), and a test pins the channel order.
   - Frame pacing to the display refresh (Moonlight's optional feature) is a v2 idea.
 
@@ -528,8 +557,9 @@ of reach.
 **Implemented in v0.6.0** as viewer flags, sent to the host in `ScreenStart` (0 = host default,
 and the host clamps: bitrate to its own ceiling, parity to 0–50 %, frame rate to 15–240):
 `--latency-limit 50`, `--max-bitrate 20`, `--max-fps 60`, `--fec-min 5 --fec-max 30`,
-`--mute` (v0.7.0), `--software-decode` (v0.7.2; the host side has `--no-audio`). The "best
-possible on this link" message is still to do.
+`--mute` (v0.7.0), `--software-decode` (v0.7.2; the host side has `--no-audio`),
+`--software-render` (v0.8.0, a debugging switch rather than a setting: draw on the CPU). The
+"best possible on this link" message is still to do.
 
 ## 6. Input
 
@@ -701,9 +731,9 @@ logs `Migrating V0 -> V1`).
 | `illum-core` | Roles, protocol messages, capabilities, input messages, trust store (exists) |
 | `illum-net` | TCP + TLS 1.3, pairing and fingerprints, channel framing (exists, M1); next: the UDP media path with TLS-exported keys |
 | `illum-media` | Pixel format, codec interfaces, tile codec, packetisation and parity FEC, pacer, colour test pattern, cursor shapes, scaling, clock sync (exists, M2–M4); next: the two controllers, the simulated link |
-| `illum-ffmpeg` | AV1 / H.265 encode and decode through FFmpeg: the probe, low-delay encoder settings, BGRA conversion (exists, v0.5.1); later Opus |
-| `illum-win` | Windows: DDA capture, input injection, system-key hook (exists); later service, process spawning into sessions, desktop switching, clipboard, power |
-| `illum-ui` | Viewer window and controller-side input (exists); later device list and accept panel |
+| `illum-ffmpeg` | AV1 / H.265 encode and decode through FFmpeg: the probe, low-delay encoder settings, GPU decoding through FFmpeg's hardware paths with the embedded-keyframe probe, Opus (exists, v0.5.1–v0.8.0) |
+| `illum-win` | Windows: DDA and GDI capture, input injection, system-key hook, WASAPI audio, keep-awake (exists); later service, process spawning into sessions, desktop switching, clipboard |
+| `illum-ui` | Viewer window, `wgpu` presenter with the CPU fallback, controller-side input (exists); later device list and accept panel |
 
 Crates are added only when a milestone needs them.
 

@@ -13,6 +13,7 @@ pub mod frame;
 pub mod pacer;
 pub mod packets;
 pub mod pattern;
+pub mod picture;
 pub mod scale;
 pub mod sim;
 pub mod source;

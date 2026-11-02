@@ -2,6 +2,7 @@
 //! The codec interface (architecture §5.3). Implementations: the lossless tile codec in this
 //! crate, and AV1 / H.265 through FFmpeg in `illum-ffmpeg`.
 
+use crate::picture::Picture;
 use crate::{Frame, MediaError};
 
 /// Codecs on the wire, with their one-byte ids in the packet header.
@@ -92,8 +93,9 @@ pub trait VideoEncoder: Send {
 
 pub trait VideoDecoder: Send {
     fn codec(&self) -> VideoCodec;
-    /// Decodes one frame's data; returns the picture when one is ready.
-    fn decode(&mut self, data: &[u8], keyframe: bool) -> Result<Option<Frame>, MediaError>;
+    /// Decodes one frame's data; returns the picture when one is ready, in whatever form the
+    /// decoder produces (the window converts and scales on the GPU).
+    fn decode(&mut self, data: &[u8], keyframe: bool) -> Result<Option<Picture>, MediaError>;
 }
 
 #[cfg(test)]

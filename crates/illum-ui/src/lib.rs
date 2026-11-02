@@ -3,23 +3,28 @@
 //! (sent separately); reports each presented frame so the host may send the next; and turns
 //! keyboard, IME and mouse events into input for the host (M3).
 //!
-//! Presentation uses `softbuffer` for now; the flip-model swap chain (architecture §5.5) comes
-//! with the quality work in M6.
+//! Presentation is on the GPU (`gpu`, architecture §5.4): the decoder's planes go up as they
+//! are and a shader converts, scales and overlays the cursor; the swap chain shows the newest
+//! frame without queueing. A machine with no usable GPU falls back to `softbuffer` on the CPU.
 
+pub mod gpu;
 pub mod input;
 
 pub use input::{InputOut, KeyboardMode};
 
+use gpu::WindowPresenter;
 use illum_core::input::{InputMsg, Key, MouseButton};
 use illum_media::Frame;
 use illum_media::clock::{ClockSync, now_us};
 use illum_media::codec::VideoCodec;
 use illum_media::cursor::{CursorPosition, CursorShape};
-use illum_media::scale::{Placement, ViewMode, blit_fit, blit_original, draw_cursor};
+use illum_media::picture::Picture;
+use illum_media::scale::{
+    Placement, ViewMode, blit_fit, blit_original, draw_cursor, placement, placement_original,
+};
 use input::{KeyPress, Modifiers, key_from_scancode, translate_key};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -174,8 +179,8 @@ pub struct Quality {
 
 /// Everything the network side and the window share.
 pub struct ViewState {
-    /// The newest decoded picture.
-    pub frame: Option<Arc<Frame>>,
+    /// The newest decoded picture, as the decoder produced it.
+    pub frame: Option<Arc<Picture>>,
     /// The codec the host is sending (shown in the title).
     pub codec: Option<VideoCodec>,
     pub quality: Option<Quality>,
@@ -225,8 +230,13 @@ impl Default for ViewState {
 }
 
 impl ViewState {
-    pub fn frame(&self) -> Option<&Frame> {
+    pub fn frame(&self) -> Option<&Picture> {
         self.frame.as_deref()
+    }
+
+    /// The newest picture converted on the CPU (tests, diagnostics).
+    pub fn frame_bgra(&self) -> Option<Frame> {
+        self.frame.as_deref().map(Picture::to_bgra)
     }
 
     /// A new frame reached the screen, `latency_ms` after capture when the clock is known.
@@ -280,6 +290,8 @@ pub struct ViewerOptions {
     pub keyboard: KeyboardMode,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
+    /// Draw on the GPU (falling back to the CPU if none is usable); false forces the CPU path.
+    pub gpu: bool,
 }
 
 pub struct ViewerWindow {
@@ -315,14 +327,20 @@ impl ViewerWindow {
             local_mouse: None,
             hovering: false,
             ime_allowed: None,
+            uploaded: None,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
     }
 }
 
 struct Surface {
-    window: Rc<Window>,
-    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    window: Arc<Window>,
+    backend: Backend,
+}
+
+enum Backend {
+    Gpu(Box<WindowPresenter>),
+    Cpu(softbuffer::Surface<Arc<Window>, Arc<Window>>),
 }
 
 struct App {
@@ -343,6 +361,8 @@ struct App {
     local_mouse: Option<(i32, i32)>,
     hovering: bool,
     ime_allowed: Option<bool>,
+    /// The picture the GPU holds, so redraws for a moved mouse do not upload it again.
+    uploaded: Option<Arc<Picture>>,
 }
 
 impl App {
@@ -378,50 +398,81 @@ impl App {
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return; // minimised: don't ack, so the host pauses
         };
-        if s.surface.resize(w, h).is_err() {
-            return;
-        }
-        let Ok(mut buffer) = s.surface.buffer_mut() else {
-            return;
-        };
         let mut state = self.shared.lock().expect("view state lock");
         let draw_start = Instant::now();
-        let presented = match state.frame.clone() {
-            Some(frame) => {
-                let frame: &Frame = &frame;
-                let p = match self.view_mode {
-                    ViewMode::Fit => blit_fit(frame, &mut buffer, w.get(), h.get()),
-                    ViewMode::Original => {
-                        let pan = self.window_mouse.map_or((0.5, 0.5), |(x, y)| {
-                            (x / w.get() as f64, y / h.get() as f64)
-                        });
-                        blit_original(frame, &mut buffer, w.get(), h.get(), pan)
-                    }
-                };
-                self.placement = Some(p);
-                // While we control the host, draw its cursor shape at *our* mouse position:
-                // no waiting for the host to report where it moved.
-                let cursor = match (
-                    self.options.input.is_some() && self.hovering,
-                    self.local_mouse,
-                ) {
-                    (true, Some((x, y))) => CursorPosition {
-                        visible: true,
-                        x,
-                        y,
-                    },
-                    _ => state.cursor,
-                };
-                if let Some(shape) = &state.cursor_shape {
-                    draw_cursor(&mut buffer, w.get(), h.get(), p, cursor, shape);
-                }
-                state.latest
+        let picture = state.frame.clone();
+        let pan = self.window_mouse.map_or((0.5, 0.5), |(x, y)| {
+            (x / w.get() as f64, y / h.get() as f64)
+        });
+        let place = picture.as_ref().map(|pic| match self.view_mode {
+            ViewMode::Fit => placement(pic.width(), pic.height(), w.get(), h.get()),
+            ViewMode::Original => {
+                placement_original(pic.width(), pic.height(), w.get(), h.get(), pan)
             }
-            None => {
-                buffer.fill(0x0020_2020);
-                None
+        });
+        if place.is_some() {
+            self.placement = place;
+        }
+        // While we control the host, draw its cursor shape at *our* mouse position: no waiting
+        // for the host to report where it moved.
+        let cursor = match (
+            self.options.input.is_some() && self.hovering,
+            self.local_mouse,
+        ) {
+            (true, Some((x, y))) => CursorPosition {
+                visible: true,
+                x,
+                y,
+            },
+            _ => state.cursor,
+        };
+        let shown = match &mut s.backend {
+            Backend::Gpu(presenter) => {
+                if let Some(pic) = &picture {
+                    let same = self.uploaded.as_ref().is_some_and(|u| Arc::ptr_eq(u, pic));
+                    if !same {
+                        presenter.renderer().upload_picture(pic);
+                        self.uploaded = Some(pic.clone());
+                    }
+                }
+                presenter
+                    .renderer()
+                    .upload_cursor(state.cursor_shape.as_ref());
+                presenter.present((w.get(), h.get()), place, Some(cursor))
+            }
+            Backend::Cpu(surface) => {
+                // CPU fallback: convert, scale and blend here, then one copy to the window.
+                if surface.resize(w, h).is_err() {
+                    return;
+                }
+                let Ok(mut buffer) = surface.buffer_mut() else {
+                    return;
+                };
+                match (&picture, place) {
+                    (Some(pic), Some(p)) => {
+                        let bgra = pic.to_bgra();
+                        match self.view_mode {
+                            ViewMode::Fit => blit_fit(&bgra, &mut buffer, w.get(), h.get()),
+                            ViewMode::Original => {
+                                blit_original(&bgra, &mut buffer, w.get(), h.get(), pan)
+                            }
+                        };
+                        if let Some(shape) = &state.cursor_shape {
+                            draw_cursor(&mut buffer, w.get(), h.get(), p, cursor, shape);
+                        }
+                    }
+                    _ => buffer.fill(0x0020_2020),
+                }
+                buffer.present().is_ok()
             }
         };
+        if !shown {
+            // The swap chain is being rebuilt; try again without acknowledging anything.
+            drop(state);
+            s.window.request_redraw();
+            return;
+        }
+        let presented = picture.as_ref().and(state.latest);
         let new_frame = presented.filter(|(seq, _)| Some(*seq) != self.last_acked);
         let latency_ms = new_frame.and_then(|(_, capture_us)| {
             state
@@ -464,7 +515,6 @@ impl App {
             None
         };
         drop(state);
-        let _ = buffer.present();
         if let Some(title) = title {
             s.window.set_title(&title);
         }
@@ -581,21 +631,33 @@ impl ApplicationHandler<UiEvent> for App {
             .with_title(&self.options.title)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Rc::new(w),
+            Ok(w) => Arc::new(w),
             Err(e) => {
                 tracing::error!(target: "viewer", "Could not create the window: {e}");
                 event_loop.exit();
                 return;
             }
         };
-        let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        let surface =
-            softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+        let gpu = if self.options.gpu {
+            WindowPresenter::new(window.clone())
+        } else {
+            Err("switched off".to_string())
+        };
+        let backend = match gpu {
+            Ok(presenter) => Backend::Gpu(Box::new(presenter)),
+            Err(e) => {
+                tracing::warn!(target: "viewer", "GPU presentation {e}; drawing on the CPU");
+                let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
+                Backend::Cpu(
+                    softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface"),
+                )
+            }
+        };
         // If the window already has focus, no focus event follows: switch the hook on now.
         if window.has_focus() {
             (self.options.on_focus)(true);
         }
-        self.window = Some(Surface { window, surface });
+        self.window = Some(Surface { window, backend });
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UiEvent) {

@@ -154,11 +154,25 @@ pub fn blit_original(
 ) -> Placement {
     assert_eq!(dst.len(), (dst_w * dst_h) as usize);
     dst.fill(0);
-    let w = frame.width.min(dst_w);
-    let h = frame.height.min(dst_h);
-    let src_x = ((frame.width - w) as f64 * pan.0.clamp(0.0, 1.0)).round() as u32;
-    let src_y = ((frame.height - h) as f64 * pan.1.clamp(0.0, 1.0)).round() as u32;
-    let p = Placement {
+    let p = placement_original(frame.width, frame.height, dst_w, dst_h, pan);
+    copy_region(frame, dst, dst_w, p);
+    p
+}
+
+/// Original-size placement: 1:1, centred when the frame is smaller than the window, and
+/// showing the part `pan` (0..=1 on each axis) points at when it is larger.
+pub fn placement_original(
+    frame_w: u32,
+    frame_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    pan: (f64, f64),
+) -> Placement {
+    let w = frame_w.min(dst_w);
+    let h = frame_h.min(dst_h);
+    let src_x = ((frame_w - w) as f64 * pan.0.clamp(0.0, 1.0)).round() as u32;
+    let src_y = ((frame_h - h) as f64 * pan.1.clamp(0.0, 1.0)).round() as u32;
+    Placement {
         x: (dst_w - w) / 2,
         y: (dst_h - h) / 2,
         w,
@@ -166,9 +180,7 @@ pub fn blit_original(
         scale: 1.0,
         src_x,
         src_y,
-    };
-    copy_region(frame, dst, dst_w, p);
-    p
+    }
 }
 
 /// 1:1 copy of the visible part of the frame.

@@ -76,7 +76,8 @@ Changes from the original plan:
   and got pixels on screen quickly. The hardware video codec is now M4.
 - Pacing used frame acknowledgements (at most 2 frames in flight). With the UDP path (M4) the
   acknowledgements become feedback only.
-- Presentation uses `softbuffer`; the flip-model swap chain is M8.
+- Presentation used `softbuffer` until v0.8.0 brought the GPU path (M8); `softbuffer` stays as
+  the fallback.
 - v0.4.2: downscaling averages pixels (nearest neighbour broke thin text); an original-size view
   was added.
 
@@ -232,7 +233,13 @@ first): today a copy on one side is not seen on the other at all. Discussion sta
 
 ## M8: Quality and latency
 - Use the capture API's dirty rectangles; keep frames on the GPU from capture to encoder
-- Flip-model swap chain for presentation; hardware decode straight to the screen
+- ~~Flip-model swap chain for presentation; hardware decode straight to the screen~~ **Done in
+  v0.8.0 (2026-11-02), the viewer half:** GPU decoding through FFmpeg's hardware paths (D3D11VA
+  here; VAAPI / VideoToolbox on the other OSes by the same code) with the embedded-keyframe
+  probe, and `wgpu` presentation (planes up, one shader, newest-frame-wins swap chain). The
+  surface still crosses system memory once (decode → NV12 → texture); decode-to-texture
+  interop is a later step. Measured on this PC: GPU probe 0.36 s; the AV1 and H.265 GPU
+  decoders return each picture in the call that fed it (no lag).
 - HDR tone-mapping
 - optional reduction of host animations (AnyDesk's `taskbar_animation_modifier`)
 - diagnostics bundle

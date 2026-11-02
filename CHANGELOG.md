@@ -11,6 +11,49 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-02
+
+M8, the viewer half: the picture no longer touches the viewer's CPU. Built
+with the three operating systems in mind — FFmpeg's hardware paths and `wgpu`
+carry the OS differences; nothing here is written against a Windows API.
+
+### Added
+
+- **GPU decoding** (`illum-ffmpeg`): AV1 and H.265 through FFmpeg's hardware
+  decode paths — D3D11VA (then DXVA2) on Windows, VAAPI / CUDA / VDPAU on
+  Linux, VideoToolbox on macOS, one list — with each surface copied down once
+  as NV12. On a two-GPU machine the second and third adapter get a try. What
+  the GPU can decode is found by decoding one embedded 256×144 keyframe per
+  codec (`crates/illum-ffmpeg/probe/`), the same check on every vendor and OS;
+  `illum codecs` prints it under "Decoders (GPU)". A viewer with
+  `--software-decode`, or whose GPU has no path for the codec, decodes on the
+  CPU as before; a probed decoder that will not open for a session falls back
+  to the CPU and says so in the log.
+- **GPU presentation** (`illum-ui::gpu`, `wgpu`): the decoder's planes are
+  uploaded as they are and one shader converts (BT.601 / BT.709, limited /
+  full range, from the picture's own description), scales and blends the
+  cursor. The swap chain uses the newest-frame-wins mode (Mailbox, else
+  Immediate, else Fifo) with a frame latency of 1, so presenting never blocks
+  and a late frame never queues behind an older one. Fit and Original modes
+  and the locally drawn cursor behave as before. `--software-render` forces
+  the CPU path, which also remains the fallback on a machine with no usable
+  GPU API.
+- Tests: offscreen renders of the colour pattern from I420 and NV12 planes in
+  both matrices and both ranges with unaligned strides, half-size scaling,
+  cursor blending at the hotspot; GPU decode round trips and lag checks for
+  both codecs (they skip with a note where there is no GPU).
+
+### Changed
+
+- Decoders hand the window their native 4:2:0 planes (`Picture::Yuv`) instead
+  of converting to BGRA with swscale; the tile codec returns `Picture::Bgra`.
+  The encoder now declares BT.601 limited range in the stream, which is what
+  its BGRA → 4:2:0 conversion produces, so the viewer converts back the same
+  way.
+- AV1 is offered by a viewer whose GPU decodes it; the rule from 0.7.2 now has
+  something to find, so this PC ↔ laptop goes back to AV1 when the laptop's
+  GPU decodes it.
+
 ## [0.7.3] - 2026-11-02
 
 What an hour of nobody watching taught.

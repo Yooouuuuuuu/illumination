@@ -127,6 +127,9 @@ enum Command {
         /// offers AV1 only then).
         #[arg(long)]
         software_decode: bool,
+        /// Draw the window on the CPU (the default converts, scales and presents on the GPU).
+        #[arg(long)]
+        software_render: bool,
     },
     /// List this machine's displays.
     Displays,
@@ -261,11 +264,13 @@ fn main() -> std::process::ExitCode {
             fec_max,
             mute,
             software_decode,
+            software_render,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
                 keyboard: *keyboard,
                 view_only: *view_only,
+                gpu: !*software_render,
                 params: ViewParams {
                     max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
                     max_fps: *max_fps,
@@ -441,8 +446,18 @@ fn list_codecs() {
         let kind = if e.hardware { "hardware" } else { "software" };
         println!("  {:<6} {:<12} {kind}", e.codec.name(), e.name);
     }
-    println!("Decoders:");
+    println!("Decoders (CPU):");
     for (codec, name) in &p.decoders {
+        println!("  {:<6} {name}", codec.name());
+    }
+    println!("Decoders (GPU):");
+    illum_ffmpeg::set_verbose(true);
+    let gpu = illum_ffmpeg::hardware_decoders();
+    illum_ffmpeg::set_verbose(false);
+    if gpu.is_empty() {
+        println!("  none — AV1 will not be offered as a viewer; H.265 decodes on the CPU");
+    }
+    for (codec, name) in gpu {
         println!("  {:<6} {name}", codec.name());
     }
 }
@@ -553,6 +568,8 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
 struct ViewArgs {
     keyboard: KeyboardMode,
     view_only: bool,
+    /// Present on the GPU (false: `--software-render`).
+    gpu: bool,
     params: ViewParams,
 }
 
@@ -650,6 +667,7 @@ fn run_view(
                     #[cfg(not(windows))]
                     let _ = focused;
                 }),
+                gpu: args.gpu,
             },
         )
         .map_err(anyhow::Error::msg)?;
