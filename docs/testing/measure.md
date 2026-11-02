@@ -74,7 +74,9 @@ H.265 in the table.
 ## Reading the table
 
 One row per step and phase; the first two seconds of each phase are left out because the two
-machines straddle the boundary. Columns:
+machines straddle the boundary, and the first three seconds of each step because the opening
+keyframe, the decoder and the GPU warm up then. In the still phase a stall of about 1000 ms is
+the content's own one change per second, not a fault. Columns:
 
 - **fps / Mb/s**: frames presented per second and video bits received.
 - **lat p50 / p95 / max**: capture on the host → presented on the viewer, in ms, from the

@@ -11,6 +11,16 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-11-02
+
+### Changed
+
+- `illum report` also leaves out the first 3 s of each step: the opening
+  keyframe and the decoder and GPU warming up showed as a 250–500 ms stall in
+  whichever phase a step happened to start, which the 2K run made obvious.
+  The table header now says so, and that the still phase's ~1000 ms stall is
+  the content's own one change per second.
+
 ## [0.9.5] - 2026-11-02
 
 ### Fixed

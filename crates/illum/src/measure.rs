@@ -104,6 +104,9 @@ pub struct Row {
 /// The first seconds of a phase are left out: the host clock, the viewer clock and the
 /// capture pipeline straddle the boundary.
 const PHASE_EDGE_SECONDS: u64 = 2;
+/// The first seconds of a step are left out too: the opening keyframe, the decoder and the
+/// GPU warming up showed as a 250–500 ms "stall" in whichever phase a step happened to start.
+const STEP_START_SECONDS: u32 = 3;
 
 fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     if sorted.is_empty() {
@@ -128,7 +131,9 @@ pub fn rows(report: &Report) -> Vec<Row> {
             .iter()
             .filter(|s| {
                 let (p, into) = Phase::at(s.unix_s);
-                p == phase && (PHASE_EDGE_SECONDS..PHASE_SECONDS).contains(&into)
+                p == phase
+                    && s.t >= STEP_START_SECONDS
+                    && (PHASE_EDGE_SECONDS..PHASE_SECONDS).contains(&into)
             })
             .collect();
         if secs.is_empty() {
@@ -208,7 +213,7 @@ pub fn markdown(reports: &[(PathBuf, Report)]) -> String {
             first.viewer, first.host
         ));
         out.push_str(&format!(
-            "{} steps; presenter: {}. Latency is capture → presented (ms); stall is the longest gap between presented frames; host columns are frames per second out of capture / skipped by the cap / sent. The first {PHASE_EDGE_SECONDS} s of each phase are left out.\n\n",
+            "{} steps; presenter: {}. Latency is capture → presented (ms); stall is the longest gap between presented frames; host columns are frames per second out of capture / skipped by the cap / sent. The first {PHASE_EDGE_SECONDS} s of each phase and the first {STEP_START_SECONDS} s of each step are left out; in the still phase a stall of about 1000 ms is the content's own one change per second.\n\n",
             reports.len(),
             first.presenter
         ));
