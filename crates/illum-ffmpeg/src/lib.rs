@@ -205,22 +205,33 @@ fn probe_uncached() -> Probe {
     }
 }
 
-/// Pixel format to feed an encoder: BGRA straight from capture when it takes that, else NV12 or
-/// 4:2:0 planar through one swscale conversion.
-fn pick_input_format(codec: &codec::Codec) -> Pixel {
+/// Pixel format to feed an encoder named `name`, given what it accepts.
+fn pick_input_format(name: &str, codec: &codec::Codec) -> Pixel {
     let Some(video) = codec.video() else {
         return Pixel::YUV420P;
     };
     let supported: Vec<Pixel> = match video.supported_formats() {
-        Supported::All => return Pixel::BGRA,
+        Supported::All => vec![Pixel::BGRA, Pixel::NV12, Pixel::YUV420P],
         Supported::Specific(formats) => formats.collect(),
     };
-    for want in [Pixel::BGRA, Pixel::NV12, Pixel::YUV420P] {
-        if supported.contains(&want) {
-            return want;
-        }
-    }
-    Pixel::YUV420P
+    input_format_for(name, &supported)
+}
+
+/// BGRA straight from capture only for NVENC, which converts it to 4:2:0 on the GPU. QSV given
+/// BGRA encodes 4:4:4 instead (seen 2026-11-02: the laptop's `hevc_qsv` sent a stream that
+/// D3D11VA refused and the software decoder returned as YUV444P), so everyone else gets NV12,
+/// or 4:2:0 planar, through one swscale conversion on the host.
+fn input_format_for(name: &str, supported: &[Pixel]) -> Pixel {
+    let wanted: &[Pixel] = if name.ends_with("_nvenc") {
+        &[Pixel::BGRA, Pixel::NV12, Pixel::YUV420P]
+    } else {
+        &[Pixel::NV12, Pixel::YUV420P]
+    };
+    wanted
+        .iter()
+        .copied()
+        .find(|f| supported.contains(f))
+        .unwrap_or(Pixel::YUV420P)
 }
 
 /// An swscale context used from one thread at a time; FFmpeg has no thread affinity for it.
@@ -287,7 +298,7 @@ impl FfmpegEncoder {
         let found = codec::encoder::find_by_name(name).ok_or_else(|| {
             MediaError::Capture(format!("encoder {name} is not in this FFmpeg build"))
         })?;
-        let input_format = pick_input_format(&found);
+        let input_format = pick_input_format(name, &found);
         let mut video = codec::Context::new_with_codec(found)
             .encoder()
             .video()
@@ -580,6 +591,9 @@ pub struct FfmpegDecoder {
     decoder: codec::decoder::Video,
     /// Frames come back as GPU surfaces and are copied down once.
     hardware: bool,
+    /// For a stream that is not 8-bit 4:2:0 (4:4:4, 4:2:2, 10-bit): the swscale context that
+    /// brings it to 4:2:0, with the format and size it was made for.
+    to_420: Option<(Scaler, frame::Video, Pixel, u32, u32)>,
 }
 
 impl FfmpegDecoder {
@@ -662,6 +676,7 @@ impl FfmpegDecoder {
             name: full_name,
             decoder,
             hardware: true,
+            to_420: None,
         })
     }
 
@@ -711,11 +726,41 @@ impl FfmpegDecoder {
             name,
             decoder,
             hardware: false,
+            to_420: None,
         })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// A picture in a format the window cannot take (anything but BGRA and 8-bit 4:2:0) is
+    /// brought to 4:2:0 planar here, once per frame, so a host sending 4:4:4 still shows.
+    fn as_420(&mut self, decoded: frame::Video) -> Result<frame::Video, MediaError> {
+        let (fmt, w, h) = (decoded.format(), decoded.width(), decoded.height());
+        if matches!(
+            fmt,
+            Pixel::BGRA | Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12
+        ) {
+            return Ok(decoded);
+        }
+        let reusable =
+            matches!(&self.to_420, Some((_, _, f, cw, ch)) if *f == fmt && *cw == w && *ch == h);
+        if !reusable {
+            tracing::warn!(
+                target: "codec",
+                "{}: the stream is {fmt:?}, not 8-bit 4:2:0; converting on the CPU (the host should send 4:2:0).",
+                self.name
+            );
+            let sws = Scaler::new(fmt, Pixel::YUV420P, w, h)?;
+            self.to_420 = Some((sws, frame::Video::new(Pixel::YUV420P, w, h), fmt, w, h));
+        }
+        let (sws, out, _, _, _) = self.to_420.as_mut().expect("just set");
+        sws.run(&decoded, out)?;
+        // swscale fills the planes, not the description; the matrix and range travel on.
+        out.set_color_space(decoded.color_space());
+        out.set_color_range(decoded.color_range());
+        Ok(out.clone())
     }
 
     pub fn is_hardware(&self) -> bool {
@@ -746,6 +791,7 @@ impl FfmpegDecoder {
         } else {
             decoded
         };
+        let decoded = self.as_420(decoded)?;
         picture_of(&decoded).map(Some)
     }
 
@@ -1084,6 +1130,99 @@ mod tests {
     #[test]
     fn av1_gpu_round_trip_keeps_colours() {
         round_trip(VideoCodec::Av1, true);
+    }
+
+    #[test]
+    fn only_nvenc_is_fed_bgra() {
+        let qsv = [Pixel::NV12, Pixel::P010LE, Pixel::BGRA];
+        assert_eq!(input_format_for("hevc_qsv", &qsv), Pixel::NV12);
+        assert_eq!(input_format_for("av1_qsv", &qsv), Pixel::NV12);
+        let nvenc = [Pixel::YUV420P, Pixel::NV12, Pixel::BGRA];
+        assert_eq!(input_format_for("hevc_nvenc", &nvenc), Pixel::BGRA);
+        let amf = [Pixel::NV12, Pixel::YUV420P, Pixel::BGRA];
+        assert_eq!(input_format_for("hevc_amf", &amf), Pixel::NV12);
+        let x265 = [Pixel::YUV420P, Pixel::YUV422P, Pixel::YUV444P];
+        assert_eq!(input_format_for("libx265", &x265), Pixel::YUV420P);
+        assert_eq!(input_format_for("odd", &[Pixel::GBRP]), Pixel::YUV420P);
+    }
+
+    /// What the laptop's QSV sent on 2026-11-02: an H.265 stream in 4:4:4. The viewer must
+    /// still show it (converted to 4:2:0 on the CPU), not fail every frame.
+    #[test]
+    fn a_444_stream_still_decodes_to_420() {
+        init();
+        let Some(found) = codec::encoder::find_by_name("libx265") else {
+            eprintln!("no libx265 here; skipping");
+            return;
+        };
+        let (w, h) = (256u32, 144u32);
+        let mut video = codec::Context::new_with_codec(found)
+            .encoder()
+            .video()
+            .unwrap();
+        video.set_width(w);
+        video.set_height(h);
+        video.set_format(Pixel::YUV444P);
+        video.set_time_base(Rational::new(1, 30));
+        video.set_frame_rate(Some(Rational::new(30, 1)));
+        video.set_bit_rate(2_000_000);
+        let mut enc = video
+            .open_as_with(
+                found,
+                ff::dict! { "preset" => "ultrafast", "tune" => "zerolatency", "x265-params" => "repeat-headers=1:log-level=none" },
+            )
+            .unwrap();
+        // The pattern as 4:4:4 input.
+        let mut pattern = TestPattern::new(w, h);
+        let frame = pattern.next_frame();
+        let mut src = frame::Video::new(Pixel::BGRA, w, h);
+        let stride = src.stride(0);
+        for y in 0..h as usize {
+            let row = frame.row_slice(0, y as u32, w).to_vec();
+            src.data_mut(0)[y * stride..y * stride + w as usize * 4].copy_from_slice(&row);
+        }
+        let mut sws = Scaler::new(Pixel::BGRA, Pixel::YUV444P, w, h).unwrap();
+        let mut yuv = frame::Video::new(Pixel::YUV444P, w, h);
+        sws.run(&src, &mut yuv).unwrap();
+        let mut packets = Vec::new();
+        for i in 0..3 {
+            yuv.set_pts(Some(i));
+            enc.send_frame(&yuv).unwrap();
+            let mut p = Packet::empty();
+            while enc.receive_packet(&mut p).is_ok() {
+                packets.push(p.data().unwrap_or(&[]).to_vec());
+            }
+        }
+        enc.send_eof().unwrap();
+        let mut p = Packet::empty();
+        while enc.receive_packet(&mut p).is_ok() {
+            packets.push(p.data().unwrap_or(&[]).to_vec());
+        }
+        assert!(!packets.is_empty(), "libx265 produced packets");
+
+        let mut dec = FfmpegDecoder::open(VideoCodec::Hevc).unwrap();
+        let mut shown = None;
+        for data in &packets {
+            if let Some(pic) = dec.decode(data, true).unwrap() {
+                shown = Some(pic);
+            }
+        }
+        if shown.is_none() {
+            dec.decoder.send_eof().unwrap();
+            shown = dec.receive_newest().unwrap();
+        }
+        let pic = shown.expect("a picture from the 4:4:4 stream");
+        match &pic {
+            Picture::Yuv(p) => assert_eq!(p.layout, Planar::I420, "converted to 4:2:0"),
+            Picture::Bgra(_) => panic!("planes expected"),
+        }
+        let out = pic.to_bgra();
+        let reference = TestPattern::new(w, h);
+        for (i, (name, colour)) in PATCHES.iter().enumerate() {
+            let (x, y) = reference.patch_centre(i);
+            let got = out.pixel(x, y);
+            assert!(distance(got, *colour) < 16.0, "{name}: {got:?}");
+        }
     }
 }
 

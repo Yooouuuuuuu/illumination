@@ -11,6 +11,24 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-02
+
+What the reverse measurement run (desktop viewing the laptop) showed: seven
+of ten steps recorded nothing, because the laptop's `hevc_qsv` was fed BGRA
+and encoded **4:4:4** H.265, which the desktop's D3D11VA refused and the
+software decoder returned as YUV444P, which the viewer rejected. Until 0.8.0
+swscale hid this by converting every decoded frame to BGRA.
+
+### Fixed
+
+- **Encoders other than NVENC are fed NV12 (or 4:2:0 planar), never BGRA.**
+  NVENC converts BGRA to 4:2:0 on the GPU; QSV given BGRA encodes 4:4:4.
+- **A decoder that returns something other than 8-bit 4:2:0** (4:4:4, 4:2:2,
+  10-bit) is converted to 4:2:0 once on the CPU, with one warning, instead of
+  failing every frame.
+- **A GPU decoder that fails on a stream hands over to the CPU decoder** once
+  and asks for a keyframe, instead of asking for a keyframe for ever.
+
 ## [0.9.2] - 2026-11-02
 
 What the first measurement run (laptop viewing the desktop, 24 steps) showed

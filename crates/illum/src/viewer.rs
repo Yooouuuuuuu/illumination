@@ -88,9 +88,13 @@ fn protocol(e: impl std::fmt::Display) -> NetError {
 fn open_decoder(
     codec: VideoCodec,
     hardware: bool,
-) -> Result<(Box<dyn VideoDecoder>, String), MediaError> {
+) -> Result<(Box<dyn VideoDecoder>, String, bool), MediaError> {
     Ok(match codec {
-        VideoCodec::Tiles => (Box::new(TilesDecoder::default()), "tiles".to_string()),
+        VideoCodec::Tiles => (
+            Box::new(TilesDecoder::default()),
+            "tiles".to_string(),
+            false,
+        ),
         VideoCodec::Av1 | VideoCodec::Hevc => {
             let probed = hardware
                 && illum_ffmpeg::hardware_decoders()
@@ -110,7 +114,8 @@ fn open_decoder(
                 if dec.is_hardware() { "GPU" } else { "CPU" }
             );
             tracing::info!(target: "media", "Decoding {} with {name}.", codec.name());
-            (Box::new(dec), name)
+            let hw = dec.is_hardware();
+            (Box::new(dec), name, hw)
         }
     })
 }
@@ -194,6 +199,9 @@ fn media_loop(
     let mut next_report = Instant::now() + REPORT_INTERVAL;
     // Created for whichever codec the first frame names; replaced if the host switches.
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
+    let mut decoder_is_hw = false;
+    // Set once a GPU decoder failed on this stream: the CPU decoder is used from then on.
+    let mut cpu_fallback = false;
 
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
         let now = Instant::now();
@@ -262,9 +270,10 @@ fn media_loop(
                         continue;
                     }
                     if decoder.as_ref().is_none_or(|d| d.codec() != meta.codec) {
-                        match open_decoder(meta.codec, hw_decode) {
-                            Ok((d, name)) => {
+                        match open_decoder(meta.codec, hw_decode && !cpu_fallback) {
+                            Ok((d, name, hw)) => {
                                 decoder = Some(d);
+                                decoder_is_hw = hw;
                                 shared.lock().expect("view state lock").decoder_name = Some(name);
                             }
                             Err(e) => {
@@ -306,6 +315,19 @@ fn media_loop(
                             notify();
                         }
                         Ok(None) => awaiting_keyframe = false, // accepted; the picture follows
+                        Err(e) if decoder_is_hw => {
+                            // A GPU decoder that cannot take this stream (a profile it does not
+                            // support, say) would fail every frame for ever: the CPU decoder
+                            // takes over, once, and asks for a fresh keyframe.
+                            tracing::warn!(target: "media", "{e}; decoding {} on the CPU from here on.", meta.codec.name());
+                            decoder = None;
+                            decoder_is_hw = false;
+                            cpu_fallback = true;
+                            awaiting_keyframe = true;
+                            sender.send_control(&ControlMsg::FrameLost {
+                                seq: meta.seq as u64,
+                            });
+                        }
                         Err(e) => {
                             tracing::warn!(target: "media", "Frame {} not decoded: {e}; asking for a keyframe.", meta.seq);
                             awaiting_keyframe = true;
