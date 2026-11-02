@@ -266,6 +266,7 @@ mod tests {
     fn second(unix_s: u64, shown: u32, latency: f32) -> SecondRecord {
         SecondRecord {
             unix_s,
+            t: unix_s as u32,
             shown,
             frames: shown,
             decoded: shown,
@@ -307,7 +308,11 @@ mod tests {
         let rows = rows(&report);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].phase, Phase::Still);
-        assert_eq!(rows[0].seconds, 18, "two edge seconds dropped");
+        assert_eq!(
+            rows[0].seconds, 17,
+            "two edge seconds and the step's first three dropped"
+        );
+        assert_eq!(rows[1].seconds, 18);
         assert_eq!(rows[1].fps_shown, 58.0);
         assert_eq!(rows[2].fps_shown, 60.0);
         assert_eq!(rows[2].latency_p50, Some(21.0));

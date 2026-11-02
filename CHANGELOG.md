@@ -11,6 +11,13 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-11-02
+
+### Fixed
+
+- The report's unit test, left failing by 0.9.6 (its synthetic seconds had
+  no step time).
+
 ## [0.9.6] - 2026-11-02
 
 ### Changed
