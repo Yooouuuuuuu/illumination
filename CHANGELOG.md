@@ -11,6 +11,15 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-11-02
+
+### Added
+
+- `docs/testing/results-2026-11-02.md`: the four measurement runs organised —
+  the pipeline stage by stage in both directions, the link's ceiling, what
+  each setting costs, the faults the runs found, what is still open, and what
+  the data says about the controllers.
+
 ## [0.9.7] - 2026-11-02
 
 ### Fixed

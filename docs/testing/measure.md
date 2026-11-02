@@ -120,3 +120,9 @@ illum report .\folder-with-json-files
 ```
 
 `--fixed` is also useful on its own, to hold a quality while looking at something.
+
+## Results so far
+
+- [2026-11-02](results-2026-11-02.md): four runs between the desktop and the laptop at 1080p and
+  1440p; the pipeline stage by stage, the link's ceiling, what each setting costs, the faults the
+  runs found, and what they say about the controllers.
