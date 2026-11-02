@@ -21,7 +21,9 @@ param(
     # Pause between steps, so the host finishes the previous session first.
     [int]$Pause = 3,
     # Don't ask for the host's sound.
-    [switch]$Mute
+    [switch]$Mute,
+    # Which of the host's displays to stream (the one `illum workload --screen N` fills).
+    [int]$Screen = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,7 +45,7 @@ foreach ($s in $steps) {
     $i++
     $secs = if ($Seconds -gt 0) { $Seconds } else { [int]$s.seconds }
     $report = Join-Path $Out "$($s.name).json"
-    $args = @("view", $Target, "--fixed", "--view-only",
+    $args = @("view", $Target, "--fixed", "--view-only", "--screen", $Screen,
         "--duration", $secs, "--report", $report, "--label", $s.name,
         "--codec", $s.codec,
         "--max-bitrate", $s.bitrate, "--max-fps", $s.fps,

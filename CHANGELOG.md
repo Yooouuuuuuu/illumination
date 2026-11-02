@@ -11,6 +11,14 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-02
+
+### Added
+
+- `illum workload --screen N` fills monitor N instead of the first, so the
+  host's own desktop stays usable during a run; `scripts/measure.ps1 -Screen N`
+  makes the viewer stream that display.
+
 ## [0.9.0] - 2026-11-02
 
 Measurement runs: the simulated-link harness, on the real link. The ladder

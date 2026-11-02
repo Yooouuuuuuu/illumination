@@ -16,6 +16,10 @@ illum --service              # as usual
 illum workload               # a full-screen window with the known content; Esc closes it
 ```
 
+With several monitors, `illum workload --screen 1` fills the second one and leaves the first
+usable; the viewer must then stream that display too (`measure.ps1 -Screen 1`, or `view
+--screen 1`). The host log names the display it captures.
+
 The workload cycles on the wall clock, so the viewer knows the phase without being told:
 
 | seconds of each minute | phase | what the screen does |

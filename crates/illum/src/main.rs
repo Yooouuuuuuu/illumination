@@ -152,7 +152,11 @@ enum Command {
     },
     /// Show the measurement workload full screen on this machine (the host side of a
     /// measurement run): still, fine detail and full motion, 20 s each, on the wall clock.
-    Workload,
+    Workload {
+        /// Which monitor to fill (0 = primary); the viewer streams it with `view --screen N`.
+        #[arg(long, default_value_t = 0)]
+        screen: usize,
+    },
     /// Turn a folder of `view --report` files into a Markdown table.
     Report {
         /// Folder with the JSON files one run wrote.
@@ -334,8 +338,8 @@ fn main() -> std::process::ExitCode {
             };
             run_view(&runtime, &home, target, options)
         }
-        Some(Command::Workload) if cli.role() == Role::Frontend => {
-            illum_ui::run_workload().map_err(anyhow::Error::msg)
+        Some(Command::Workload { screen }) if cli.role() == Role::Frontend => {
+            illum_ui::run_workload(*screen).map_err(anyhow::Error::msg)
         }
         _ => runtime.block_on(run(cli)),
     };
@@ -369,7 +373,7 @@ async fn run(cli: Cli) -> Result<()> {
         (Role::Frontend, Some(Command::Connect { target, pings })) => {
             run_connect(&home, &target, pings).await
         }
-        (Role::Frontend, Some(Command::View { .. } | Command::Workload)) => {
+        (Role::Frontend, Some(Command::View { .. } | Command::Workload { .. })) => {
             unreachable!("handled in main")
         }
         (Role::Frontend, Some(Command::Report { dir, out })) => {

@@ -22,6 +22,8 @@ struct App {
     workload: Option<Workload>,
     next_frame: Instant,
     last_phase: Option<Phase>,
+    /// Which monitor to fill (0 = the first the system lists).
+    screen: usize,
 }
 
 impl App {
@@ -63,9 +65,42 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        // Monitors in the system's order, primary first where the platform says so; the
+        // host's `illum displays` numbers them the same way on Windows, and the window is
+        // unmistakable on screen in any case.
+        let mut monitors: Vec<_> = event_loop.available_monitors().collect();
+        if let Some(primary) = event_loop.primary_monitor()
+            && let Some(i) = monitors.iter().position(|m| *m == primary)
+            && i != 0
+        {
+            let p = monitors.remove(i);
+            monitors.insert(0, p);
+        }
+        let monitor = monitors.get(self.screen).cloned().or_else(|| {
+            tracing::warn!(
+                target: "workload",
+                "No screen {} here ({} found); using the first.",
+                self.screen,
+                monitors.len()
+            );
+            monitors.first().cloned()
+        });
+        if let Some(m) = &monitor {
+            let (pos, size) = (m.position(), m.size());
+            tracing::info!(
+                target: "workload",
+                "Filling screen {}: {} ({}x{} at {},{}).",
+                self.screen,
+                m.name().unwrap_or_default(),
+                size.width,
+                size.height,
+                pos.x,
+                pos.y
+            );
+        }
         let attrs = Window::default_attributes()
             .with_title("Illumination workload (Esc closes)")
-            .with_fullscreen(Some(Fullscreen::Borderless(None)));
+            .with_fullscreen(Some(Fullscreen::Borderless(monitor)));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -106,14 +141,16 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Runs the workload window until it is closed (Esc). Must be called on the main thread.
-pub fn run_workload() -> Result<(), String> {
+/// Runs the workload window on monitor `screen` until it is closed (Esc). Must be called on
+/// the main thread.
+pub fn run_workload(screen: usize) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     let mut app = App {
         window: None,
         workload: None,
         next_frame: Instant::now(),
         last_phase: None,
+        screen,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
