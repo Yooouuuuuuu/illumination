@@ -130,6 +130,36 @@ enum Command {
         /// Draw the window on the CPU (the default converts, scales and presents on the GPU).
         #[arg(long)]
         software_render: bool,
+        /// Measurement run: the host streams at exactly --max-bitrate, --max-fps, --fec-min and
+        /// --scale, with no adaptation (docs/testing/measure.md).
+        #[arg(long)]
+        fixed: bool,
+        /// Resolution as a percentage of the host display (with --fixed; default native).
+        #[arg(long, default_value_t = 100)]
+        scale: u32,
+        /// Which codec to offer: av1 (AV1 where both sides can, else H.265), hevc, or tiles.
+        #[arg(long, value_enum)]
+        codec: Option<CodecChoice>,
+        /// Close the window after this many seconds.
+        #[arg(long, value_name = "SECONDS")]
+        duration: Option<u64>,
+        /// Write per-second records of the session to this JSON file when it ends.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
+        /// Name of the step in the report (default: the report file's name).
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Show the measurement workload full screen on this machine (the host side of a
+    /// measurement run): still, fine detail and full motion, 20 s each, on the wall clock.
+    Workload,
+    /// Turn a folder of `view --report` files into a Markdown table.
+    Report {
+        /// Folder with the JSON files one run wrote.
+        dir: PathBuf,
+        /// Where to write the table (default: report.md inside the folder).
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
     /// List this machine's displays.
     Displays,
@@ -144,6 +174,13 @@ enum Command {
         /// The address exactly as you connected to it, e.g. 100.100.101.1:7171
         address: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CodecChoice {
+    Av1,
+    Hevc,
+    Tiles,
 }
 
 impl Cli {
@@ -265,12 +302,22 @@ fn main() -> std::process::ExitCode {
             mute,
             software_decode,
             software_render,
+            fixed,
+            scale,
+            codec,
+            duration,
+            report,
+            label,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
                 keyboard: *keyboard,
                 view_only: *view_only,
                 gpu: !*software_render,
+                codec: *codec,
+                duration: duration.map(Duration::from_secs),
+                report: report.clone(),
+                label: label.clone(),
                 params: ViewParams {
                     max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
                     max_fps: *max_fps,
@@ -279,10 +326,16 @@ fn main() -> std::process::ExitCode {
                     latency_limit_ms: *latency_limit,
                     audio: !*mute,
                     hw_decode: !*software_decode,
+                    fixed: *fixed,
+                    scale_percent: *scale,
+                    record: report.is_some(),
                     ..ViewParams::new(*screen)
                 },
             };
             run_view(&runtime, &home, target, options)
+        }
+        Some(Command::Workload) if cli.role() == Role::Frontend => {
+            illum_ui::run_workload().map_err(anyhow::Error::msg)
         }
         _ => runtime.block_on(run(cli)),
     };
@@ -316,7 +369,22 @@ async fn run(cli: Cli) -> Result<()> {
         (Role::Frontend, Some(Command::Connect { target, pings })) => {
             run_connect(&home, &target, pings).await
         }
-        (Role::Frontend, Some(Command::View { .. })) => unreachable!("handled in main"),
+        (Role::Frontend, Some(Command::View { .. } | Command::Workload)) => {
+            unreachable!("handled in main")
+        }
+        (Role::Frontend, Some(Command::Report { dir, out })) => {
+            let reports = illum::measure::load_dir(&dir)
+                .with_context(|| format!("reading {}", dir.display()))?;
+            if reports.is_empty() {
+                bail!("no report files (*.json) in {}", dir.display());
+            }
+            let table = illum::measure::markdown(&reports);
+            let out = out.unwrap_or_else(|| dir.join("report.md"));
+            std::fs::write(&out, &table).with_context(|| format!("writing {}", out.display()))?;
+            print!("{table}");
+            println!("\nWritten to {}.", out.display());
+            Ok(())
+        }
         (Role::Frontend, Some(Command::Displays)) => list_displays(),
         (Role::Frontend, Some(Command::Codecs)) => {
             list_codecs();
@@ -570,6 +638,13 @@ struct ViewArgs {
     view_only: bool,
     /// Present on the GPU (false: `--software-render`).
     gpu: bool,
+    /// Restrict what is offered to the host (`--codec`).
+    codec: Option<CodecChoice>,
+    /// Close the window after this long (`--duration`).
+    duration: Option<Duration>,
+    /// Write the per-second records here when the window closes (`--report`).
+    report: Option<PathBuf>,
+    label: Option<String>,
     params: ViewParams,
 }
 
@@ -583,9 +658,17 @@ fn run_view(
     let mut ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
     // Tell the host which lossy codecs we can decode (AV1 only in hardware); it picks AV1,
-    // else H.265, else tiles.
-    ep.capabilities
-        .extend(illum_ffmpeg::probe().decode_capabilities(args.params.hw_decode));
+    // else H.265, else tiles. `--codec` narrows the offer for measurement runs.
+    let decode_caps = illum_ffmpeg::probe().decode_capabilities(args.params.hw_decode);
+    let offered: Vec<String> = match args.codec {
+        None | Some(CodecChoice::Av1) => decode_caps,
+        Some(CodecChoice::Hevc) => decode_caps
+            .into_iter()
+            .filter(|c| c == "dec:hevc")
+            .collect(),
+        Some(CodecChoice::Tiles) => Vec::new(),
+    };
+    ep.capabilities.extend(offered);
     println!("Connecting to {}…", normalize_target(target));
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));
@@ -612,6 +695,17 @@ fn run_view(
     {
         shared.lock().expect("view state lock").local_layout =
             Some(illum_win::own_keyboard_layout());
+    }
+    let started_unix = illum_ui::measure::unix_now().as_secs();
+    if args.report.is_some() {
+        shared.lock().expect("view state lock").recorder = Some(illum_ui::Recorder::default());
+    }
+    if let Some(duration) = args.duration {
+        let waker = waker.clone();
+        runtime.spawn(async move {
+            tokio::time::sleep(duration).await;
+            waker.wake(UiEvent::Exit);
+        });
     }
     let sender = conn.sender();
     let session = {
@@ -653,6 +747,7 @@ fn run_view(
     };
     let ack = sender.clone();
     let mode = if with_input { "" } else { " (view only)" };
+    let state_for_report = shared.clone();
     window
         .run(
             shared,
@@ -675,6 +770,49 @@ fn run_view(
     // Window closed (or the session ended): say goodbye and wait briefly for a clean close.
     sender.send_control(&ControlMsg::ScreenStop);
     sender.send_control(&ControlMsg::Bye);
+    if let Some(path) = &args.report {
+        let mut state = state_for_report.lock().expect("view state lock");
+        let seconds = state.recorder.take().map(|r| r.seconds).unwrap_or_default();
+        let p = &args.params;
+        let report = illum::measure::Report {
+            label: args.label.clone().unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            }),
+            viewer: device_name(),
+            host: hello.device_name.clone(),
+            started_unix,
+            codec: state.codec.map_or("none", |c| c.name()).to_string(),
+            decoder: state.decoder_name.clone().unwrap_or_default(),
+            presenter: state.presenter_name.clone().unwrap_or_default(),
+            settings: illum::measure::Settings {
+                bitrate_kbps: p.max_bitrate_kbps,
+                fps: p.max_fps,
+                fec_min: p.fec_min,
+                fec_max: p.fec_max,
+                latency_limit_ms: p.latency_limit_ms,
+                scale_percent: p.scale_percent,
+                fixed: p.fixed,
+                hw_decode: p.hw_decode,
+                gpu_render: args.gpu,
+                audio: p.audio,
+                duration_s: args.duration.map_or(0, |d| d.as_secs()),
+            },
+            seconds,
+        };
+        drop(state);
+        report
+            .write(path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "Report: {} ({} seconds recorded, {} with {}).",
+            path.display(),
+            report.seconds.len(),
+            report.codec,
+            report.decoder
+        );
+    }
     // The timer must be created inside the runtime, hence the async block.
     match runtime.block_on(async { tokio::time::timeout(Duration::from_secs(3), session).await }) {
         Ok(Ok(Ok(()))) | Err(_) => Ok(()),

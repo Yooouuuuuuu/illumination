@@ -18,7 +18,7 @@ use illum_core::protocol::{Channel, ControlMsg};
 use illum_ffmpeg::opus::OpusEncoder;
 use illum_media::adapt::{
     Adapter, DEFAULT_FEC_CEILING, DEFAULT_FEC_FLOOR, Grade, KEYFRAME_FEC_PERCENT, Limits, Rung,
-    SecondReport, encoder_bitrate,
+    SecondReport, encoder_bitrate, grade,
 };
 use illum_media::audio::{AudioSource, FRAME_VALUES, Grouper};
 use illum_media::clock::now_us;
@@ -62,10 +62,14 @@ pub struct StreamSettings {
     pub latency_limit_ms: u32,
     /// The viewer wants sound.
     pub audio: bool,
+    /// Measurement run: no adaptation, stream at the top values and `scale_percent` throughout.
+    pub fixed: bool,
+    pub scale_percent: u32,
 }
 
 impl StreamSettings {
     /// Zero means "the default"; the host caps the bitrate at its own ceiling.
+    #[allow(clippy::too_many_arguments)] // mirrors the ScreenStart fields
     pub fn from_request(
         max_bitrate_kbps: u32,
         max_fps: u32,
@@ -73,6 +77,8 @@ impl StreamSettings {
         fec_max: u32,
         latency_limit_ms: u32,
         audio: bool,
+        fixed: bool,
+        scale_percent: u32,
     ) -> StreamSettings {
         let kbps = if max_bitrate_kbps == 0 {
             DEFAULT_MAX_BITRATE_KBPS
@@ -104,6 +110,24 @@ impl StreamSettings {
                 latency_limit_ms
             },
             audio,
+            fixed,
+            scale_percent: if scale_percent == 0 {
+                100
+            } else {
+                scale_percent.clamp(25, 100)
+            },
+        }
+    }
+
+    /// The one rung a fixed run streams at.
+    fn fixed_target(&self) -> Target {
+        Target {
+            rung: Rung {
+                bitrate_bps: self.max_bitrate_bps,
+                fps: self.max_fps,
+                scale_percent: self.scale_percent,
+            },
+            fec_percent: self.fec_floor,
         }
     }
 }
@@ -344,6 +368,8 @@ struct MediaLink {
     want_keyframe: Arc<AtomicBool>,
     adapter: Arc<Mutex<Adapter>>,
     target: Arc<Mutex<Target>>,
+    /// A measurement run: the target never moves and the controllers are not consulted.
+    fixed: bool,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -371,20 +397,34 @@ impl MediaLink {
             settings.fec_floor,
             settings.fec_ceiling,
         );
-        let target = Arc::new(Mutex::new(Target {
-            rung: adapter.rung(),
-            fec_percent: adapter.fec_percent(),
+        let target = Arc::new(Mutex::new(if settings.fixed {
+            settings.fixed_target()
+        } else {
+            Target {
+                rung: adapter.rung(),
+                fec_percent: adapter.fec_percent(),
+            }
         }));
-        tracing::info!(
-            target: "media",
-            "Ladder: {} rungs from {} down to {}; parity {}–{} %; viewer latency limit {} ms.",
-            adapter.ladder().len(),
-            adapter.ladder().rung(0),
-            adapter.ladder().rung(adapter.ladder().len() - 1),
-            settings.fec_floor,
-            settings.fec_ceiling,
-            settings.latency_limit_ms
-        );
+        if settings.fixed {
+            let t = *target.lock().expect("target lock");
+            tracing::info!(
+                target: "media",
+                "Fixed for measurement: {} with parity {} %, no adaptation.",
+                t.rung,
+                t.fec_percent
+            );
+        } else {
+            tracing::info!(
+                target: "media",
+                "Ladder: {} rungs from {} down to {}; parity {}–{} %; viewer latency limit {} ms.",
+                adapter.ladder().len(),
+                adapter.ladder().rung(0),
+                adapter.ladder().rung(adapter.ladder().len() - 1),
+                settings.fec_floor,
+                settings.fec_ceiling,
+                settings.latency_limit_ms
+            );
+        }
         let adapter = Arc::new(Mutex::new(adapter));
 
         // Learns the viewer's address from its punches; exits when the hub drops the channel.
@@ -530,10 +570,18 @@ impl MediaLink {
                     let mut last_keyframe: Option<Instant> = None;
                     // Frame-rate cap: the next capture time a frame is due.
                     let mut due_us: u64 = 0;
+                    // Once a second, what happened here, for the viewer's measurement records.
+                    let mut stats = HostCounters::default();
+                    let mut next_stats = Instant::now() + Duration::from_secs(1);
                     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
+                        if Instant::now() >= next_stats {
+                            next_stats += Duration::from_secs(1);
+                            sender.send_control(&std::mem::take(&mut stats).message());
+                        }
                         let Some((frame, captured_us)) = latest.take_wait(Duration::from_millis(50)) else {
                             continue;
                         };
+                        stats.taken += 1;
                         // Apply what the controllers decided.
                         let current = *target.lock().expect("target lock");
                         let enc_bps = encoder_bitrate(current.rung.bitrate_bps, current.fec_percent);
@@ -558,6 +606,7 @@ impl MediaLink {
                         // cost a third of the frames at 60 fps.
                         let period_us = 1_000_000 / u64::from(current.rung.fps.max(1));
                         if captured_us + period_us / 2 < due_us {
+                            stats.capped += 1;
                             continue;
                         }
                         due_us = due_us.max(captured_us.saturating_sub(period_us / 2)) + period_us;
@@ -611,7 +660,12 @@ impl MediaLink {
                         for encoded in frames {
                             if encoded.keyframe {
                                 last_keyframe = Some(Instant::now());
+                                stats.keyframes += 1;
+                                stats.keyframe_bytes += encoded.data.len() as u64;
                             }
+                            stats.sent += 1;
+                            stats.bytes += encoded.data.len() as u64;
+                            stats.encode_us += u64::from(encoded.encode_us);
                             let meta = FrameMeta {
                                 codec: codec_used,
                                 keyframe: encoded.keyframe,
@@ -659,6 +713,7 @@ impl MediaLink {
             want_keyframe,
             adapter,
             target,
+            fixed: settings.fixed,
             threads,
         }
     }
@@ -669,6 +724,18 @@ impl MediaLink {
 
     /// The rung and parity in use, for the viewer's title bar.
     fn quality(&self, reason: &str) -> ControlMsg {
+        if self.fixed {
+            let t = *self.target.lock().expect("target lock");
+            return ControlMsg::Quality {
+                rung: 0,
+                rungs: 1,
+                bitrate_kbps: (t.rung.bitrate_bps / 1000) as u32,
+                fps: t.rung.fps,
+                scale_percent: t.rung.scale_percent,
+                fec_percent: t.fec_percent,
+                reason: reason.to_string(),
+            };
+        }
         let adapter = self.adapter.lock().expect("adapter lock");
         let rung = adapter.rung();
         ControlMsg::Quality {
@@ -683,8 +750,19 @@ impl MediaLink {
     }
 
     /// Feeds one second of the viewer's report to the controllers. Returns the grade and, when
-    /// something changed, the new `Quality` to tell the viewer.
+    /// something changed, the new `Quality` to tell the viewer. A fixed run only grades.
     fn report(&self, report: SecondReport) -> (Grade, Option<ControlMsg>) {
+        if self.fixed {
+            let fps = self.target.lock().expect("target lock").rung.fps;
+            let g = grade(
+                report.shown,
+                report.within_limit,
+                report.decoded,
+                report.frames_lost,
+                fps,
+            );
+            return (g, None);
+        }
         let decision = self.adapter.lock().expect("adapter lock").observe(report);
         let changed = decision.rung.is_some() || decision.fec_percent.is_some();
         if changed {
@@ -697,6 +775,32 @@ impl MediaLink {
         let grade = decision.grade.unwrap_or(Grade::Blank);
         let quality = changed.then(|| self.quality(&decision.reason));
         (grade, quality)
+    }
+}
+
+/// One second of the media thread's doings, sent to the viewer as `HostStats`.
+#[derive(Debug, Default)]
+struct HostCounters {
+    taken: u32,
+    capped: u32,
+    sent: u32,
+    bytes: u64,
+    keyframes: u32,
+    keyframe_bytes: u64,
+    encode_us: u64,
+}
+
+impl HostCounters {
+    fn message(self) -> ControlMsg {
+        ControlMsg::HostStats {
+            taken: self.taken,
+            capped: self.capped,
+            sent: self.sent,
+            bytes: self.bytes,
+            keyframes: self.keyframes,
+            keyframe_bytes: self.keyframe_bytes,
+            encode_us: self.encode_us,
+        }
     }
 }
 
@@ -761,6 +865,8 @@ pub async fn serve_session(
                 fec_max,
                 latency_limit_ms,
                 audio,
+                fixed,
+                scale_percent,
             } => {
                 capture = None; // stop any previous stream first
                 link = None;
@@ -774,6 +880,8 @@ pub async fn serve_session(
                             fec_max,
                             latency_limit_ms,
                             audio,
+                            fixed,
+                            scale_percent,
                         );
                         let viewer_caps = conn
                             .peer_hello

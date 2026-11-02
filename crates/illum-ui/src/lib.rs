@@ -9,8 +9,12 @@
 
 pub mod gpu;
 pub mod input;
+pub mod measure;
+pub mod workload;
 
 pub use input::{InputOut, KeyboardMode};
+pub use measure::{HostSecond, Recorder, SecondRecord};
+pub use workload::run_workload;
 
 use gpu::WindowPresenter;
 use illum_core::input::{InputMsg, Key, MouseButton};
@@ -204,6 +208,11 @@ pub struct ViewState {
     /// Keyboard layouts, for the Auto keyboard mode.
     pub host_layout: Option<String>,
     pub local_layout: Option<String>,
+    /// Per-second records, kept only for measurement runs (`--report`).
+    pub recorder: Option<Recorder>,
+    /// Which decoder and which presenter are in use (for the report's header).
+    pub decoder_name: Option<String>,
+    pub presenter_name: Option<String>,
 }
 
 impl Default for ViewState {
@@ -225,6 +234,9 @@ impl Default for ViewState {
             status: None,
             host_layout: None,
             local_layout: None,
+            recorder: None,
+            decoder_name: None,
+            presenter_name: None,
         }
     }
 }
@@ -481,10 +493,12 @@ impl App {
                 .map(|host_now| (host_now - capture_us as i64) as f64 / 1000.0)
         });
         if new_frame.is_some() {
+            let draw_us = draw_start.elapsed().as_micros().min(u64::MAX as u128) as u64;
             state.mark_presented(latency_ms);
-            state
-                .stats
-                .drawn(draw_start.elapsed().as_micros().min(u64::MAX as u128) as u64);
+            state.stats.drawn(draw_us);
+            if let Some(r) = state.recorder.as_mut() {
+                r.presented(latency_ms, draw_us, Instant::now());
+            }
         }
         let rtt = state.clock.last_rtt;
         let title = if let Some(status) = state.status.clone() {
@@ -644,9 +658,15 @@ impl ApplicationHandler<UiEvent> for App {
             Err("switched off".to_string())
         };
         let backend = match gpu {
-            Ok(presenter) => Backend::Gpu(Box::new(presenter)),
+            Ok(presenter) => {
+                self.shared.lock().expect("view state lock").presenter_name =
+                    Some(presenter.name());
+                Backend::Gpu(Box::new(presenter))
+            }
             Err(e) => {
                 tracing::warn!(target: "viewer", "GPU presentation {e}; drawing on the CPU");
+                self.shared.lock().expect("view state lock").presenter_name =
+                    Some("CPU (softbuffer)".to_string());
                 let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
                 Backend::Cpu(
                     softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface"),

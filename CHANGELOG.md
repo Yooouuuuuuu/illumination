@@ -11,6 +11,51 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-02
+
+Measurement runs: the simulated-link harness, on the real link. The ladder
+and parity numbers get tuned from these tables rather than from how a
+session felt (docs/testing/measure.md).
+
+### Added
+
+- **`illum view --fixed`**: the host streams at exactly `--max-bitrate`,
+  `--max-fps`, `--fec-min` and the new `--scale` percent for the whole
+  session; the controllers are not consulted (`ScreenStart.fixed`,
+  `scale_percent`; protocol 9). `--codec av1|hevc|tiles` narrows what the
+  viewer offers, `--duration N` closes the window after N seconds, and
+  `--report file.json --label name` writes every second of the session:
+  frames, bytes, keyframes, per-frame latency / decode / draw / encode
+  samples, longest stall, rtt, loss, repairs, frames lost, plus the host's own
+  per-second numbers.
+- **`HostStats`** (host → viewer, once a second): frames out of capture,
+  skipped by the frame-rate cap, sent (and bytes), keyframes (and bytes),
+  encoder time. The report can tell a still screen from a stalled link.
+- **`illum workload`**: a full-screen window for the host side of a run, on
+  the wall clock: 20 s still (one change per second), 20 s scrolling fine
+  text, 20 s full motion, with a seven-segment clock in the corner (seconds
+  while still, milliseconds otherwise, for slow-motion camera measurements).
+- **`illum report <folder>`**: one Markdown table from a folder of report
+  files, one row per step and phase (the first two seconds of each phase
+  left out): fps, Mb/s, latency p50 / p95 / max, stall, decode, draw, encode,
+  rtt, loss, frames lost, keyframes, host taken / capped / sent.
+- **`scripts/measure.ps1`** with `scripts/measure-plan.csv`: 24 steps of
+  60 s (bitrate sweeps per codec, decode and render variants, frame rate,
+  parity and scale variants, tiles), one fresh session per step, then the
+  table. Run it from each machine for the two directions.
+- Tests: the workload phases and content, the recorder, the report
+  aggregation and JSON round trip, and an in-process fixed session that holds
+  its settings, scales to 50 % and records seconds with host stats.
+
+### Fixed
+
+- The loopback tests no longer fail now and then with WSAEACCES (10013) when
+  binding the media port. With port 0, Windows picked the TCP port
+  sequentially, and once it was inside a UDP-reserved block (Hyper-V, WSL)
+  every retry landed in the same block. The listener now draws the shared
+  port at random from the dynamic range and keeps a refused port's TCP
+  listener until a pair works (45 binds × 15 runs without a failure).
+
 ## [0.8.0] - 2026-11-02
 
 M8, the viewer half: the picture no longer touches the viewer's CPU. Built

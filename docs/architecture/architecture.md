@@ -507,6 +507,15 @@ scripted over time, and runs fixed scenarios in CI:
 | slow degradation over a minute | share of frames over L |
 | random loss 1 / 3 / 10 %, burst loss | frames lost after repair (→ 0); FEC bytes spent; time to converge |
 
+**On the real link (v0.9.0):** the same discipline without the model. `illum view --fixed`
+asks the host for one rung and one parity for the whole session (no controller moves), the
+host shows `illum workload` (still / fine detail / full motion, 20 s each on the wall clock),
+`--report` keeps every second and every per-frame latency, decode and draw sample, and
+`illum report` makes one table per run, grouped by phase. A plan (`scripts/measure-plan.csv`,
+run by `scripts/measure.ps1`) sweeps bitrate, codec, decode and render path, frame rate,
+parity and scale; the runs in both directions are what the tunables below are decided from.
+See `docs/testing/measure.md`.
+
 One parameter changes per run; everything else stays fixed. The tunables, with their defaults:
 
 | Parameter | Default |
@@ -711,7 +720,8 @@ logs `Migrating V0 -> V1`).
   show where the time goes. *(v0.3.0: the title bar shows fps, bandwidth, latency, encode time
   and RTT; `-v` logs it once a second.)*
 - The per-second grades, rung changes and FEC steps are logged, so a bad session can be read back
-  second by second.
+  second by second. *(v0.9.0: `view --report` writes the per-second records as JSON, with the
+  host's own per-second `HostStats`; `illum report` tabulates a folder of them, §5.7.)*
 - Each role writes a trace log with a component prefix, as AnyDesk's `ad.trace` does.
 - One-click diagnostics bundle containing:
   - connection details

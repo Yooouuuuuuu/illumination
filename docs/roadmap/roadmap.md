@@ -242,7 +242,9 @@ first): today a copy on one side is not seen on the other at all. Discussion sta
   decoders return each picture in the call that fed it (no lag).
 - HDR tone-mapping
 - optional reduction of host animations (AnyDesk's `taskbar_animation_modifier`)
-- diagnostics bundle
+- diagnostics bundle. **Measurement runs done in v0.9.0** (`view --fixed --duration --report`,
+  `illum workload`, `illum report`, `scripts/measure.ps1`, docs/testing/measure.md): the tuning
+  of the ladder and parity numbers is decided from those tables, in both directions.
 - try a **4:4:4 mode** (H.265) from the laptop on a page of small text, and decide whether it
   becomes a ladder rung or a user preference
 - decide the remaining open questions from architecture §13: whether the tile codec keeps a

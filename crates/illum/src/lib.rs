@@ -4,4 +4,5 @@
 pub mod audio;
 pub mod host;
 pub mod input;
+pub mod measure;
 pub mod viewer;

@@ -18,6 +18,7 @@ pub mod scale;
 pub mod sim;
 pub mod source;
 pub mod tiles;
+pub mod workload;
 
 pub use frame::Frame;
 

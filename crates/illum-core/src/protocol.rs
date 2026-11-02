@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
@@ -115,6 +115,27 @@ pub enum ControlMsg {
         latency_limit_ms: u32,
         /// Whether the viewer wants the host's sound (architecture §8).
         audio: bool,
+        /// Measurement runs: no adaptation; stream at exactly `max_bitrate_kbps`, `max_fps`,
+        /// `fec_min` and `scale_percent` for the whole session.
+        #[serde(default)]
+        fixed: bool,
+        /// Resolution as a percentage of the display's (0 = native); with `fixed`.
+        #[serde(default)]
+        scale_percent: u32,
+    },
+    /// Host → controller, once a second: what the host side did with the screen, so a
+    /// measurement report can tell "the screen did not change" from "the link did not carry
+    /// it". `taken` frames came out of capture, `capped` were skipped by the frame-rate cap,
+    /// `sent` were encoded and sent in `bytes`, of which `keyframes` in `keyframe_bytes`;
+    /// `encode_us` is the encoder time summed over the sent frames.
+    HostStats {
+        taken: u32,
+        capped: u32,
+        sent: u32,
+        bytes: u64,
+        keyframes: u32,
+        keyframe_bytes: u64,
+        encode_us: u64,
     },
     /// Host → controller: the rung and parity in use (shown in the title bar). Sent when the
     /// stream starts and whenever the controllers change something.
@@ -227,6 +248,17 @@ mod tests {
                 fec_max: 30,
                 latency_limit_ms: 50,
                 audio: true,
+                fixed: true,
+                scale_percent: 75,
+            },
+            ControlMsg::HostStats {
+                taken: 61,
+                capped: 1,
+                sent: 60,
+                bytes: 400_000,
+                keyframes: 1,
+                keyframe_bytes: 90_000,
+                encode_us: 240_000,
             },
             ControlMsg::Quality {
                 rung: 2,

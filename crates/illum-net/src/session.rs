@@ -339,31 +339,61 @@ impl Listener {
     pub async fn bind(ep: &Endpoint, addrs: &[IpAddr], port: u16) -> Result<Listener> {
         let acceptor = TlsAcceptor::from(tls::server_config(&ep.identity)?);
         let (tx, incoming) = mpsc::channel(16);
-        // With port 0 the system picks the TCP port, and the UDP side must take the same number.
-        // Windows reserves scattered port ranges (Hyper-V, WSL) separately for TCP and UDP, so
-        // an ephemeral TCP port can land in a UDP-reserved range: try a few times.
-        let attempts = if port == 0 { 20 } else { 1 };
+        // With port 0 (tests) TCP and UDP must share one number that both can bind. Windows
+        // reserves scattered blocks of ports (Hyper-V, WSL), separately for TCP and UDP, and
+        // refuses them with WSAEACCES (10013); its own ephemeral choice walks sequentially, so
+        // once it is inside a UDP-reserved block the next twenty picks are too. Draw the port
+        // at random from the dynamic range instead, and keep a refused port's TCP listener
+        // until a pair works, so the same number is not handed straight back.
+        let attempts = if port == 0 { 40 } else { 1 };
+        let mut seed = u64::from(std::process::id())
+            ^ std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64)
+            | 1;
         let mut last_err = None;
         let mut bound = None;
+        let mut refused = Vec::new();
         for _ in 0..attempts {
+            let chosen = if port == 0 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                49152 + (seed % (65535 - 49152 + 1)) as u16
+            } else {
+                port
+            };
             let mut local = Vec::new();
             let mut listeners = Vec::new();
-            let mut chosen = port;
+            let mut tcp_ok = true;
             for ip in addrs {
-                let listener = TcpListener::bind(SocketAddr::new(*ip, chosen)).await?;
-                let addr = listener.local_addr()?;
-                chosen = addr.port();
-                local.push(addr);
-                listeners.push(listener);
+                match TcpListener::bind(SocketAddr::new(*ip, chosen)).await {
+                    Ok(listener) => {
+                        local.push(listener.local_addr()?);
+                        listeners.push(listener);
+                    }
+                    Err(e) => {
+                        last_err = Some(NetError::Io(e));
+                        tcp_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !tcp_ok {
+                continue; // taken or reserved: another number
             }
             match MediaHub::bind(addrs, chosen) {
                 Ok(media) => {
                     bound = Some((local, listeners, media));
                     break;
                 }
-                Err(e) => last_err = Some(e),
+                Err(e) => {
+                    last_err = Some(e);
+                    refused.extend(listeners);
+                }
             }
         }
+        drop(refused);
         let Some((local, listeners, media)) = bound else {
             return Err(last_err.unwrap_or_else(|| {
                 NetError::Io(std::io::Error::other("could not bind the media port"))

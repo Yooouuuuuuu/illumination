@@ -13,7 +13,7 @@ use illum_media::cursor::CursorMsg;
 use illum_media::packets::{Assembled, Reassembler};
 use illum_media::tiles::TilesDecoder;
 use illum_net::{Connection, MediaClient, MediaStream, NetError, Sender};
-use illum_ui::{Quality, Shared};
+use illum_ui::{HostSecond, Quality, Shared};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +50,12 @@ pub struct ViewParams {
     pub audio: bool,
     /// Use the GPU's decoder where it exists (and offer AV1 only then); off = CPU decoding only.
     pub hw_decode: bool,
+    /// Measurement run: the host streams at exactly the values above, no adaptation.
+    pub fixed: bool,
+    /// Resolution as a percentage of the host display (0 = native); with `fixed`.
+    pub scale_percent: u32,
+    /// Keep per-second records (`--report`).
+    pub record: bool,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
     pub media_target: Option<SocketAddr>,
 }
@@ -65,6 +71,9 @@ impl ViewParams {
             latency_limit_ms: 0,
             audio: true,
             hw_decode: true,
+            fixed: false,
+            scale_percent: 0,
+            record: false,
             media_target: None,
         }
     }
@@ -76,9 +85,12 @@ fn protocol(e: impl std::fmt::Display) -> NetError {
 
 /// The GPU decoder when hardware decoding is on and the probe found one for this codec,
 /// otherwise (or if that one will not open after all) the software decoder.
-fn open_decoder(codec: VideoCodec, hardware: bool) -> Result<Box<dyn VideoDecoder>, MediaError> {
+fn open_decoder(
+    codec: VideoCodec,
+    hardware: bool,
+) -> Result<(Box<dyn VideoDecoder>, String), MediaError> {
     Ok(match codec {
-        VideoCodec::Tiles => Box::new(TilesDecoder::default()),
+        VideoCodec::Tiles => (Box::new(TilesDecoder::default()), "tiles".to_string()),
         VideoCodec::Av1 | VideoCodec::Hevc => {
             let probed = hardware
                 && illum_ffmpeg::hardware_decoders()
@@ -92,14 +104,13 @@ fn open_decoder(codec: VideoCodec, hardware: bool) -> Result<Box<dyn VideoDecode
                 }
                 None => illum_ffmpeg::FfmpegDecoder::open(codec)?,
             };
-            tracing::info!(
-                target: "media",
-                "Decoding {} with {} ({}).",
-                codec.name(),
+            let name = format!(
+                "{} ({})",
                 dec.name(),
                 if dec.is_hardware() { "GPU" } else { "CPU" }
             );
-            Box::new(dec)
+            tracing::info!(target: "media", "Decoding {} with {name}.", codec.name());
+            (Box::new(dec), name)
         }
     })
 }
@@ -252,7 +263,10 @@ fn media_loop(
                     }
                     if decoder.as_ref().is_none_or(|d| d.codec() != meta.codec) {
                         match open_decoder(meta.codec, hw_decode) {
-                            Ok(d) => decoder = Some(d),
+                            Ok((d, name)) => {
+                                decoder = Some(d);
+                                shared.lock().expect("view state lock").decoder_name = Some(name);
+                            }
                             Err(e) => {
                                 let mut state = shared.lock().expect("view state lock");
                                 state.status =
@@ -285,6 +299,9 @@ fn media_loop(
                             state.stats.frame_received(data.len(), meta.encode_us);
                             state.stats.decoded(decode_us);
                             state.mark_decoded();
+                            if let Some(r) = state.recorder.as_mut() {
+                                r.frame(data.len(), meta.keyframe, meta.encode_us, decode_us);
+                            }
                             drop(state);
                             notify();
                         }
@@ -319,6 +336,11 @@ fn media_loop(
             let (shown, within_limit, decoded) = {
                 let mut state = shared.lock().expect("view state lock");
                 state.stats.packets(received, lost, repaired);
+                let rtt = state.clock.last_rtt;
+                if let Some(r) = state.recorder.as_mut() {
+                    r.packets(received, lost, repaired, frames_lost);
+                    r.tick(rtt, now);
+                }
                 state.take_presented()
             };
             sender.send_control(&ControlMsg::MediaReport {
@@ -355,6 +377,8 @@ pub async fn run_viewer_session(
         fec_max: params.fec_max,
         latency_limit_ms: params.latency_limit_ms,
         audio: params.audio,
+        fixed: params.fixed,
+        scale_percent: params.scale_percent,
     });
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.
@@ -459,6 +483,27 @@ pub async fn run_viewer_session(
                 }
                 Ok(ControlMsg::KeyboardLayout { id }) => {
                     shared.lock().expect("view state lock").host_layout = Some(id);
+                }
+                Ok(ControlMsg::HostStats {
+                    taken,
+                    capped,
+                    sent,
+                    bytes,
+                    keyframes,
+                    keyframe_bytes,
+                    encode_us,
+                }) => {
+                    if let Some(r) = shared.lock().expect("view state lock").recorder.as_mut() {
+                        r.host(HostSecond {
+                            taken,
+                            capped,
+                            sent,
+                            bytes,
+                            keyframes,
+                            keyframe_bytes,
+                            encode_us,
+                        });
+                    }
                 }
                 Ok(ControlMsg::ScreenError { reason }) => {
                     shared.lock().expect("view state lock").status =

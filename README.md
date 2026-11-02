@@ -68,6 +68,11 @@ own interface.)
 Each role also writes a debug-level log file: `%ProgramData%\Illumination\logs\service.log` on
 the host and `…\viewer.log` on the viewer. Send those when something looks wrong.
 
+**Measuring instead of guessing:** `illum view <host> --fixed …` streams at one quality with no
+adaptation, `--duration N --report file.json` records every second, `illum workload` on the
+host shows a known screen (still, fine detail, full motion), and `illum report <folder>` turns a
+run into a table. `scripts/measure.ps1` runs a whole plan; see `docs/testing/measure.md`.
+
 To check colours, run the host with `--test-pattern`. The top half shows eight patches, left to
 right: **red, green, blue, cyan, magenta, yellow, white, black**.
 
@@ -91,7 +96,10 @@ illum --backend        # per-session worker, started by the service (later miles
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
                        #   --max-bitrate Mb/s, --max-fps, --latency-limit ms, --fec-min/--fec-max %, --mute,
-                       #   --software-decode, --software-render)
+                       #   --software-decode, --software-render; measurement: --fixed, --scale,
+                       #   --codec, --duration, --report, --label)
+illum workload         # the measurement screen, full size (host side); Esc closes it
+illum report <folder>  # table from a folder of --report files
 illum displays         # list this machine's displays
 illum codecs           # which video codecs this machine can encode and decode
 illum connect <host>   # dial a host and measure round-trip time

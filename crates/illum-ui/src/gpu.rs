@@ -595,6 +595,15 @@ impl WindowPresenter {
         &mut self.renderer
     }
 
+    /// "adapter via backend, present mode", for logs and reports.
+    pub fn name(&self) -> String {
+        let info = self.gpu.adapter.get_info();
+        format!(
+            "{} via {:?}, {:?}",
+            info.name, info.backend, self.config.present_mode
+        )
+    }
+
     /// Draws one frame to the window. Returns false when nothing reached the screen (the swap
     /// chain was lost and has been rebuilt; the next draw will show).
     pub fn present(
