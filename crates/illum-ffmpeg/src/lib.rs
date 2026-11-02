@@ -98,9 +98,14 @@ fn encoder_options(name: &str) -> Dictionary {
         }
         d
     } else if name.ends_with("_amf") {
-        ff::dict! { "usage" => "lowlatency", "rc" => "cbr" }
+        // `forced_idr`: a requested keyframe must come out as an IDR picture, flagged as a key
+        // frame; a plain I picture is neither, and the viewer would wait for ever (§5.6).
+        ff::dict! { "usage" => "ultralowlatency", "rc" => "cbr", "forced_idr" => "1", "preanalysis" => "0" }
     } else if name.ends_with("_qsv") {
-        ff::dict! { "preset" => "veryfast" }
+        // `async_depth` 1: QSV's default of 4 hands every frame back four frames late, which
+        // measured as 133 ms at 30 fps and 4 s at 1 fps from the laptop (2026-11-02).
+        // `forced_idr` as for AMF: without it a loss froze the stream until the session ended.
+        ff::dict! { "preset" => "veryfast", "async_depth" => "1", "forced_idr" => "1" }
     } else if name == "libx265" {
         ff::dict! { "preset" => "ultrafast", "tune" => "zerolatency", "forced-idr" => "1" }
     } else {

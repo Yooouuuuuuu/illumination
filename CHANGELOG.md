@@ -11,6 +11,22 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-02
+
+What the second reverse run (desktop viewing the laptop, now with H.265
+flowing) showed about the laptop's `hevc_qsv`.
+
+### Fixed
+
+- **QSV handed every frame back four frames late** (its default `async_depth`):
+  133 ms of latency at 30 fps, 4 s at 1 fps in the still phase. Now
+  `async_depth=1`.
+- **QSV and AMF never produced a key frame on request**: a forced picture
+  came out as a plain I picture, not flagged, so after the first lost frame
+  the viewer waited for a keyframe until the session ended while the host
+  kept sending at full rate (25 s freezes in the run). Now `forced_idr=1` on
+  both, and AMF runs with `usage=ultralowlatency`.
+
 ## [0.9.3] - 2026-11-02
 
 What the reverse measurement run (desktop viewing the laptop) showed: seven
