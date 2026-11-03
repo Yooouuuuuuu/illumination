@@ -26,7 +26,7 @@ use illum_media::audio::AudioSource;
 use illum_media::source::{PatternSource, ScreenSource};
 use illum_net::session::{accept, connect, normalize_target};
 use illum_net::{Endpoint, Identity, Listener, Timeouts, bind};
-use illum_ui::{InputOut, KeyboardMode, Shared, UiEvent, ViewerOptions, ViewerWindow};
+use illum_ui::{InputOut, KeyboardMode, PointerMode, Shared, UiEvent, ViewerOptions, ViewerWindow};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -103,6 +103,12 @@ enum Command {
         /// local (characters as typed here), or auto (remote when both layouts match).
         #[arg(long, default_value = "auto", value_parser = parse_keyboard)]
         keyboard: KeyboardMode,
+        /// Where the pointer lives while you control the host. native: your own pointer,
+        /// wearing the host's cursor shape; the OS moves it, so it never lags behind the picture
+        /// and never disappears. embedded: the host's cursor drawn inside the picture at the
+        /// host's size, scaled with it, as a screenshot of the host would show it.
+        #[arg(long, default_value = "native", value_parser = parse_pointer)]
+        pointer: PointerMode,
         /// Only watch: send no keyboard or mouse input.
         #[arg(long)]
         view_only: bool,
@@ -302,6 +308,7 @@ fn main() -> std::process::ExitCode {
             target,
             screen,
             keyboard,
+            pointer,
             view_only,
             max_bitrate,
             max_fps,
@@ -322,6 +329,7 @@ fn main() -> std::process::ExitCode {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
                 keyboard: *keyboard,
+                pointer: *pointer,
                 view_only: *view_only,
                 gpu: !*software_render,
                 codec: *codec,
@@ -454,6 +462,10 @@ fn describe(err: &dyn std::error::Error) -> String {
 }
 
 fn parse_keyboard(s: &str) -> std::result::Result<KeyboardMode, String> {
+    s.parse()
+}
+
+fn parse_pointer(s: &str) -> std::result::Result<PointerMode, String> {
     s.parse()
 }
 
@@ -646,6 +658,7 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
 
 struct ViewArgs {
     keyboard: KeyboardMode,
+    pointer: PointerMode,
     view_only: bool,
     /// Present on the GPU (false: `--software-render`).
     gpu: bool,
@@ -770,6 +783,7 @@ fn run_view(
                 on_presented: Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
                 input,
                 keyboard: args.keyboard,
+                pointer: args.pointer,
                 on_focus: Box::new(|focused| {
                     #[cfg(windows)]
                     illum_win::SystemKeyHook::set_active(focused);

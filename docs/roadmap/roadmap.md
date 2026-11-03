@@ -219,11 +219,31 @@ outages every 4 s: survived. Not yet measured live.
 - one-controller policy with view-only extras
 - privacy mode, block input, lock on session end
 
-**Planned as v0.8.0 (decided 2026-10-30): a control review.** After audio (v0.7.0), go through
-everything the controller does to the host — keyboard, mouse, IME, system keys — against the
-A–C checklist from the first live test (clicks offset? delay? stuck or repeated keys? IME both
-ways? Alt+Tab/Win on the host? nothing held after focus loss?), and add the **clipboard** (text
-first): today a copy on one side is not seen on the other at all. Discussion starts after v0.7.0.
+**The control review, v0.11.x (plan agreed 2026-11-03; it was pencilled in as v0.8.0, which
+M8's viewer half took).** Go through everything the controller does to the host — keyboard,
+mouse, IME, system keys — and add the clipboard (text first): today a copy on one side is not
+seen on the other at all.
+- **Step 0, v0.11.0 (done): the pointer modes** (architecture §5.4). **Native**, the default:
+  the controller's own pointer wearing the host's cursor shape, moved by the OS, never lagging
+  behind the picture and never disappearing. **Embedded**: the host's cursor drawn inside the
+  picture, as every version before did. The setting explains itself in those words.
+- Step 1: neutral physical key codes on the wire instead of PC Set-1 scancodes, mapped to
+  scancode, evdev or macOS key code at each end (macOS has no Set-1 scancodes at all).
+- Step 2: mouse moves coalesced to one per few milliseconds and sent over the UDP path, newest
+  wins (a 1000 Hz mouse floods TCP, and one lost segment freezes the pointer for a retransmit);
+  buttons, wheel and keys stay on TCP, ordered.
+- Step 3: an input round-trip measurement: the host acknowledges input sequence numbers as it
+  injects them, the viewer shows "input N ms" next to latency.
+- Step 4: the **clipboard**, text first, as a module in today's host process that moves into
+  `--control` unchanged once the service exists: one cross-platform crate for read and write,
+  per-OS change detection, origin + hash against echo loops, a size cap, an off switch.
+- Then one hands-on session against the A–C checklist from the first live test (clicks offset?
+  delay? stuck or repeated keys? IME both ways? Alt+Tab/Win on the host? nothing held after focus
+  loss?) and the 100-paste test below.
+- After that: a **relative mouse mode** for games and other mouse-capturing apps (local pointer
+  captured and hidden, deltas on the wire, relative injection on the host; such apps read raw
+  motion and mishandle injected absolute moves), and a marker for the host's own pointer while
+  controlling.
 
 **Check:**
 - [ ] Copy/paste text both ways 100 times: no echo, no lost copy, no hang when another app holds the clipboard.

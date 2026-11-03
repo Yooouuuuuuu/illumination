@@ -36,7 +36,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::platform::scancode::PhysicalKeyExtScancode;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, CustomCursor, CustomCursorSource, Window, WindowId};
 
 /// Rolling numbers for the title bar, reset every second.
 #[derive(Debug)]
@@ -295,6 +295,74 @@ impl Waker {
     }
 }
 
+/// Where the pointer lives while controlling (architecture §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerMode {
+    /// Your own pointer, wearing the host's cursor shape. The OS moves it, so it never lags
+    /// behind the picture and never disappears.
+    #[default]
+    Native,
+    /// The host's cursor drawn inside the picture, at the host's size and scaled with it, as a
+    /// screenshot of the host would show it.
+    Embedded,
+}
+
+impl std::str::FromStr for PointerMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<PointerMode, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "native" => Ok(PointerMode::Native),
+            "embedded" => Ok(PointerMode::Embedded),
+            other => Err(format!("pointer mode {other:?} is not native or embedded")),
+        }
+    }
+}
+
+impl std::fmt::Display for PointerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PointerMode::Native => "native",
+            PointerMode::Embedded => "embedded",
+        })
+    }
+}
+
+/// Cursors made from host shapes are kept, keyed by the shape: the arrow, the I-beam and the
+/// hand come round again and again, and an animated cursor cycles through a few frames.
+const CURSOR_CACHE: usize = 64;
+
+/// A host cursor shape as the window library takes it: RGBA, the hotspot inside the image.
+/// Returns `(rgba, width, height, hot_x, hot_y)`, or `None` for a shape that cannot be a cursor.
+pub fn cursor_rgba(shape: &CursorShape) -> Option<(Vec<u8>, u16, u16, u16, u16)> {
+    let (w, h) = (
+        u16::try_from(shape.width).ok()?,
+        u16::try_from(shape.height).ok()?,
+    );
+    if w == 0 || h == 0 || shape.bgra.len() != shape.width as usize * shape.height as usize * 4 {
+        return None;
+    }
+    let mut rgba = shape.bgra.clone();
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let hot_x = shape.hot_x.min(shape.width - 1) as u16;
+    let hot_y = shape.hot_y.min(shape.height - 1) as u16;
+    Some((rgba, w, h, hot_x, hot_y))
+}
+
+fn cursor_source(shape: &CursorShape) -> Option<CustomCursorSource> {
+    let (rgba, w, h, hot_x, hot_y) = cursor_rgba(shape)?;
+    CustomCursor::from_rgba(rgba, w, h, hot_x, hot_y).ok()
+}
+
+fn shape_key(shape: &CursorShape) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (shape.width, shape.height, shape.hot_x, shape.hot_y).hash(&mut h);
+    shape.bgra.hash(&mut h);
+    h.finish()
+}
+
 /// How the window behaves.
 pub struct ViewerOptions {
     pub title: String,
@@ -303,6 +371,7 @@ pub struct ViewerOptions {
     /// `None` for view-only.
     pub input: Option<Arc<InputOut>>,
     pub keyboard: KeyboardMode,
+    pub pointer: PointerMode,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Draw on the GPU (falling back to the CPU if none is usable); false forces the CPU path.
@@ -343,6 +412,9 @@ impl ViewerWindow {
             hovering: false,
             ime_allowed: None,
             uploaded: None,
+            worn: None,
+            cursors: std::collections::HashMap::new(),
+            os_cursor_hidden: false,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
     }
@@ -378,6 +450,11 @@ struct App {
     ime_allowed: Option<bool>,
     /// The picture the GPU holds, so redraws for a moved mouse do not upload it again.
     uploaded: Option<Arc<Picture>>,
+    /// Native pointer: the host shape the window's cursor wears now, and the cursors made so far.
+    worn: Option<CursorShape>,
+    cursors: std::collections::HashMap<u64, CustomCursor>,
+    /// Whether the OS pointer is hidden over the window (embedded pointer while controlling).
+    os_cursor_hidden: bool,
 }
 
 impl App {
@@ -385,6 +462,49 @@ impl App {
         if let Some(s) = &self.window {
             s.window.request_redraw();
         }
+    }
+
+    fn hide_os_cursor(&mut self, hide: bool) {
+        if self.os_cursor_hidden != hide {
+            if let Some(s) = &self.window {
+                s.window.set_cursor_visible(!hide);
+            }
+            self.os_cursor_hidden = hide;
+        }
+    }
+
+    /// Native pointer: the window's cursor wears the host's shape, or the plain arrow while the
+    /// host hides its own or has not sent one, so the pointer never disappears.
+    fn wear(&mut self, event_loop: &ActiveEventLoop, shape: Option<&CursorShape>) {
+        let Some(window) = self.window.as_ref().map(|s| s.window.clone()) else {
+            return;
+        };
+        let Some(shape) = shape else {
+            if self.worn.take().is_some() {
+                window.set_cursor(CursorIcon::Default);
+            }
+            return;
+        };
+        if self.worn.as_ref() == Some(shape) {
+            return;
+        }
+        let key = shape_key(shape);
+        let cursor = match self.cursors.get(&key) {
+            Some(c) => Some(c.clone()),
+            None => cursor_source(shape).map(|source| {
+                if self.cursors.len() >= CURSOR_CACHE {
+                    self.cursors.clear();
+                }
+                let c = event_loop.create_custom_cursor(source);
+                self.cursors.insert(key, c.clone());
+                c
+            }),
+        };
+        match cursor {
+            Some(c) => window.set_cursor(c),
+            None => window.set_cursor(CursorIcon::Default),
+        }
+        self.worn = Some(shape.clone());
     }
 
     fn effective_mode(&self) -> KeyboardMode {
@@ -405,11 +525,10 @@ impl App {
         }
     }
 
-    fn draw(&mut self) {
-        let Some(s) = self.window.as_mut() else {
+    fn draw(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(size) = self.window.as_ref().map(|s| s.window.inner_size()) else {
             return;
         };
-        let size = s.window.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return; // minimised: don't ack, so the host pauses
         };
@@ -438,18 +557,36 @@ impl App {
         if place.is_some() {
             self.placement = place;
         }
-        // While we control the host, draw its cursor shape at *our* mouse position: no waiting
-        // for the host to report where it moved.
-        let cursor = match (
-            self.options.input.is_some() && self.hovering,
-            self.local_mouse,
-        ) {
-            (true, Some((x, y))) => CursorPosition {
+        // The pointer while we control the host (§5.4). Native: our own OS pointer wears the
+        // host's shape and nothing is drawn in the picture. Embedded: the host's shape is drawn
+        // at *our* mouse position, never waiting for the host to report where it moved. Outside
+        // the window, and in view-only, the picture shows the host's pointer where the host has
+        // it.
+        let controlling = self.options.input.is_some() && self.hovering;
+        let native = self.options.pointer == PointerMode::Native;
+        let cursor = match (controlling, native, self.local_mouse) {
+            (true, true, _) => CursorPosition::default(),
+            (true, false, Some((x, y))) => CursorPosition {
                 visible: true,
                 x,
                 y,
             },
             _ => host_cursor,
+        };
+        if self.options.input.is_some() {
+            if native {
+                self.hide_os_cursor(false);
+                let shape = host_cursor
+                    .visible
+                    .then_some(cursor_shape.as_ref())
+                    .flatten();
+                self.wear(event_loop, shape);
+            } else {
+                self.hide_os_cursor(self.hovering && cursor_shape.is_some());
+            }
+        }
+        let Some(s) = self.window.as_mut() else {
+            return;
         };
         let shown = match &mut s.backend {
             Backend::Gpu(presenter) => {
@@ -705,7 +842,7 @@ impl ApplicationHandler<UiEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => self.draw(event_loop),
             WindowEvent::Resized(_) => self.request_redraw(),
             WindowEvent::Focused(focused) => {
                 (self.options.on_focus)(*focused);
@@ -720,22 +857,12 @@ impl ApplicationHandler<UiEvent> for App {
             }
             WindowEvent::CursorEntered { .. } if self.options.input.is_some() => {
                 self.hovering = true;
-                let has_shape = self
-                    .shared
-                    .lock()
-                    .expect("view state lock")
-                    .cursor_shape
-                    .is_some();
-                if let Some(s) = &self.window {
-                    s.window.set_cursor_visible(!has_shape);
-                }
+                self.request_redraw(); // the draw decides what the pointer looks like here
             }
             WindowEvent::CursorLeft { .. } => {
                 self.hovering = false;
                 self.local_mouse = None;
-                if let Some(s) = &self.window {
-                    s.window.set_cursor_visible(true);
-                }
+                self.hide_os_cursor(false);
                 self.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
@@ -777,4 +904,60 @@ impl ApplicationHandler<UiEvent> for App {
 /// Microseconds on this machine's clock; re-exported for the network side.
 pub fn local_us() -> u64 {
     now_us()
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+
+    #[test]
+    fn pointer_modes_parse_and_print() {
+        assert_eq!(
+            "native".parse::<PointerMode>().unwrap(),
+            PointerMode::Native
+        );
+        assert_eq!(
+            "Embedded".parse::<PointerMode>().unwrap(),
+            PointerMode::Embedded
+        );
+        assert!("accurate".parse::<PointerMode>().is_err());
+        assert_eq!(PointerMode::default(), PointerMode::Native);
+        assert_eq!(PointerMode::Embedded.to_string(), "embedded");
+    }
+
+    #[test]
+    fn host_shapes_become_rgba_cursors_with_the_hotspot_inside() {
+        let shape = CursorShape {
+            width: 2,
+            height: 1,
+            hot_x: 5, // beyond the image: clamped, not refused
+            hot_y: 0,
+            bgra: vec![1, 2, 3, 255, 4, 5, 6, 0],
+        };
+        let (rgba, w, h, hx, hy) = cursor_rgba(&shape).unwrap();
+        assert_eq!((w, h, hx, hy), (2, 1, 1, 0));
+        assert_eq!(
+            rgba,
+            vec![3, 2, 1, 255, 6, 5, 4, 0],
+            "B and R swapped, alpha kept"
+        );
+        // Wrong byte count or an empty image is no cursor.
+        assert!(
+            cursor_rgba(&CursorShape {
+                bgra: vec![0; 4],
+                ..shape.clone()
+            })
+            .is_none()
+        );
+        assert!(
+            cursor_rgba(&CursorShape {
+                width: 0,
+                height: 0,
+                hot_x: 0,
+                hot_y: 0,
+                bgra: vec![],
+            })
+            .is_none()
+        );
+    }
 }

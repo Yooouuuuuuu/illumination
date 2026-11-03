@@ -11,6 +11,30 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-03
+
+Step 0 of the control review (roadmap M7): the pointer.
+
+### Added
+
+- **`illum view --pointer native|embedded`**, default **native**: your own pointer
+  stays visible and wears the host's cursor shape, made into a real cursor of
+  the window library from the host's bitmap and hotspot (one code path for
+  Windows, macOS, X11 and Wayland; cursors are cached per shape). The OS moves
+  it, so it never waits for the viewer's draw or the swap chain, never stutters
+  with the frame rate, and never disappears over the dark window or the
+  letterbox bars; when the host hides its own pointer, ours shows as the plain
+  arrow. This is what RDP, AnyDesk, RustDesk and Parsec do. **Embedded** is
+  what every version so far did: the host's cursor drawn inside the picture,
+  at the host's size, scaled with it, as a screenshot of the host would show
+  it. View-only draws the host's pointer in the picture in both modes.
+
+### Fixed
+
+- In embedded mode the OS pointer was hidden only when the mouse entered the
+  window after the host's first cursor shape had arrived; a shape arriving
+  while the mouse was already inside left two pointers. The draw now decides.
+
 ## [0.10.3] - 2026-11-03
 
 ### Fixed

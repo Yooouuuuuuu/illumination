@@ -291,10 +291,29 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
   no "predict from frame N" control for NVENC/AMF/QSV; that needs the vendor SDKs (§13).
 
 ### 5.4 Presentation and the cursor
-- The cursor shape and position are sent **separately** from the video and drawn locally by the
-  controller, so the cursor never waits for a video frame. AnyDesk:
-  `desk_rt.system_event_source - Enabled mouse cursor`. While controlling, the viewer draws the
-  host's cursor shape at its **own** mouse position.
+- The cursor shape and position are sent **separately** from the video, so the cursor never
+  waits for a video frame. AnyDesk: `desk_rt.system_event_source - Enabled mouse cursor`.
+- **Two pointer modes** while controlling (decided 2026-11-03, v0.11.0; `--pointer`):
+  - **Native** (default): the controller's **own OS pointer** stays visible and **wears the
+    host's cursor shape** (a custom cursor made from the host's bitmap and hotspot, through the
+    window library, so the same code serves Windows, macOS, X11 and Wayland). The OS moves it
+    on its cursor plane at input time, so it never waits for our draw or the swap chain, never
+    stutters with the frame rate, and never disappears over the dark window or the letterbox
+    bars. When the host hides its own pointer (typing, a full-screen video) ours shows as the
+    plain arrow: the user never loses the mouse. This is what RDP, AnyDesk, RustDesk, Parsec
+    and Chrome Remote Desktop do.
+  - **Embedded**: the host's cursor **drawn inside the picture** at the host's size, scaled
+    with it, at the controller's own mouse position (never at the host-reported one, which
+    arrives once per captured frame and would stutter): the picture looks as a screenshot of
+    the host would, pointer included. This was the only mode until v0.11.0 and is what Moonlight
+    does; it inherits the picture's latency (event loop, draw, one or two refreshes of swap
+    chain) and vanishes wherever nothing is drawn, which felt like VMware without its tools
+    or a full-screen game. Kept as a choice, and used for **view-only** in both modes, where the
+    pointer belongs to the host and is drawn where the host reports it.
+  - Later: a marker for the host's own pointer while controlling (someone sitting at the host,
+    an app warping it), and a **relative mouse mode** for games and other mouse-capturing apps
+    (local pointer captured and hidden, deltas on the wire), which is the real reason Moonlight
+    paints the pointer: such apps read raw motion and have no pointer position at all.
 - **No added video delay.** Each frame is shown as soon as it is decoded; a newer frame replaces
   an older one that hasn't been shown yet. Moonlight does the same (its pacer keeps at most one
   queued frame). Audio is the exception (§8).
@@ -641,6 +660,15 @@ Not exposed: the parity range (the controller keeps it between 5 and 30 %; the r
 costing 23 % of the picture bits for nothing on a clean link), the grading thresholds, the
 windows, the back-off, the keyframe policy.
 
+The viewer's own, switchable at any time (nothing travels to the host):
+
+| Setting | Default | Choices |
+|---|---|---|
+| **Pointer** (§5.4) | Native: your own pointer, wearing the host's cursor shape; it never lags behind the picture and never disappears | Embedded: the host's cursor drawn inside the picture, at the host's size, as a screenshot of the host would show it |
+
+The setting's help text says exactly that; the choice is about feel, and the words have to let
+someone pick without reading this document.
+
 Plus one message the app shows rather than asks: "best possible on this link: X ms" when L is out
 of reach.
 
@@ -648,8 +676,8 @@ of reach.
 host clamps: bitrate to its own ceiling, frame rate to 15–120): `--latency-limit 50`,
 `--max-bitrate 20`, `--max-fps 30`, `--allow-scale` (v0.10.0), `--mute` (v0.7.0),
 `--software-decode` (v0.7.2; the host side has `--no-audio`), `--software-render` (v0.8.0, a
-debugging switch rather than a setting: draw on the CPU). `--fec-min/--fec-max` remain for
-measurement runs only. The GPU and encoder choices are the UI milestone's; the "best possible
+debugging switch rather than a setting: draw on the CPU), `--pointer native|embedded`
+(v0.11.0, viewer-side only). `--fec-min/--fec-max` remain for measurement runs only. The GPU and encoder choices are the UI milestone's; the "best possible
 on this link" message is still to do.
 
 ## 6. Input
