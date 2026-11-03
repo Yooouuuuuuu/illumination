@@ -12,7 +12,9 @@
 //! An input thread applies the input rules in [`crate::input`] for the display being shown,
 //! reports the host keyboard layout, and releases everything when the session ends.
 
+use crate::clipboard::ClipboardSync;
 use crate::input::InputState;
+use illum_core::clipboard::ClipboardMsg;
 use illum_core::input::{InputEvent, InputSink};
 use illum_core::protocol::{Channel, ControlMsg};
 use illum_ffmpeg::opus::OpusEncoder;
@@ -173,6 +175,8 @@ pub struct HostConfig {
     pub codecs: Vec<VideoCodec>,
     /// Where the host's sound comes from; `None` means "send audio: off" (§8).
     pub audio: Option<AudioFactory>,
+    /// Sync the clipboard both ways with the controller (§8); off with `--no-clipboard`.
+    pub clipboard: bool,
 }
 
 /// Creates the audio source, inside the audio thread.
@@ -907,6 +911,20 @@ pub async fn serve_session(
     let mut link: Option<MediaLink> = None;
     let mut input: Option<InputWorker> = None;
     let mut hidden_seconds = 0u32;
+    // Clipboard both ways for the whole session, when both sides offer it (§8).
+    let clipboard = if config.clipboard
+        && conn
+            .peer_hello
+            .as_ref()
+            .is_some_and(|h| h.capabilities.iter().any(|c| c == "clipboard"))
+    {
+        let sender = conn.sender();
+        ClipboardSync::start(move |text| {
+            sender.send(Channel::Clipboard, ClipboardMsg::Text(text).to_bytes());
+        })
+    } else {
+        None
+    };
     let result = loop {
         let frame = match tokio::time::timeout(idle, conn.recv()).await {
             Err(_) => break Err(NetError::Timeout("session (idle)")),
@@ -924,6 +942,14 @@ pub async fn serve_session(
                         }
                     }
                     Err(e) => break Err(NetError::Protocol(e.to_string())),
+                }
+                continue;
+            }
+            (Channel::Clipboard, payload) => {
+                if let (Some(cb), Some(ClipboardMsg::Text(text))) =
+                    (&clipboard, ClipboardMsg::from_bytes(&payload))
+                {
+                    cb.apply(text);
                 }
                 continue;
             }

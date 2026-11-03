@@ -783,12 +783,25 @@ The session stays connected throughout.
 
 ## 8. Clipboard, audio, files
 
-- **Clipboard** (`--control`):
-  - Text and files are separate formats with separate permissions.
-  - Watch for changes with `AddClipboardFormatListener`.
-  - Each update carries its origin and a content hash, and an update that just came from the peer
-    is never sent back. That prevents echo loops.
-  - Retry with backoff when another program holds the clipboard.
+- **Clipboard** (§8; eventually `--control`):
+  - Text and files are separate formats with separate permissions. Text first.
+  - **Implemented in v0.11.4 (step 4 of the control review), both ways, text only.** A dedicated
+    thread owns the OS clipboard through the `arboard` crate — one code path for Windows, macOS,
+    X11 and Wayland — on the `Clipboard` channel (`illum_core::clipboard::ClipboardMsg::Text`).
+    Each side runs the watcher when **both** advertised the `clipboard` capability
+    (`illum::clipboard::ClipboardSync`); the host side also has `--no-clipboard`, the viewer
+    `--no-clipboard`.
+  - **Change detection is a poll** (four times a second), not Windows'
+    `AddClipboardFormatListener`: the host has no window to receive `WM_CLIPBOARDUPDATE`, and a
+    poll is the one mechanism that is identical on every OS, which the cross-platform rule
+    prefers over a Windows-only listener. The listener may return later as a per-OS optimisation.
+  - **A content hash prevents echo loops**: the thread remembers the hash of what it last saw or
+    set, so the value the peer just applied is not sent back, and the same copy is not sent
+    twice. The content already on the clipboard at connect is seeded, not pushed.
+  - A read that fails (another program holds the clipboard, or the content is not text such as an
+    image) is skipped until the next poll; a failed set is logged and left for the next change.
+  - Text over `MAX_TEXT_BYTES` (1 MiB) is not sent; the frame limit is 8 MiB and files are a
+    later milestone.
 - **Audio** (decided 2026-10-22, the Sunshine way):
   - WASAPI loopback capture, resampled to 48 kHz, **Opus at about 80 kb/s** (AnyDesk logs
     `Bitrate set to 81690 bits/s`).

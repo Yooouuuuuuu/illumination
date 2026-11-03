@@ -79,6 +79,7 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         layout: Some(layout),
         codecs: Vec::new(),
         audio: None,
+        clipboard: false,
     };
 
     let host = endpoint("host");

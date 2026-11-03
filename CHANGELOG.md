@@ -11,6 +11,23 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-03
+
+Step 4 of the control review, the last build step: the clipboard. Protocol 14.
+
+### Added
+
+- **Clipboard sync, text, both ways.** A copy on one machine appears on the
+  other. It runs when both sides offer it, through the `arboard` crate (one
+  code path for Windows, macOS, X11 and Wayland) on the existing `Clipboard`
+  channel. A content hash stops echo loops, so the value the peer just set is
+  never sent back; the content already on the clipboard at connect is left
+  alone. Change detection polls four times a second rather than using
+  Windows' `AddClipboardFormatListener`, because the host has no window for
+  that message and a poll is the same on every OS. Text over 1 MiB is not
+  sent; files come later. Off with `illum --service --no-clipboard` on the
+  host and `illum view <host> --no-clipboard` on the viewer.
+
 ## [0.11.3] - 2026-11-03
 
 Step 3 of the control review: input delay has a number. Protocol 13.

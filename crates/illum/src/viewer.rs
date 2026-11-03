@@ -5,6 +5,8 @@
 //! fresh.
 
 use crate::audio::AudioOut;
+use crate::clipboard::ClipboardSync;
+use illum_core::clipboard::ClipboardMsg;
 use illum_core::protocol::{Channel, ControlMsg};
 use illum_media::MediaError;
 use illum_media::clock::now_us;
@@ -68,6 +70,8 @@ pub struct ViewParams {
     pub scale_rungs: bool,
     /// Keep per-second records (`--report`).
     pub record: bool,
+    /// Sync the clipboard both ways with the host (§8); off with `--no-clipboard`.
+    pub clipboard: bool,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
     pub media_target: Option<SocketAddr>,
 }
@@ -87,6 +91,7 @@ impl ViewParams {
             scale_percent: 0,
             scale_rungs: false,
             record: false,
+            clipboard: true,
             media_target: None,
         }
     }
@@ -458,17 +463,19 @@ pub async fn run_viewer_session(
     shared: Shared,
     notify: Notify,
 ) -> Result<(), NetError> {
-    run_viewer_session_sharing_media(conn, params, shared, notify, MediaSlot::default()).await
+    run_viewer_session_sharing_media(conn, params, shared, notify, MediaSlot::default(), None).await
 }
 
 /// As [`run_viewer_session`], publishing the media client in `media_slot` while the media path
-/// is up (the window sends mouse moves on it).
+/// is up (the window sends mouse moves on it), and syncing the clipboard through `clipboard`
+/// when the window set one up (§8).
 pub async fn run_viewer_session_sharing_media(
     mut conn: Connection,
     params: ViewParams,
     shared: Shared,
     notify: Notify,
     media_slot: MediaSlot,
+    clipboard: Option<ClipboardSync>,
 ) -> Result<(), NetError> {
     if params.latency_limit_ms > 0 {
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
@@ -511,6 +518,13 @@ pub async fn run_viewer_session_sharing_media(
             Ok(Ok(Some(frame))) => frame,
         };
         match channel {
+            Channel::Clipboard => {
+                if let (Some(cb), Some(ClipboardMsg::Text(text))) =
+                    (&clipboard, ClipboardMsg::from_bytes(&payload))
+                {
+                    cb.apply(text);
+                }
+            }
             Channel::Cursor => {
                 let msg = match CursorMsg::from_bytes(&payload) {
                     Ok(m) => m,

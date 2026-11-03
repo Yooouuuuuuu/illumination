@@ -234,9 +234,11 @@ seen on the other at all.
   buttons, wheel and keys stay on TCP, ordered.
 - Step 3: an input round-trip measurement: the host acknowledges input sequence numbers as it
   injects them, the viewer shows "input N ms" next to latency.
-- Step 4: the **clipboard**, text first, as a module in today's host process that moves into
-  `--control` unchanged once the service exists: one cross-platform crate for read and write,
-  per-OS change detection, origin + hash against echo loops, a size cap, an off switch.
+- Step 4 (done, v0.11.4): the **clipboard**, text both ways, as `illum::clipboard` in today's
+  host and viewer processes, ready to move into `--control` unchanged. One cross-platform crate
+  (`arboard`) for read and write; change detection polls (the host has no window for
+  `WM_CLIPBOARDUPDATE`, and a poll is identical on every OS); a content hash against echo loops;
+  a 1 MiB cap; off with `--no-clipboard` on either side. Files and image formats come later.
 - Then one hands-on session against the A–C checklist from the first live test (clicks offset?
   delay? stuck or repeated keys? IME both ways? Alt+Tab/Win on the host? nothing held after focus
   loss?) and the 100-paste test below.

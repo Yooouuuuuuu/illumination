@@ -2,6 +2,7 @@
 //! Session logic shared by the `illum` binary and its tests.
 
 pub mod audio;
+pub mod clipboard;
 pub mod host;
 pub mod input;
 pub mod measure;

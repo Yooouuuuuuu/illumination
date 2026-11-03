@@ -57,6 +57,10 @@ which is also what happens on a machine with no usable GPU.
 buffer). `illum --service --no-audio` never captures or sends it; `illum view --mute` doesn't
 ask for it.
 
+**Clipboard:** text copied on either machine appears on the other, both ways, while you are
+connected. Turn it off with `illum --service --no-clipboard` on the host or
+`illum view <host> --no-clipboard` on the viewer. Files come later.
+
 **Codec:** AV1 if the host can encode it and the viewer decode it, otherwise H.265, otherwise
 lossless tiles (sharp, but heavy when the whole screen changes). The title bar names the one in
 use. `illum codecs` shows what this machine can do and why a hardware encoder was skipped; the
@@ -98,11 +102,12 @@ viewer.
 
 ```
 illum                  # the app window (not built yet)
-illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern, --no-audio)
+illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern,
+                       #   --no-audio, --no-clipboard)
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
-                       #   --pointer native|embedded,
+                       #   --pointer native|embedded, --no-clipboard,
                        #   --max-bitrate Mb/s, --max-fps, --allow-scale, --latency-limit ms, --mute,
                        #   --software-decode, --software-render; measurement: --fixed, --scale,
                        #   --codec, --duration, --report, --label)

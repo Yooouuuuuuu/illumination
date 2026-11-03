@@ -14,6 +14,7 @@ use illum::host::{AudioFactory, HostConfig, SourceFactory, serve_session};
 use illum::host::{InputFactory, LayoutFn};
 use illum::viewer::{MediaSlot, Notify, ViewParams, run_viewer_session_sharing_media};
 use illum_core::Role;
+use illum_core::clipboard::ClipboardMsg;
 use illum_core::input::InputMsg;
 #[cfg(windows)]
 use illum_core::input::InputSink;
@@ -78,6 +79,10 @@ struct Cli {
     #[arg(long, requires = "service")]
     no_audio: bool,
 
+    /// Do not sync the clipboard with the controller (with --service).
+    #[arg(long, requires = "service")]
+    no_clipboard: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -134,6 +139,9 @@ enum Command {
         /// Don't ask for the host's sound.
         #[arg(long)]
         mute: bool,
+        /// Don't sync the clipboard with the host (text is synced both ways by default, §8).
+        #[arg(long)]
+        no_clipboard: bool,
         /// Decode on the CPU only (the default uses the GPU's decoder where it exists, and
         /// offers AV1 only then).
         #[arg(long)]
@@ -317,6 +325,7 @@ fn main() -> std::process::ExitCode {
             fec_min,
             fec_max,
             mute,
+            no_clipboard,
             software_decode,
             software_render,
             fixed,
@@ -343,6 +352,7 @@ fn main() -> std::process::ExitCode {
                     fec_max: *fec_max,
                     latency_limit_ms: *latency_limit,
                     audio: !*mute,
+                    clipboard: !*no_clipboard,
                     hw_decode: !*software_decode,
                     fixed: *fixed,
                     scale_percent: *scale,
@@ -376,7 +386,7 @@ async fn run(cli: Cli) -> Result<()> {
                 &home,
                 cli.port,
                 &cli.bind,
-                host_config(cli.test_pattern, cli.no_audio),
+                host_config(cli.test_pattern, cli.no_audio, cli.no_clipboard),
             )
             .await
         }
@@ -471,7 +481,7 @@ fn parse_pointer(s: &str) -> std::result::Result<PointerMode, String> {
 
 /// What the host offers: its screen (or the test pattern), input injection and layout reports.
 /// With the test pattern there is no real screen, so input isn't injected either.
-fn host_config(test_pattern: bool, no_audio: bool) -> HostConfig {
+fn host_config(test_pattern: bool, no_audio: bool, no_clipboard: bool) -> HostConfig {
     #[cfg(windows)]
     let (input, layout): (Option<InputFactory>, Option<LayoutFn>) = if test_pattern {
         (None, None)
@@ -520,6 +530,8 @@ fn host_config(test_pattern: bool, no_audio: bool) -> HostConfig {
         layout,
         codecs,
         audio,
+        // The test pattern is a non-interactive stream; the real host syncs the clipboard (§8).
+        clipboard: !test_pattern && !no_clipboard,
     }
 }
 
@@ -601,6 +613,7 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
         "screen" => config.screen.is_some(),
         "input" => config.input.is_some(),
         "audio" => config.audio.is_some(),
+        "clipboard" => config.clipboard,
         _ => true,
     });
     // "enc:av1" etc.: the viewer's hello says what it decodes, ours what we encode (§5.3).
@@ -696,6 +709,9 @@ fn run_view(
         Some(CodecChoice::Tiles) => Vec::new(),
     };
     ep.capabilities.extend(offered);
+    if !args.params.clipboard {
+        ep.capabilities.retain(|c| c != "clipboard");
+    }
     println!("Connecting to {}…", normalize_target(target));
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));
@@ -736,6 +752,16 @@ fn run_view(
     }
     let sender = conn.sender();
     let media_slot = MediaSlot::default();
+    // Clipboard both ways when both sides offer it (§8); a copy here is sent, the host's applied.
+    let clipboard = if args.params.clipboard && hello.capabilities.iter().any(|c| c == "clipboard")
+    {
+        let sender = sender.clone();
+        illum::clipboard::ClipboardSync::start(move |text| {
+            sender.send(Channel::Clipboard, ClipboardMsg::Text(text).to_bytes());
+        })
+    } else {
+        None
+    };
     let session = {
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
@@ -743,9 +769,15 @@ fn run_view(
         let params = args.params.clone();
         let media_slot = media_slot.clone();
         runtime.spawn(async move {
-            let result =
-                run_viewer_session_sharing_media(conn, params, shared, notify, media_slot.clone())
-                    .await;
+            let result = run_viewer_session_sharing_media(
+                conn,
+                params,
+                shared,
+                notify,
+                media_slot.clone(),
+                clipboard,
+            )
+            .await;
             *media_slot.lock().expect("media slot") = None;
             waker.wake(UiEvent::Exit);
             result
