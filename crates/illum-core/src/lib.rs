@@ -2,6 +2,7 @@
 //! Shared code for every Illumination role: roles, protocol messages and the trust store.
 
 pub mod input;
+pub mod keymap;
 pub mod protocol;
 pub mod store;
 

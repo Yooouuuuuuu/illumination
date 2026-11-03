@@ -7,6 +7,7 @@
 
 use crate::DisplayInfo;
 use illum_core::input::{InputSink, Key, MouseButton};
+use illum_core::keymap::{usage, usage_from_windows_scancode, windows_scancode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
@@ -21,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
     MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VIRTUAL_KEY,
-    VK_APPS, VK_CONTROL, VK_ESCAPE, VK_F4, VK_LWIN, VK_RWIN, VK_TAB,
+    VK_APPS, VK_CONTROL, VK_ESCAPE, VK_F4, VK_LWIN, VK_PAUSE, VK_RWIN, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, HHOOK,
@@ -73,6 +74,21 @@ fn keyboard(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
+fn virtual_key(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
 fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -104,14 +120,25 @@ impl WinInjector {
 
 impl InputSink for WinInjector {
     fn key(&mut self, key: Key, down: bool) {
-        let mut flags = KEYEVENTF_SCANCODE;
-        if key.extended {
-            flags |= KEYEVENTF_EXTENDEDKEY;
+        let up = if down {
+            KEYBD_EVENT_FLAGS(0)
+        } else {
+            KEYEVENTF_KEYUP
+        };
+        match windows_scancode(key.usage) {
+            Some((scan, extended)) => {
+                let mut flags = KEYEVENTF_SCANCODE | up;
+                if extended {
+                    flags |= KEYEVENTF_EXTENDEDKEY;
+                }
+                send(&[keyboard(scan, flags)]);
+            }
+            // Pause is E1 1D 45 on the wire, which SendInput cannot take as a scancode.
+            None if key.usage == usage::PAUSE => send(&[virtual_key(VK_PAUSE, up)]),
+            None => {
+                tracing::debug!(target: "input", "no Windows key for usage {:#x}", key.usage);
+            }
         }
-        if !down {
-            flags |= KEYEVENTF_KEYUP;
-        }
-        send(&[keyboard(key.scancode, flags)]);
     }
 
     fn text(&mut self, text: &str) {
@@ -200,12 +227,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let injected = info.flags.0 & LLKHF_INJECTED.0 != 0;
         let alt = info.flags.0 & LLKHF_ALTDOWN.0 != 0;
         let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
-        if !injected && is_system_key(info.vkCode, alt, ctrl) {
+        let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
+        let key =
+            usage_from_windows_scancode(info.scanCode as u16, extended).map(|usage| Key { usage });
+        if let Some(key) = key.filter(|_| !injected && is_system_key(info.vkCode, alt, ctrl)) {
             let down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
-            let key = Key {
-                scancode: info.scanCode as u16,
-                extended: info.flags.0 & LLKHF_EXTENDED.0 != 0,
-            };
             if let Some(forward) = forward_slot().lock().expect("hook lock").as_ref() {
                 forward(key, down);
             }

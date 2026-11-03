@@ -111,12 +111,10 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
     .await;
 
     let a = Key {
-        scancode: 0x1e,
-        extended: false,
+        usage: illum_core::keymap::usage::A,
     };
     let enter = Key {
-        scancode: 0x1c,
-        extended: false,
+        usage: illum_core::keymap::usage::ENTER,
     };
     let msgs = [
         InputMsg::MouseMove { x: 10, y: 20 },
@@ -140,18 +138,18 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         sender.send(Channel::Input, ev.encode());
     }
     wait_until("Enter held on the host", || {
-        recorded.lock().unwrap().log.last().map(String::as_str) == Some("key 1c down")
+        recorded.lock().unwrap().log.last().map(String::as_str) == Some("key 70028 down")
     })
     .await;
     assert_eq!(
         recorded.lock().unwrap().log,
         [
             "move 10,20",
-            "key 1e down",
-            "key 1e up",
+            "key 70004 down",
+            "key 70004 up",
             "text 你好",
             "wheel 0,-120",
-            "key 1c down"
+            "key 70028 down"
         ]
     );
 
@@ -163,9 +161,13 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         .expect("host notices the drop")
         .unwrap();
     let log = recorded.lock().unwrap().log.clone();
-    assert_eq!(log.last().map(String::as_str), Some("key 1c up"), "{log:?}");
     assert_eq!(
-        log.iter().filter(|e| *e == "key 1c down").count(),
+        log.last().map(String::as_str),
+        Some("key 70028 up"),
+        "{log:?}"
+    );
+    assert_eq!(
+        log.iter().filter(|e| *e == "key 70028 down").count(),
         1,
         "no extra Enters: {log:?}"
     );

@@ -137,10 +137,9 @@ pub struct RecordingSink {
 
 impl InputSink for RecordingSink {
     fn key(&mut self, key: Key, down: bool) {
-        let ext = if key.extended { "e" } else { "" };
         self.log.push(format!(
-            "key {ext}{:02x} {}",
-            key.scancode,
+            "key {:x} {}",
+            key.usage,
             if down { "down" } else { "up" }
         ));
     }
@@ -166,12 +165,10 @@ mod tests {
     use super::*;
 
     const ENTER: Key = Key {
-        scancode: 0x1c,
-        extended: false,
+        usage: illum_core::keymap::usage::ENTER,
     };
     const A: Key = Key {
-        scancode: 0x1e,
-        extended: false,
+        usage: illum_core::keymap::usage::A,
     };
 
     struct Harness {
@@ -230,7 +227,7 @@ mod tests {
             },
         );
         h.run_until(0, 2000);
-        assert_eq!(h.log(), ["key 1c down", "key 1c up"]);
+        assert_eq!(h.log(), ["key 70028 down", "key 70028 up"]);
     }
 
     #[test]
@@ -249,8 +246,8 @@ mod tests {
             },
         );
         // 1 press at 0 ms, then repeats at 500, 540, … 980 ms = 13.
-        assert_eq!(h.count("key 1e down"), 1 + 13);
-        assert_eq!(h.count("key 1e up"), 1);
+        assert_eq!(h.count("key 70004 down"), 1 + 13);
+        assert_eq!(h.count("key 70004 up"), 1);
     }
 
     #[test]
@@ -266,12 +263,12 @@ mod tests {
         );
         h.send(200, InputMsg::Heartbeat);
         h.run_until(0, 3200); // silence from 200 ms on
-        let downs = h.count("key 1c down");
+        let downs = h.count("key 70028 down");
         assert_eq!(
             downs, 1,
             "silence started before the repeat delay, so no repeats at all"
         );
-        assert_eq!(h.count("key 1c up"), 1, "released after 1 s of silence");
+        assert_eq!(h.count("key 70028 up"), 1, "released after 1 s of silence");
         h.send(
             3200,
             InputMsg::Key {
@@ -280,7 +277,7 @@ mod tests {
             },
         ); // late key-up
         assert_eq!(
-            h.count("key 1c up"),
+            h.count("key 70028 up"),
             1,
             "the late key-up is not injected twice"
         );
@@ -293,7 +290,7 @@ mod tests {
         h.send(200, InputMsg::Heartbeat);
         h.send(400, InputMsg::Heartbeat);
         h.run_until(0, 900); // repeats start at 500 ms; silence from 400 ms pauses them at 700 ms
-        let during = h.count("key 1e down");
+        let during = h.count("key 70004 down");
         h.send(900, InputMsg::Heartbeat); // network back
         h.run_until(910, 1000);
         assert!(
@@ -301,11 +298,11 @@ mod tests {
             "repeated, then paused: {during}"
         );
         assert!(
-            h.count("key 1e down") > during,
+            h.count("key 70004 down") > during,
             "repeats resume once heartbeats return"
         );
         assert_eq!(
-            h.count("key 1e up"),
+            h.count("key 70004 up"),
             0,
             "a short hiccup does not release the key"
         );
@@ -327,7 +324,7 @@ mod tests {
             },
             now,
         ); // old seq
-        assert_eq!(h.log(), ["key 1e down"]);
+        assert_eq!(h.log(), ["key 70004 down"]);
     }
 
     #[test]
@@ -342,7 +339,7 @@ mod tests {
             },
         );
         h.send(10, InputMsg::ReleaseAll);
-        assert!(h.log().contains(&"key 1e up".to_string()));
+        assert!(h.log().contains(&"key 70004 up".to_string()));
         assert!(h.log().contains(&"button Left up".to_string()));
         assert!(!h.state.anything_held());
         h.run_until(10, 3000);

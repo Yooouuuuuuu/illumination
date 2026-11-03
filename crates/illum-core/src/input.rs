@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! u8 kind | u32 seq | payload
-//! 1 key        u16 scancode | u8 flags (bit0 down, bit1 extended)
+//! 1 key        u32 usage | u8 down                (USB HID usage, page << 16 | id: keymap.rs)
 //! 2 text       u16 len | len bytes UTF-8          (IME results and Local-mode characters)
 //! 3 move       i32 x | i32 y                      (pixels of the shown display, absolute)
 //! 4 button     u8 button | u8 down
@@ -44,11 +44,11 @@ impl MouseButton {
     }
 }
 
-/// A physical key by its Set-1 scancode; `extended` is the 0xE0 prefix (right Ctrl, arrows, …).
+/// A physical key by its USB HID usage, `page << 16 | id` ([`crate::keymap`]): the same key
+/// whatever operating system either end runs. Each end maps at its edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Key {
-    pub scancode: u16,
-    pub extended: bool,
+    pub usage: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,8 +88,8 @@ impl InputEvent {
         out.extend_from_slice(&self.seq.to_le_bytes());
         match &self.msg {
             InputMsg::Key { key, down } => {
-                out.extend_from_slice(&key.scancode.to_le_bytes());
-                out.push(*down as u8 | (key.extended as u8) << 1);
+                out.extend_from_slice(&key.usage.to_le_bytes());
+                out.push(*down as u8);
             }
             InputMsg::Text(text) => {
                 let bytes = text.as_bytes();
@@ -124,18 +124,14 @@ impl InputEvent {
         };
         let (msg, used) = match kind {
             1 => {
-                let scancode = u16::from_le_bytes(take(5..7)?.try_into().unwrap());
-                let flags = take(7..8)?[0];
-                let key = Key {
-                    scancode,
-                    extended: flags & 2 != 0,
-                };
+                let usage = u32::from_le_bytes(take(5..9)?.try_into().unwrap());
+                let down = take(9..10)?[0] != 0;
                 (
                     InputMsg::Key {
-                        key,
-                        down: flags & 1 != 0,
+                        key: Key { usage },
+                        down,
                     },
-                    8,
+                    10,
                 )
             }
             2 => {
@@ -217,15 +213,13 @@ mod tests {
         let msgs = [
             InputMsg::Key {
                 key: Key {
-                    scancode: 0x1C,
-                    extended: false,
+                    usage: crate::keymap::usage::ENTER,
                 },
                 down: true,
             },
             InputMsg::Key {
                 key: Key {
-                    scancode: 0x1D,
-                    extended: true,
+                    usage: crate::keymap::consumer(0xCD),
                 },
                 down: false,
             },

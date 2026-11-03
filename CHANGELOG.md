@@ -11,6 +11,22 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-03
+
+Step 1 of the control review: the key codes on the wire. Protocol 11.
+
+### Changed
+
+- **Keys travel as USB HID usages**, not PC Set-1 scancodes. The scancode was
+  the viewer's own platform code, which only works while both ends are
+  Windows (macOS has none). The HID usage is the one key code every OS is
+  tabulated against, and what Chrome Remote Desktop sends; the viewer maps the
+  window library's physical key to it, the host maps it to its injector
+  (Windows today; evdev and macOS tables will join with those hosts). A test
+  on Windows checks our table against winit's own, key by key. Pause, which
+  `SendInput` cannot take as a scancode, now goes as its virtual key, so it
+  works for the first time. Keys with no usage (F25 and up, Fn) are not sent.
+
 ## [0.11.0] - 2026-11-03
 
 Step 0 of the control review (roadmap M7): the pointer.

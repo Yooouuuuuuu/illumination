@@ -683,7 +683,7 @@ on this link" message is still to do.
 ## 6. Input
 
 **Keyboard modes** (as AnyDesk):
-- **Remote:** sends physical key positions (scancodes).
+- **Remote:** sends physical key positions (USB HID usages, see "Key codes on the wire").
 - **Local:** translates using the controller's layout.
 - **Auto:** Remote if both layouts match, otherwise Local.
 
@@ -715,6 +715,19 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
   - Remote mode disables it, so the host's IME composes from key positions.
   - Keys pressed while composing are not sent.
 - **Wire format:** `illum_core::input`, binary, on the input channel.
+- **Key codes on the wire (v0.11.1, step 1 of the control review):** a key travels as its
+  **USB HID usage** (`page << 16 | id`; `illum_core::keymap`), not as a PC Set-1 scancode as
+  before. The scancode was the viewer's platform code (winit's), which only works while both
+  ends are Windows; macOS has no Set-1 scancodes at all. The HID usage is nobody's operating
+  system's: the W3C `code` names (which the window library reports on every OS), evdev codes,
+  macOS key codes and Set-1 scancodes are all tabulated against it in Chromium's keycode
+  converter, and Chrome Remote Desktop sends exactly this. The viewer maps the window library's
+  physical key to the usage (`illum_ui::input::KEY_USAGES`); the host maps the usage to what its
+  injector takes (`keymap::windows_scancode` today; evdev and macOS tables join with those
+  hosts). A test on Windows checks our table against winit's own, key by key. Two Windows
+  quirks live in the host table: Pause is E1 1D 45 on the wire, which `SendInput` cannot take as
+  a scancode, so it goes as its virtual key; NumLock is reported as E0 45 in window messages (to
+  tell it from Pause) but injected as plain 45. Keys with no usage (F25 and up, Fn) are not sent.
 - **Capabilities:** the host advertises `input` only when it can inject, and the viewer then
   opens view-only.
 - **Checked by hand (2026-10-19, laptop → this PC):** English and Chinese typing both correct.

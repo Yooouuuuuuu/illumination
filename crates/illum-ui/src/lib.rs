@@ -18,6 +18,7 @@ pub use workload::run_workload;
 
 use gpu::WindowPresenter;
 use illum_core::input::{InputMsg, Key, MouseButton};
+use illum_core::keymap::usage;
 use illum_media::Frame;
 use illum_media::clock::{ClockSync, now_us};
 use illum_media::codec::VideoCodec;
@@ -26,7 +27,7 @@ use illum_media::picture::Picture;
 use illum_media::scale::{
     Placement, ViewMode, blit_fit, blit_original, draw_cursor, placement, placement_original,
 };
-use input::{KeyPress, Modifiers, key_from_scancode, translate_key};
+use input::{KeyPress, Modifiers, key_from_physical, translate_key};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
@@ -35,7 +36,6 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::platform::scancode::PhysicalKeyExtScancode;
 use winit::window::{CursorIcon, CustomCursor, CustomCursorSource, Window, WindowId};
 
 /// Rolling numbers for the title bar, reset every second.
@@ -704,12 +704,11 @@ impl App {
         if !(self.mods.ctrl && self.mods.alt && self.mods.shift) {
             return false;
         }
-        let Some(key) = event.physical_key.to_scancode().and_then(key_from_scancode) else {
+        let Some(key) = key_from_physical(event.physical_key) else {
             return false;
         };
-        const F2: u16 = 0x3c;
-        match (key.scancode, key.extended) {
-            (F2, false) => {
+        match key.usage {
+            usage::F2 => {
                 if event.state == ElementState::Pressed && !event.repeat {
                     self.view_mode = match self.view_mode {
                         ViewMode::Fit => ViewMode::Original,
@@ -733,7 +732,7 @@ impl App {
                 is_synthetic: false,
                 ..
             } => {
-                let Some(key) = event.physical_key.to_scancode().and_then(key_from_scancode) else {
+                let Some(key) = key_from_physical(event.physical_key) else {
                     return;
                 };
                 let mode = self.effective_mode();
