@@ -420,7 +420,14 @@ and the asymmetry of a 10 ms round trip bounds the rest.
    between the rung that fits and the one just above it (10.24 vs 8.19 Mb/s on a 10 Mb/s path).
 3. **The backstop needs frames still dying**, not merely loss above the threshold: with parity
    at the ceiling repairing every frame, persistent random loss is path loss, fully handled, and
-   walking the ladder down would only lower the picture for nothing.
+   walking the ladder down would only lower the picture for nothing. **And it needs the same
+   evidence as every other drop** (2026-11-03): the round trip risen for at least half the
+   window (a standing queue, the mark of overload), and, for a further rung, the loss at most
+   half of what it was when the backstop last fired (an overload of 2 % loss vanishes after a
+   20 % cut). Bursty Wi-Fi loss of 2–3 % kills the odd frame through 30 % parity with the
+   round trip flat between the bursts; the backstop took a live session from 10.2 Mb/s to
+   4.1 Mb/s and 15 fps for it, one rung per window, with the loss unchanged at every rung.
+   Loss that does not answer to the rate is held at the parity ceiling and logged as such.
 
 Two more came from the first long live run (2026-10-30, viewer window hidden for an hour):
 4. **Evidence must be recent.** The 10 graded seconds of a drop must lie within the last 30 s,
@@ -519,9 +526,13 @@ Defaults: **floor 5%, ceiling 30%**, both user-changeable. Fast up, slow down.
    controller fixes overload within about 10 s; if loss is still there after FEC's 30 s window,
    it is path loss and parity is the right fix. The latency controller never raises while loss is
    above the FEC threshold.
-3. **Backstop.** If FEC sits at the ceiling and loss persists for one more window, the loss is
-   overload that never showed up as late frames (a path that drops instead of queueing). FEC then
-   asks the latency controller for one rung down, and again each window while it continues.
+3. **Backstop.** If FEC sits at the ceiling, loss persists for one more window with frames still
+   dying, **and the round trip was risen for most of that window**, the loss is overload that
+   never showed up as late frames enough to move the ladder. FEC then asks the latency
+   controller for one rung down, and again each window while the loss keeps answering (each
+   further rung needs the window's loss at most half of the last backstop's). Without the risen
+   round trip, or when a rung down changed nothing, the loss is the path's: parity stays at the
+   ceiling and the rung holds (§5.5 rule 3).
 
 **Reference invalidation** is the second layer, for the frame that FEC could not save. The
 viewer reports "frame N broken"; the host encodes its *next* frame as a difference from an older

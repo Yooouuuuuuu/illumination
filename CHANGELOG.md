@@ -11,6 +11,23 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-03
+
+### Fixed
+
+- **The FEC backstop needs the same evidence as every other drop.** The first
+  adaptive 0.10.2 session (laptop viewing the desktop over Wi-Fi) ran as
+  designed for four minutes, then the backstop took a rung every 30 s window
+  for 2–3 % loss that stayed exactly the same from 12.8 Mb/s down to
+  4.1 Mb/s and 15 fps: bursty Wi-Fi loss that 30 % parity cannot quite
+  finish. The backstop now fires only when the round trip was risen for at
+  least half the window (a standing queue, the mark of overload), and a
+  further one needs the loss to have at least halved since the last (an
+  overload of 2 % vanishes after a 20 % cut). Loss that does not answer to
+  the rate is held at the parity ceiling, and the host log says so once a
+  window. The harness's bursty-outage scenario showed the same walk (three
+  rungs in a minute) and now asserts the ladder stays put.
+
 ## [0.10.2] - 2026-11-03
 
 What the first adaptive session on 0.10.1 showed (laptop viewing the desktop

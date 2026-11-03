@@ -66,6 +66,16 @@ pub const RTT_FLOOR_SECONDS: usize = 60;
 /// Loss at or above the 🔴 zone within this many seconds blocks raises: the same window the FEC
 /// controller judges by, so a backstop drop is not undone 15 s later.
 pub const RAISE_LOSS_SECONDS: usize = 30;
+/// The backstop (§5.6) needs the round trip to have been risen for at least this share of the
+/// window's seconds: loss that parity cannot cure is overload only with a standing queue behind
+/// it. Bursty Wi-Fi loss of 2–3 % kills the odd frame through 30 % parity with the round trip
+/// flat except at the bursts, and the backstop walked a session from 10.2 Mb/s to 4.1 Mb/s
+/// and 15 fps for it without the loss moving at all (2026-11-03).
+pub const BACKSTOP_RISE_SHARE: f64 = 0.5;
+/// A further backstop needs the loss over its window to be at most this share of the loss when
+/// the backstop last fired: an overload of 2 % loss vanishes altogether after a 20 % cut, so
+/// halving is a lenient bar, and loss that does not answer to the rate is not the rate's.
+pub const BACKSTOP_PROOF: f64 = 0.5;
 
 /// The grade of one second (§5.5): the share of shown frames that arrived within the latency
 /// limit. ⚪ when too few frames were shown to judge (a still screen).
@@ -504,6 +514,12 @@ pub struct Adapter {
     seconds: u64,
     /// The last fast drop, which the next one has to justify.
     last_fast_drop: Option<FastDrop>,
+    /// Seconds of the current FEC window so far, and how many of them had a risen round trip:
+    /// the backstop's timing condition.
+    window_seconds: u32,
+    window_rose: u32,
+    /// Loss over the window of the last backstop drop, which a further one has to better.
+    last_backstop_loss_ppm: Option<u64>,
 }
 
 /// A fast drop: when, what got through in the second that called for it, and the share of
@@ -533,6 +549,9 @@ impl Adapter {
             rtts: std::collections::VecDeque::new(),
             seconds: 0,
             last_fast_drop: None,
+            window_seconds: 0,
+            window_rose: 0,
+            last_backstop_loss_ppm: None,
         }
     }
 
@@ -617,6 +636,10 @@ impl Adapter {
         if self.recent_loss.len() > RAISE_LOSS_SECONDS {
             self.recent_loss.pop_front();
         }
+        self.window_seconds += 1;
+        if timing_rose {
+            self.window_rose += 1;
+        }
         let loss_blocks_raise = self.recent_loss_ppm() >= LOSS_RED_PPM;
         let mut decision = Decision::default();
 
@@ -680,16 +703,41 @@ impl Adapter {
                     w.loss_ppm as f64 / 10_000.0
                 ));
             }
-            if w.backstop && self.latency.step(Move::Down).is_some() {
-                decision.rung = Some(self.latency.rung());
-                if !decision.reason.is_empty() {
-                    decision.reason.push_str("; ");
-                }
-                decision.reason.push_str(&format!(
-                    "backstop: parity at {} % and still {:.2} % loss",
+            let rose_share = f64::from(self.window_rose) / f64::from(self.window_seconds.max(1));
+            self.window_seconds = 0;
+            self.window_rose = 0;
+            if w.backstop {
+                // Loss at the parity ceiling with frames still dying is overload only with a
+                // standing queue behind it, and only while dropping the rate answers it.
+                let standing_queue = rose_share >= BACKSTOP_RISE_SHARE;
+                let answered = self
+                    .last_backstop_loss_ppm
+                    .is_none_or(|last| w.loss_ppm as f64 <= last as f64 * BACKSTOP_PROOF);
+                let loss = format!(
+                    "parity at {} % and still {:.2} % loss",
                     w.percent,
                     w.loss_ppm as f64 / 10_000.0
-                ));
+                );
+                let note = if !standing_queue {
+                    format!(
+                        "{loss} with the rtt risen {:.0} % of the time: path loss, holding",
+                        rose_share * 100.0
+                    )
+                } else if !answered {
+                    format!("{loss} after a rung down changed nothing: path loss, holding")
+                } else if self.latency.step(Move::Down).is_some() {
+                    self.last_backstop_loss_ppm = Some(w.loss_ppm);
+                    decision.rung = Some(self.latency.rung());
+                    format!("backstop: {loss}")
+                } else {
+                    String::new()
+                };
+                if !note.is_empty() {
+                    if !decision.reason.is_empty() {
+                        decision.reason.push_str("; ");
+                    }
+                    decision.reason.push_str(&note);
+                }
             }
         }
         decision
@@ -1141,39 +1189,48 @@ mod tests {
     }
 
     #[test]
-    fn adapter_backstop_steps_the_ladder_down() {
+    fn adapter_backstop_steps_the_ladder_down_only_for_a_standing_queue() {
         let mut a = Adapter::new(top(), 5, 10);
-        // Mostly still screen (⚪) with 2 % loss and the odd frame lost: only the FEC
-        // controller acts; the ladder holds …
-        let mut rung_changes = Vec::new();
-        for _ in 0..FEC_WINDOW_SECONDS {
-            let d = a.observe(SecondReport {
-                shown: 0,
-                within_limit: 0,
-                decoded: 0,
-                frames_lost: 1,
-                received: 980,
-                lost: 20,
-                rtt_ms: 12,
-                rtt_floor_ms: 12,
-            });
-            if let Some(r) = d.rung {
-                rung_changes.push(r);
+        // Mostly still screen (⚪) with 1 % loss (under the fast drop's 2 %) and the odd frame
+        // lost: only the FEC controller acts; the ladder holds …
+        let second = |rtt_ms, lost| SecondReport {
+            shown: 0,
+            within_limit: 0,
+            decoded: 0,
+            frames_lost: 1,
+            received: 1000 - lost,
+            lost,
+            rtt_ms,
+            rtt_floor_ms: 12,
+        };
+        let window = |a: &mut Adapter, rtt_ms, lost| {
+            let mut last = Decision::default();
+            for _ in 0..FEC_WINDOW_SECONDS {
+                let d = a.observe(second(rtt_ms, lost));
+                assert_eq!(d.rung.is_some(), d.reason.starts_with("backstop"));
+                last = d;
             }
-        }
+            last
+        };
+        window(&mut a, 12, 10);
         assert_eq!(a.fec_percent(), 10, "ceiling reached after one window");
-        assert!(rung_changes.is_empty());
-        // … until the ceiling can't cure it: one rung per further window.
-        let before = a.rung_index();
-        for _ in 0..FEC_WINDOW_SECONDS {
-            a.observe(SecondReport {
-                frames_lost: 1,
-                received: 980,
-                lost: 20,
-                ..Default::default()
-            });
-        }
-        assert_eq!(a.rung_index(), before + 1);
+        assert_eq!(a.rung_index(), 0);
+        // … and at the ceiling with the round trip flat it still holds: loss that parity
+        // cannot finish, with no queue behind it, is the path's (Wi-Fi, 2026-11-03) …
+        let d = window(&mut a, 12, 10);
+        assert_eq!(a.rung_index(), 0);
+        assert!(d.reason.contains("path loss, holding"), "{}", d.reason);
+        // … until the round trip has been risen for most of the window: one rung down.
+        let d = window(&mut a, 30, 10);
+        assert_eq!(a.rung_index(), 1);
+        assert!(d.reason.starts_with("backstop"), "{}", d.reason);
+        // The same loss again after the drop: the rate was not the cause, no second rung.
+        let d = window(&mut a, 30, 10);
+        assert_eq!(a.rung_index(), 1);
+        assert!(d.reason.contains("changed nothing"), "{}", d.reason);
+        // The loss halved (still 🔴 at 0.5 %, frames still dying): the drop worked, another.
+        window(&mut a, 30, 5);
+        assert_eq!(a.rung_index(), 2);
     }
 
     #[test]

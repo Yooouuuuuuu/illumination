@@ -240,6 +240,14 @@ fn bursty_outages_are_survived() {
         .filter(|s| s.grade == Grade::Green)
         .count();
     assert!(greens >= 40, "mostly green once settled: {greens}/60");
+    // Parity reaches its ceiling and the bursts still kill the odd frame, with the round trip
+    // flat between them: path loss, not overload. The backstop walked this ladder down three
+    // rungs in a minute (and a live session to 15 fps, 2026-11-03) before it asked for a
+    // standing queue.
+    assert!(
+        o.seconds.iter().all(|s| s.rung_index == 0),
+        "bursty loss with flat timing never walks the ladder down"
+    );
 }
 
 #[test]

@@ -54,8 +54,10 @@ host: Host — once a second {
     zone: "loss ≥ 0.5 % ?" {shape: diamond}
     ceiling_q: "already at the ceiling ?" {shape: diamond}
     frames_q: "frames still lost in the window ?" {shape: diamond}
+    queue_q: "rtt risen ≥ 50 % of the window,\nand the last backstop (if any) halved the loss ?" {shape: diamond}
     up: "parity + 5 (≤ ceiling)"
     backstop: "BACKSTOP: ask the ladder\nfor one rung down\n(harness rule 3)"
+    hold_loss: "loss that does not answer to the rate:\npath loss, hold the rung (2026-11-03)"
     nothing: "parity repairs everything:\npath loss, nothing more to do"
     green_q: "loss < 0.1 % ?" {shape: diamond}
     streak: "🟢 window streak += 1\n2nd and later → parity − 5 (≥ floor)"
@@ -64,7 +66,9 @@ host: Host — once a second {
     zone -> ceiling_q: yes
     ceiling_q -> up: no
     ceiling_q -> frames_q: yes
-    frames_q -> backstop: yes
+    frames_q -> queue_q: yes
+    queue_q -> backstop: yes
+    queue_q -> hold_loss: no
     frames_q -> nothing: no
     zone -> green_q: no
     green_q -> streak: yes

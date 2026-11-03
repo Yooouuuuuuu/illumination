@@ -786,6 +786,10 @@ impl MediaLink {
                 rung: adapter.rung(),
                 fec_percent: adapter.fec_percent(),
             };
+        } else if !decision.reason.is_empty() {
+            // A decision not to move (the backstop holding at the parity ceiling): once a
+            // window, so the log says why the rung stays where it is.
+            tracing::info!("Adaptation holds: {}.", decision.reason);
         }
         let grade = decision.grade.unwrap_or(Grade::Blank);
         let quality = changed.then(|| self.quality(&decision.reason));
