@@ -33,7 +33,11 @@ impl Gpu {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("illum viewer"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            // The whole window must fit in one surface texture. wgpu's downlevel defaults cap a
+            // texture at 2048 px, which failed `Surface::configure` the moment a window grew past
+            // 2048 and stalled the session (2026-11-03); ask for what this GPU really supports
+            // (16384 on a discrete card).
+            required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
         }))
@@ -530,6 +534,9 @@ pub struct WindowPresenter {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     view_format: wgpu::TextureFormat,
+    /// The largest surface this device allows; a bigger window is clamped to it (the compositor
+    /// then scales it to the window) so an over-large window never fails to configure.
+    max_dim: u32,
     renderer: Renderer,
 }
 
@@ -561,12 +568,13 @@ impl WindowPresenter {
         .into_iter()
         .find(|m| caps.present_modes.contains(m))
         .unwrap_or(wgpu::PresentMode::AutoNoVsync);
+        let max_dim = gpu.device.limits().max_texture_dimension_2d;
         let size = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width.clamp(1, max_dim),
+            height: size.height.clamp(1, max_dim),
             present_mode,
             // Two frames in flight: with one, a frame arriving before the panel had taken the
             // previous one blocked `get_current_texture` for up to a refresh, which showed as
@@ -591,6 +599,7 @@ impl WindowPresenter {
             surface,
             config,
             view_format,
+            max_dim,
             renderer,
         })
     }
@@ -616,9 +625,12 @@ impl WindowPresenter {
         placement: Option<Placement>,
         cursor: Option<CursorPosition>,
     ) -> bool {
-        if size != (self.config.width, self.config.height) {
-            self.config.width = size.0;
-            self.config.height = size.1;
+        // Clamp to what the device can hold, so a window larger than the maximum texture scales
+        // instead of failing to configure and stalling the stream.
+        let want = (size.0.clamp(1, self.max_dim), size.1.clamp(1, self.max_dim));
+        if want != (self.config.width, self.config.height) {
+            self.config.width = want.0;
+            self.config.height = want.1;
             self.surface.configure(&self.gpu.device, &self.config);
         }
         let frame = match self.surface.get_current_texture() {
@@ -634,7 +646,7 @@ impl WindowPresenter {
             format: Some(self.view_format),
             ..Default::default()
         });
-        self.renderer.render(&view, size, placement, cursor);
+        self.renderer.render(&view, want, placement, cursor);
         frame.present();
         true
     }

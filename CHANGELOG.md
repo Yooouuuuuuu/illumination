@@ -11,6 +11,19 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-11-03
+
+### Fixed
+
+- **Resizing the viewer window past 2048 px stalled the session.** The GPU
+  device was created with wgpu's downlevel limits, which cap a texture — and
+  so the window surface — at 2048 px. A wider or taller window failed
+  `Surface::configure` on every resize tick, no frame reached the screen, and
+  the host paused ("no video arriving"). The device now asks for the adapter's
+  real limits (16384 on a discrete GPU), and the surface is clamped to that
+  maximum as a safety net, so an over-large window (a future multi-monitor
+  span) is scaled by the compositor instead of failing.
+
 ## [0.11.4] - 2026-11-03
 
 Step 4 of the control review, the last build step: the clipboard. Protocol 14.
