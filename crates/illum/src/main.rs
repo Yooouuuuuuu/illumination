@@ -119,7 +119,8 @@ enum Command {
         /// Frames arriving later than this after capture count as late (default 50 ms).
         #[arg(long, default_value_t = 50)]
         latency_limit: u32,
-        /// Parity range in percent for the loss controller (default 5 to 30).
+        /// Parity range in percent, for measurement runs only (the loss controller keeps it
+        /// between 5 and 30 on its own; it is not a user setting).
         #[arg(long, default_value_t = 5)]
         fec_min: u32,
         #[arg(long, default_value_t = 30)]

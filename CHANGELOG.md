@@ -11,6 +11,15 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-03
+
+### Changed
+
+- Documentation brought in line with 0.10.0: the ladder as built (7 rungs from
+  the default cap), the keyframe interval, the viewer notices under
+  diagnostics, the results document pointing at the rules it produced, and the
+  parity flags described as measurement-only in `illum view --help`.
+
 ## [0.10.0] - 2026-11-03
 
 The adaptation tuned from the measurement runs (docs/testing/results-2026-11-02.md),

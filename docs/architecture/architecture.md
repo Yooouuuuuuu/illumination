@@ -392,10 +392,11 @@ against the capture time in the packet header) and reports both with the loss co
 grades and decides, applies the rung to the pacer, the encoder (bitrate live on hardware
 encoders; frame rate and resolution by reopening, which costs a keyframe) and the packetiser's
 parity, and tells the viewer (`Quality`, shown in the title). The ladder as built: five bitrate
-rungs (×0.8 each, so down to 0.41 × cap), then 45/30/20/15 fps with bitrate scaled with the
-frame rate, then 75 % and 50 % of the native size, never below 1 Mb/s — 11 rungs from a
-20 Mb/s cap. The resolution floor per bitrate of the plan above was dropped in favour of this
-fixed shape; the harness can revisit it.
+rungs (×0.8 each, so down to 0.41 × cap), then the frame-rate rungs below the user's cap
+(60/45/30/20/15) with bitrate scaled with the frame rate, then, only if the user allows it,
+75 % and 50 % of the native size, never below 1 Mb/s — 7 rungs from a 20 Mb/s, 30 fps cap
+(11 at 60 fps with resolution rungs, the v0.6.0 shape). The resolution floor per bitrate of the
+plan above was dropped in favour of this fixed shape; the harness can revisit it.
 
 Three rules were **added from the harness** (§5.7) on 2026-10-30, each because a scenario failed
 without it:
@@ -510,7 +511,8 @@ viewer reports "frame N broken"; the host encodes its *next* frame as a differen
 frame the viewer does have. No old data is resent, the viewer never waits (it keeps showing the
 last good frame), and the picture heals within one round trip. AV1 and H.265 both support this,
 and it is what Sunshine does. **Extra parity for keyframes** (v0.7.1): a keyframe's blocks get at
-least 30 % parity whatever the controller set, and a request is honoured every 250 ms. A
+least 30 % parity whatever the controller set, and a request is honoured at most every 500 ms (two keyframes a second; 250 ms until
+v0.10.0, §5.5 rule 9). A
 keyframe is ~180 packets and the one frame that must arrive; at 5–10 % parity on a Wi-Fi burst
 it mostly died, the retry died too, and the picture stalled for seconds (the first live run).
 
@@ -774,6 +776,9 @@ logs `Migrating V0 -> V1`).
 - The per-second grades, rung changes and FEC steps are logged, so a bad session can be read back
   second by second. *(v0.9.0: `view --report` writes the per-second records as JSON, with the
   host's own per-second `HostStats`; `illum report` tabulates a folder of them, §5.7.)*
+- The viewer's title says what it is waiting for rather than freezing silently: a keyframe
+  unanswered for 2 s, or no media for 3 s while the control channel is alive (v0.10.0, §5.5
+  rule 9).
 - Each role writes a trace log with a component prefix, as AnyDesk's `ad.trace` does.
 - One-click diagnostics bundle containing:
   - connection details
