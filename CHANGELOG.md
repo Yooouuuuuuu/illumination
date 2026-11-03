@@ -11,6 +11,19 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-03
+
+Step 3 of the control review: input delay has a number. Protocol 13.
+
+### Added
+
+- **"input N ms" in the title bar**: the host acknowledges every input event
+  as it injects it (moves on the UDP path at most ten times a second), and
+  the viewer shows the median round trip of the last second, or the last one
+  known while nothing new was typed. It is the time from the key or move
+  leaving the viewer to the host having injected it, the input half of what
+  "latency" measures for the picture.
+
 ## [0.11.2] - 2026-11-03
 
 Step 2 of the control review: mouse moves. Protocol 12.

@@ -753,14 +753,22 @@ fn run_view(
     };
 
     let input = with_input.then(|| {
-        let input_sender = sender.clone();
+        // Each event's departure is noted, so the host's acknowledgement becomes "input N ms".
+        let (input_sender, sent) = (sender.clone(), shared.clone());
         let out = Arc::new(InputOut::new(move |ev| {
+            sent.lock()
+                .expect("view state lock")
+                .input_sent(false, ev.seq);
             input_sender.send(Channel::Input, ev.encode())
         }));
         // Mouse moves take the UDP path while it is up (§6); the reliable path otherwise.
+        let sent = shared.clone();
         out.set_unreliable(Some(Box::new(move |ev| {
             match media_slot.lock().expect("media slot").as_ref() {
                 Some(client) => {
+                    sent.lock()
+                        .expect("view state lock")
+                        .input_sent(true, ev.seq);
                     client.send_input(&ev.encode());
                     true
                 }

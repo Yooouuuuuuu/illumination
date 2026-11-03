@@ -53,6 +53,10 @@ pub struct Stats {
     lost: u64,
     repaired: u64,
     audio_frames: u32,
+    /// Round trips of input events this second (sent → the host's acknowledgement), and the
+    /// last one known, shown while no new one came (keystrokes are sparse).
+    input_ms: Vec<f64>,
+    last_input_ms: Option<f64>,
     pub summary: String,
 }
 
@@ -71,12 +75,18 @@ impl Default for Stats {
             lost: 0,
             repaired: 0,
             audio_frames: 0,
+            input_ms: Vec::new(),
+            last_input_ms: None,
             summary: "waiting for the first frame…".into(),
         }
     }
 }
 
 impl Stats {
+    /// The host acknowledged an input event this long after it was sent.
+    pub fn input_acked(&mut self, ms: f64) {
+        self.input_ms.push(ms);
+    }
     pub fn frame_received(&mut self, bytes: usize, encode_us: u32) {
         self.bytes += bytes as u64;
         self.encode_us += encode_us as u64;
@@ -151,6 +161,13 @@ impl Stats {
         if let Some(rtt) = rtt {
             parts.push(format!("rtt {:.1} ms", rtt.as_secs_f64() * 1000.0));
         }
+        if !self.input_ms.is_empty() {
+            self.input_ms.sort_by(|a, b| a.total_cmp(b));
+            self.last_input_ms = Some(self.input_ms[self.input_ms.len() / 2]);
+        }
+        if let Some(ms) = self.last_input_ms {
+            parts.push(format!("input {ms:.0} ms"));
+        }
         if self.datagrams + self.lost > 0 {
             let pct = self.lost as f64 * 100.0 / (self.datagrams + self.lost) as f64;
             parts.push(format!("loss {pct:.1}%"));
@@ -164,11 +181,16 @@ impl Stats {
         self.summary = parts.join(" · ");
         *self = Stats {
             summary: std::mem::take(&mut self.summary),
+            last_input_ms: self.last_input_ms,
             ..Stats::default()
         };
         true
     }
 }
+
+/// How many sent input events wait for the host's acknowledgement at most (moves go out 250
+/// times a second; an acknowledgement comes back within a round trip).
+const INPUT_SENT_KEPT: usize = 512;
 
 /// The rung and parity the host is sending (architecture §5.5), for the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +237,10 @@ pub struct ViewState {
     /// Which decoder and which presenter are in use (for the report's header).
     pub decoder_name: Option<String>,
     pub presenter_name: Option<String>,
+    /// Input events sent and not yet acknowledged: (on the unreliable path, seq, when).
+    input_sent: std::collections::VecDeque<(bool, u32, Instant)>,
+    /// Acknowledgements received this session.
+    pub input_acks: u64,
 }
 
 impl Default for ViewState {
@@ -240,11 +266,37 @@ impl Default for ViewState {
             recorder: None,
             decoder_name: None,
             presenter_name: None,
+            input_sent: std::collections::VecDeque::new(),
+            input_acks: 0,
         }
     }
 }
 
 impl ViewState {
+    /// An input event left just now (architecture §6: the host acknowledges it when injected).
+    pub fn input_sent(&mut self, unreliable: bool, seq: u32) {
+        if self.input_sent.len() >= INPUT_SENT_KEPT {
+            self.input_sent.pop_front();
+        }
+        self.input_sent.push_back((unreliable, seq, Instant::now()));
+    }
+
+    /// The host acknowledged an input event: its round trip joins the stats.
+    pub fn input_acked(&mut self, unreliable: bool, seq: u32, now: Instant) {
+        self.input_acks += 1;
+        if let Some(i) = self
+            .input_sent
+            .iter()
+            .rposition(|(u, s, _)| *u == unreliable && *s == seq)
+        {
+            let (_, _, sent) = self.input_sent[i];
+            // Everything older on the same path has been overtaken or lost; forget it too.
+            self.input_sent
+                .retain(|(u, s, _)| *u != unreliable || *s > seq);
+            self.stats
+                .input_acked(now.saturating_duration_since(sent).as_secs_f64() * 1000.0);
+        }
+    }
     pub fn frame(&self) -> Option<&Picture> {
         self.frame.as_deref()
     }

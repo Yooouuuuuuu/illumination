@@ -588,6 +588,13 @@ pub async fn run_viewer_session_sharing_media(
                         );
                     }
                 }
+                Ok(ControlMsg::InputAck { seq, unreliable }) => {
+                    shared.lock().expect("view state lock").input_acked(
+                        unreliable,
+                        seq,
+                        Instant::now(),
+                    );
+                }
                 Ok(ControlMsg::KeyboardLayout { id }) => {
                     shared.lock().expect("view state lock").host_layout = Some(id);
                 }

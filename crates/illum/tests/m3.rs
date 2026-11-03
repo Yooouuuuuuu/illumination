@@ -158,6 +158,11 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
             "key 70028 down"
         ]
     );
+    // The host acknowledges each event as it injects it (the viewer's "input N ms").
+    wait_until("the input acknowledgements", || {
+        shared.lock().unwrap().input_acks >= 6
+    })
+    .await;
 
     // The connection drops while Enter is still held: the host must let go of it.
     session.abort();

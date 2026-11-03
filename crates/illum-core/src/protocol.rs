@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
@@ -200,6 +200,13 @@ pub enum ControlMsg {
         seq: u64,
         host_us: u64,
     },
+    /// Host → controller: input event `seq` was injected (architecture §6). `unreliable` names
+    /// the sequence space: moves on the UDP path number themselves. Every reliable event is
+    /// acknowledged; moves at most ten times a second. The viewer turns it into "input N ms".
+    InputAck {
+        seq: u32,
+        unreliable: bool,
+    },
     /// Host → controller: the host's active keyboard layout (Windows KLID / HKL, as hex).
     /// Sent when the screen starts and whenever it changes; drives the Auto keyboard mode.
     KeyboardLayout {
@@ -301,6 +308,10 @@ mod tests {
             ControlMsg::TimeReply {
                 seq: 3,
                 host_us: 123_456,
+            },
+            ControlMsg::InputAck {
+                seq: 77,
+                unreliable: true,
             },
             ControlMsg::Bye,
         ];

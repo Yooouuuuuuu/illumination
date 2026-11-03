@@ -46,16 +46,17 @@ impl<S: InputSink> InputState<S> {
     }
 
     /// A move that came over the unreliable path (newest wins; anything else there is ignored).
-    pub fn handle_unreliable(&mut self, ev: InputEvent, now: Instant) {
+    pub fn handle_unreliable(&mut self, ev: InputEvent, now: Instant) -> bool {
         let InputMsg::MouseMove { x, y } = ev.msg else {
-            return;
+            return false;
         };
         if self.last_move_seq.is_some_and(|last| ev.seq <= last) {
-            return; // overtaken by a newer position
+            return false; // overtaken by a newer position
         }
         self.last_move_seq = Some(ev.seq);
         self.last_heard = now;
         self.sink.mouse_move(x, y);
+        true
     }
 
     pub fn sink(&self) -> &S {

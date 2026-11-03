@@ -748,6 +748,15 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
   picture (the letterbox bars) is nobody's; a release there still lets go, at the last place the
   pointer was on the picture.
 
+**Input round trip (v0.11.3, step 3 of the control review):** the host acknowledges every
+input event as it injects it (`InputAck`, with the event's sequence number and which space it
+came from; moves from the UDP path at most ten times a second), and the viewer's title shows
+**"input N ms"**: the median round trip of the last second, or the last one known while nothing
+new was sent. It is the input half of the picture's "latency": from the key or move leaving the
+viewer to the host having injected it (the host's own injection latency is inside it; the
+picture's way back is not). Alongside `rtt` (the clock probes' round trip) it shows at once
+whether input delay is the network or the host.
+
 **Special keys:**
 - Ctrl+Alt+Del is sent by the service with `SendSAS`. The installer sets
   `SoftwareSASGeneration` so this is allowed.

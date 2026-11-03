@@ -225,6 +225,9 @@ struct InputWorker {
     thread: Option<JoinHandle<()>>,
 }
 
+/// Moves from the UDP path are acknowledged at most this often.
+const MOVE_ACK_INTERVAL: Duration = Duration::from_millis(100);
+
 /// What the input thread receives: in order from the TCP channel, or a move from the UDP path.
 enum Arrived {
     Reliable(InputEvent),
@@ -256,10 +259,30 @@ impl InputWorker {
                 let mut state = InputState::new(sink, Instant::now());
                 let mut last_layout: Option<String> = None;
                 let mut next_layout_check = Instant::now();
+                // Every reliable event is acknowledged once injected (the viewer's "input N ms");
+                // moves on the UDP path arrive 250 times a second, so those at most ten a second.
+                let mut next_move_ack = Instant::now();
                 while !stop_flag.load(Ordering::SeqCst) {
                     match rx.recv_timeout(INPUT_TICK) {
-                        Ok(Arrived::Reliable(ev)) => state.handle(ev, Instant::now()),
-                        Ok(Arrived::Unreliable(ev)) => state.handle_unreliable(ev, Instant::now()),
+                        Ok(Arrived::Reliable(ev)) => {
+                            let seq = ev.seq;
+                            state.handle(ev, Instant::now());
+                            sender.send_control(&ControlMsg::InputAck {
+                                seq,
+                                unreliable: false,
+                            });
+                        }
+                        Ok(Arrived::Unreliable(ev)) => {
+                            let seq = ev.seq;
+                            let now = Instant::now();
+                            if state.handle_unreliable(ev, now) && now >= next_move_ack {
+                                next_move_ack = now + MOVE_ACK_INTERVAL;
+                                sender.send_control(&ControlMsg::InputAck {
+                                    seq,
+                                    unreliable: true,
+                                });
+                            }
+                        }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
