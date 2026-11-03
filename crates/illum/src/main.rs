@@ -669,8 +669,11 @@ fn run_view(
     let mut ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
     // Tell the host which lossy codecs we can decode (AV1 only in hardware); it picks AV1,
-    // else H.265, else tiles. `--codec` narrows the offer for measurement runs.
-    let decode_caps = illum_ffmpeg::probe().decode_capabilities(args.params.hw_decode);
+    // else H.265, else tiles. `--codec` narrows the offer for measurement runs. The GPU
+    // probe's answer is kept in the home folder for a week: on a two-GPU laptop it took
+    // several seconds before every connection.
+    illum_ffmpeg::set_probe_cache_dir(home.to_path_buf());
+    let decode_caps = illum_ffmpeg::decode_capabilities(args.params.hw_decode);
     let offered: Vec<String> = match args.codec {
         None | Some(CodecChoice::Av1) => decode_caps,
         Some(CodecChoice::Hevc) => decode_caps

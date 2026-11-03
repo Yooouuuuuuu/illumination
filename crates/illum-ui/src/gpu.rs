@@ -568,7 +568,11 @@ impl WindowPresenter {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
-            desired_maximum_frame_latency: 1,
+            // Two frames in flight: with one, a frame arriving before the panel had taken the
+            // previous one blocked `get_current_texture` for up to a refresh, which showed as
+            // 10–17 ms of "draw" and tipped frames over the latency limit (2026-11-03). With
+            // mailbox presentation the newest frame still wins.
+            desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
             view_formats: if view_format == format {
                 vec![]

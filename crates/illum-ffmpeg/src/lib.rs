@@ -146,20 +146,9 @@ impl Probe {
         caps
     }
 
-    /// What a viewer may offer to decode (§5.3): H.265 always (its software decoder is cheap);
-    /// AV1 **only in hardware** — decoded on a CPU it costs more than it saves, which is why the
-    /// rule says "AV1 if both sides can use it in hardware". `hardware` is the user's
-    /// "hardware decode" setting (default on); off means software decoders only.
+    /// See [`decode_capabilities`].
     pub fn decode_capabilities(&self, hardware: bool) -> Vec<String> {
-        let mut caps = Vec::new();
-        let hw = |c: VideoCodec| hardware && hardware_decoders().iter().any(|(hc, _)| *hc == c);
-        if hw(VideoCodec::Av1) {
-            caps.push(VideoCodec::Av1.decode_capability().to_string());
-        }
-        if hw(VideoCodec::Hevc) || self.decoders.iter().any(|(c, _)| *c == VideoCodec::Hevc) {
-            caps.push(VideoCodec::Hevc.decode_capability().to_string());
-        }
-        caps
+        decode_capabilities(hardware)
     }
 
     pub fn best_encoder(&self, codec: VideoCodec) -> Option<&EncoderInfo> {
@@ -167,8 +156,49 @@ impl Probe {
     }
 }
 
-/// Tries every candidate once (opening a small encoder, so GPU-less machines drop the hardware
-/// ones). Cached for the process.
+/// What a viewer may offer to decode (§5.3): H.265 always (its software decoder is cheap);
+/// AV1 **only in hardware** — decoded on a CPU it costs more than it saves, which is why the
+/// rule says "AV1 if both sides can use it in hardware". `hardware` is the user's "hardware
+/// decode" setting (default on); off means software decoders only. Costs no encoder probe: a
+/// viewer never needs one (the laptop spent two seconds failing to open encoders before every
+/// connection, 2026-11-03).
+pub fn decode_capabilities(hardware: bool) -> Vec<String> {
+    let mut caps = Vec::new();
+    let hw = |c: VideoCodec| hardware && hardware_decoders().iter().any(|(hc, _)| *hc == c);
+    if hw(VideoCodec::Av1) {
+        caps.push(VideoCodec::Av1.decode_capability().to_string());
+    }
+    if hw(VideoCodec::Hevc)
+        || software_decoders()
+            .iter()
+            .any(|(c, _)| *c == VideoCodec::Hevc)
+    {
+        caps.push(VideoCodec::Hevc.decode_capability().to_string());
+    }
+    caps
+}
+
+/// The software decoders this build has (dav1d for AV1, FFmpeg's hevc): a name lookup, no GPU.
+pub fn software_decoders() -> &'static [(VideoCodec, String)] {
+    static DECODERS: OnceLock<Vec<(VideoCodec, String)>> = OnceLock::new();
+    DECODERS.get_or_init(|| {
+        init();
+        let mut found = Vec::new();
+        for codec in [VideoCodec::Av1, VideoCodec::Hevc] {
+            for name in decoder_candidates(codec) {
+                if codec::decoder::find_by_name(name).is_some() {
+                    found.push((codec, name.to_string()));
+                    break;
+                }
+            }
+        }
+        found
+    })
+}
+
+/// Tries every encoder candidate once (opening a small encoder, so GPU-less machines drop the
+/// hardware ones) and lists the software decoders. Cached for the process. The host and
+/// `illum codecs` need this; a viewer only needs [`decode_capabilities`].
 pub fn probe() -> &'static Probe {
     static PROBE: OnceLock<Probe> = OnceLock::new();
     PROBE.get_or_init(|| {
@@ -188,7 +218,10 @@ pub fn probe() -> &'static Probe {
 
 fn probe_uncached() -> Probe {
     {
-        let mut p = Probe::default();
+        let mut p = Probe {
+            encoders: Vec::new(),
+            decoders: software_decoders().to_vec(),
+        };
         for codec in [VideoCodec::Av1, VideoCodec::Hevc] {
             for name in encoder_candidates(codec) {
                 if codec::encoder::find_by_name(name).is_none() {
@@ -201,12 +234,6 @@ fn probe_uncached() -> Probe {
                         hardware: is_hardware(name),
                     }),
                     Err(e) => tracing::debug!(target: "codec", "{name} not usable here: {e}"),
-                }
-            }
-            for name in decoder_candidates(codec) {
-                if codec::decoder::find_by_name(name).is_some() {
-                    p.decoders.push((codec, name.to_string()));
-                    break;
                 }
             }
         }
@@ -566,13 +593,78 @@ unsafe extern "C" fn pick_hw_format(
 const PROBE_AV1: &[u8] = include_bytes!("../probe/av1.obu");
 const PROBE_HEVC: &[u8] = include_bytes!("../probe/hevc.265");
 
+/// Where [`hardware_decoders`] may keep its answer between runs (the viewer's home folder).
+/// Unset, every process probes afresh, as `illum codecs` should.
+static PROBE_CACHE_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+const PROBE_CACHE_FILE: &str = "gpu-decoders.txt";
+/// A cached answer older than this is probed again (a driver update changes it; a stale
+/// "yes" only costs the fallback to the CPU decoder, a stale "no" costs AV1 for a week).
+const PROBE_CACHE_MAX_AGE_S: u64 = 7 * 24 * 3600;
+
+pub fn set_probe_cache_dir(dir: std::path::PathBuf) {
+    let _ = PROBE_CACHE_DIR.set(dir);
+}
+
+fn read_probe_cache() -> Option<Vec<(VideoCodec, String)>> {
+    let path = PROBE_CACHE_DIR.get()?.join(PROBE_CACHE_FILE);
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != format!("illum gpu-decoders {}", env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    let written: u64 = lines.next()?.trim().parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(written) > PROBE_CACHE_MAX_AGE_S {
+        return None;
+    }
+    let mut found = Vec::new();
+    for line in lines {
+        let (codec, name) = line.split_once(' ')?;
+        let codec = match codec {
+            "av1" => VideoCodec::Av1,
+            "hevc" => VideoCodec::Hevc,
+            _ => return None,
+        };
+        found.push((codec, name.to_string()));
+    }
+    Some(found)
+}
+
+fn write_probe_cache(found: &[(VideoCodec, String)]) {
+    let Some(dir) = PROBE_CACHE_DIR.get() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut text = format!("illum gpu-decoders {}\n{now}\n", env!("CARGO_PKG_VERSION"));
+    for (codec, name) in found {
+        let codec = match codec {
+            VideoCodec::Av1 => "av1",
+            VideoCodec::Hevc => "hevc",
+            VideoCodec::Tiles => continue,
+        };
+        text.push_str(&format!("{codec} {name}\n"));
+    }
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(PROBE_CACHE_FILE), text);
+}
+
 /// Codecs this machine's GPU decodes, with the decoder used ("hevc via d3d11va"), found by
 /// decoding one embedded keyframe per codec on it: the one check that answers the question
-/// the same way on every OS and vendor. Costs a few hundred milliseconds the first time, so
-/// only the viewer side asks; never the host.
+/// the same way on every OS and vendor. Costs a few hundred milliseconds here and several
+/// seconds on a two-GPU laptop, so the answer is kept on disk for a week when a cache folder
+/// was set ([`set_probe_cache_dir`]); only the viewer side asks, never the host.
 pub fn hardware_decoders() -> &'static [(VideoCodec, String)] {
     static HW: OnceLock<Vec<(VideoCodec, String)>> = OnceLock::new();
     HW.get_or_init(|| {
+        if let Some(cached) = read_probe_cache() {
+            tracing::debug!(target: "codec", "GPU decoders from the cache: {cached:?}");
+            return cached;
+        }
         init();
         let verbose = VERBOSE.load(Ordering::SeqCst);
         if !verbose {
@@ -596,6 +688,7 @@ pub fn hardware_decoders() -> &'static [(VideoCodec, String)] {
         if !verbose {
             ff::log::set_level(ff::log::Level::Error);
         }
+        write_probe_cache(&found);
         found
     })
 }

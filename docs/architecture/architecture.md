@@ -427,6 +427,9 @@ Two more came from the first long live run (2026-10-30, viewer window hidden for
    the graded seconds of a raise within four times the raise window. A hidden window grades
    almost nothing, and the laptop's Wi-Fi hiccups for 3 s every five minutes; those 🔴 seconds
    added up to "3 of the last 10" across twenty minutes and cost a rung per quarter hour.
+   And the second that completes the count must be bad itself (2026-11-03): four 🔴 seconds
+   followed by six 🟢 ones are a path that has recovered, and the rule was dropping a rung
+   into six seconds of green evidence five seconds after a loss storm ended.
 5. **"Frozen by loss" counts frames *decoded*, not shown.** A minimised window (or one whose
    display is off) decodes every frame and presents none: that is ⚪, no evidence about the
    link, whatever was lost meanwhile. The viewer reports `decoded` next to `shown`.
@@ -434,9 +437,11 @@ Two more came from the first long live run (2026-10-30, viewer window hidden for
 Four more came from the measurement runs of 2026-11-02 (`docs/testing/results-2026-11-02.md`),
 built in v0.10.0:
 6. **Congestion is loss *with a rising round trip*; random loss is loss with a flat one.** The
-   viewer probes four times a second and reports two numbers: the smallest round trip of the
-   last 3 s (a queue that never drains shows in it; our own bursts and keyframes, which delay
-   single probes by tens of ms, do not) and the smallest of the last minute, the floor, which
+   viewer probes four times a second and reports two numbers: the **75th percentile** of the
+   round trips of the last 3 s (a path above its capacity delays most probes; our own bursts
+   and keyframes, which delay single probes by tens of ms, do not move it — and neither the
+   minimum, tried first: on Wi-Fi it stayed at the floor through 70 s of 12 % loss because some
+   probes always slipped through, 2026-11-03) and the smallest of the last minute, the floor, which
    the probes before the stream started already set, so a session that starts above the link
    still knows the path's clean round trip. "Risen" means at least 1.5× the floor and 10 ms
    above it. A rung above the link showed loss of 2–12 % with the round trip going
@@ -447,9 +452,21 @@ built in v0.10.0:
    fast link read as congestion; without the pre-stream floor, a session starting above the
    link never saw a rise.)
 7. **The fast drop.** A second with loss ≥ 2 % and a risen round trip drops one rung at once,
-   at most one per second while it lasts, before the window rules. This is the emergency path
-   the plan left out; the data made it unambiguous. Starting high stays the default because of
-   it: three rungs took thirty seconds through the 10 s window, three seconds through this.
+   at most one per second, before the window rules. This is the emergency path the plan left
+   out; the data made it unambiguous. Starting high stays the default because of it: three
+   rungs took thirty seconds through the 10 s window, three seconds through this.
+   **It repeats only while it is working** (2026-11-03): a probe lost on the path comes back
+   by TCP retransmission, so during a loss storm the round trip reads as risen too, and
+   unbounded, a 15 s storm walked the ladder to the bottom in seven seconds (harness). The
+   tell is what gets through when the host sends less. A saturated link keeps delivering the
+   same amount, so the count of packets received holds up; a storm delivers a fixed share, so
+   the count falls with the rate. Within 10 s of a fast drop the next one needs the received
+   count to have held up (at least half-way between "fell with the rate" and "unchanged"; a
+   blackout delivers nothing either way and proves nothing). The loss ratio is not the test:
+   the first second of an overload fills the path's queue, so its loss reads low. With this a
+   15 s storm costs three rungs (one fast drop per 10 s plus the "frozen" 🔴 window rule) and
+   the top is back within 90 s, while a 20 Mb/s start still gets under a 12 Mb/s link in
+   three seconds.
 8. **Raises are gated on loss over the last 30 s**, the FEC controller's window, not 10 s; a
    backstop drop was being undone by a raise 15 s later.
 9. **Keyframes at most two per second** however many frames die (was four); four a second fed

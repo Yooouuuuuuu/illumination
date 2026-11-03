@@ -5,7 +5,7 @@
 direction: down
 
 viewer: Viewer — every presented frame {
-  measure: "latency = host clock now − capture time (from the packet header)\nshown += 1 · within += 1 if latency ≤ L (user limit, default 50 ms)\nunknown clock yet → counts as within\nclock probes 4 × per second: rtt = smallest of the last 3 s · floor = smallest of the last minute"
+  measure: "latency = host clock now − capture time (from the packet header)\nshown += 1 · within += 1 if latency ≤ L (user limit, default 50 ms)\nunknown clock yet → counts as within\nclock probes 4 × per second: rtt = 75th percentile of the last 3 s · floor = smallest of the last minute"
 }
 
 report: "MediaReport, once a second\nshown · within_limit · decoded · frames_lost · received · lost (before repair) · rtt · rtt floor" {
@@ -17,7 +17,7 @@ viewer.measure -> report
 host: Host — once a second {
   direction: down
 
-  timing: "timing rose ?\nrtt (smallest of the last 3 s of probes) ≥ 1.5 × the floor (smallest of the last minute,\nset by the probes before the stream) and ≥ +10 ms\n(a queue is building on the path)" {shape: diamond}
+  timing: "timing rose ?\nrtt (75th percentile of the last 3 s of probes) ≥ 1.5 × the floor (smallest of the last minute,\nset by the probes before the stream) and ≥ +10 ms\n(most probes delayed: the path is above its capacity)" {shape: diamond}
 
   grade: Grade the second {
     enough: "shown ≥ N ?\n(N = ¼ target fps, min 5)" {shape: diamond}
@@ -31,12 +31,12 @@ host: Host — once a second {
     frozen -> blank: no
   }
 
-  fast: "FAST DROP (congestion):\nloss this second ≥ 2 % and timing rose ?\n→ one rung down at once, at most one per second\n(live runs 2026-11-02: the signature shows inside the first second above the link)" {shape: diamond}
+  fast: "FAST DROP (congestion):\nloss this second ≥ 2 % and timing rose,\nand the last fast drop (< 10 s ago) worked:\npackets received held up instead of falling with the rate ?\n→ one rung down at once, at most one per second\n(live runs 2026-11-02: the signature shows inside the first second above the link;\na loss storm delays the probes too, but what gets through falls with the rate)" {shape: diamond}
 
   lat: Latency controller {
     skip: "⚪ → not counted\nleading 🟡 → wait for the first 🔴/🟢" {shape: hexagon}
     push: "append the grade"
-    drop_q: "🔴 in ≥ 30 % of\nthe last 10 graded s, all within 30 s ?" {shape: diamond}
+    drop_q: "🔴 in ≥ 30 % of the last 10 graded s,\nall within 30 s, and this second not 🟢 ?" {shape: diamond}
     raise_q: "🟢 in ≥ 80 % of the last W graded s\nand loss in the last 30 s < 0.5 % ?\nW = 15 s × 2^failures of the rung above (max 120 s)" {shape: diamond}
     drop: "DROP one rung\nhistory cleared\nif on probation (raised < 60 s ago): failures[rung] += 1\n(harness rule 2)"
     raise: "RAISE one rung\nhistory cleared · probation starts\n(60 s held → failures[rung] = 0)"

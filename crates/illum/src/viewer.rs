@@ -27,8 +27,10 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
 const PROBE_INTERVAL: Duration = Duration::from_millis(250);
-/// The round trip reported to the host is the smallest over this long (§5.5 rule 6).
+/// The round trip reported to the host is this percentile of the probes over this long
+/// (§5.5 rule 6).
 const RTT_RECENT: Duration = Duration::from_secs(3);
+const RTT_PERCENTILE: f64 = 0.75;
 /// Punch cadence before the first video datagram, and the keepalive cadence afterwards.
 const PUNCH_FAST: Duration = Duration::from_millis(200);
 const PUNCH_SLOW: Duration = Duration::from_secs(2);
@@ -415,9 +417,12 @@ fn media_loop(
                     r.tick(rtt, now);
                 }
                 let (shown, within_limit, decoded) = state.take_presented();
-                // The smallest round trip of the last 3 s (a queue that never drains shows;
-                // a burst that delayed one probe does not) and of the last minute (the floor).
-                let recent = state.clock.min_rtt_within(RTT_RECENT);
+                // The round trip the host judges congestion by: the 75th percentile of the
+                // last 3 s of probes (most probes delayed = a path above its capacity; one
+                // probe behind a keyframe burst does not count), and the floor of the minute.
+                let recent = state
+                    .clock
+                    .percentile_rtt_within(RTT_RECENT, RTT_PERCENTILE);
                 let floor = state.clock.floor_rtt();
                 (shown, within_limit, decoded, recent, floor)
             };

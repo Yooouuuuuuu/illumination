@@ -26,9 +26,13 @@ const VIEWER_OVERHEAD_MS: f64 = 4.0;
 /// Four a second fed the collapse at a rung above the link (2026-11-02); one a second left a
 /// bursty link showing under half its frames (the "100 ms outage every 4 s" scenario).
 const KEYFRAME_MIN_INTERVAL_MS: f64 = 500.0;
-/// The viewer reports the smallest round trip of this many ms (mirrors the viewer).
+/// The viewer reports this percentile of the round trips of this many ms, and the smallest of
+/// the last minute (mirrors the viewer).
 const RTT_RECENT_MS: f64 = 3000.0;
+const RTT_PERCENTILE: f64 = 0.75;
 const RTT_FLOOR_MS: f64 = 60_000.0;
+/// A lost clock probe comes back by TCP retransmission: this much later.
+const PROBE_RETRANSMIT_MS: f64 = 250.0;
 /// Share of a rung's bitrate the encoder gets (mirrors `adapt::encoder_bitrate`).
 fn encoder_bps(rung: Rung, fec_percent: u32) -> u64 {
     crate::adapt::encoder_bitrate(rung.bitrate_bps, fec_percent)
@@ -298,23 +302,22 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
     let mut next_second_ms = 1000.0;
     let mut t_s = 0u32;
     let mut seconds = Vec::new();
-    // Clock-probe round trips, sampled at every frame before it is sent (twice the base delay
-    // plus whatever queue the path holds then), with one probe from before the stream.
+    // Clock-probe round trips as the viewer measures them: four probes a second on the wall
+    // clock, each seeing the path's queue at that moment (twice the base delay plus the
+    // backlog of packets already handed to the path), with one probe from before the stream.
+    // A probe lost on the path comes back by TCP retransmission, a timer later.
     let mut rtts: VecDeque<(f64, f64)> = VecDeque::new();
     rtts.push_back((0.0, 2.0 * path.link.base_delay_ms));
+    // What the path held: (time the frame's last packet was handed to it, departure of that
+    // packet). A probe at time p queues behind the newest packet handed over before p.
+    let mut path_log: VecDeque<(f64, f64)> = VecDeque::new();
+    // Arrival times of packets the path will deliver: the viewer counts a packet as received
+    // in the second it arrives, which matters when the path's queue is filling (the fast drop
+    // compares one second's count with the next).
+    let mut arrivals: Vec<f64> = Vec::new();
 
     let mut frame_ms = 0.0;
     while frame_ms < total_ms {
-        {
-            let queue_ms = (path.last_departure_ms - frame_ms).max(0.0);
-            rtts.push_back((frame_ms, 2.0 * path.link.base_delay_ms + queue_ms));
-            while rtts
-                .front()
-                .is_some_and(|(t, _)| frame_ms - t > RTT_FLOOR_MS)
-            {
-                rtts.pop_front();
-            }
-        }
         // Apply scripted path changes.
         while events
             .front()
@@ -364,7 +367,6 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
         let mut t = send_start;
         let mut complete = true;
         let mut last_delivery = send_start;
-        let mut delivered = 0u32;
         let mut dropped = 0u32;
         for (k, m) in &blocks {
             let mut lost_in_block = 0usize;
@@ -376,7 +378,7 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
                 };
                 match path.send(t, &mut rng, in_burst) {
                     Some(arrival) => {
-                        delivered += 1;
+                        arrivals.push(arrival);
                         last_delivery = last_delivery.max(arrival);
                     }
                     None => {
@@ -391,8 +393,14 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
         }
         sender_free_ms = t;
         sec.sent_bits += total_packets as u64 * DATAGRAM_BYTES * 8;
-        sec.received += delivered;
         sec.lost += dropped;
+        path_log.push_back((t, path.last_departure_ms));
+        while path_log
+            .front()
+            .is_some_and(|(sent, _)| t - sent > RTT_FLOOR_MS)
+        {
+            path_log.pop_front();
+        }
 
         // Viewer side.
         let capture_ms = frame_ms;
@@ -420,19 +428,61 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Outcome {
             }
         }
 
-        // Second boundary: report, decide, apply.
-        let next_frame_ms = (send_start / tick_ms).floor() * tick_ms + tick_ms;
+        // Second boundary: report, decide, apply. (The tick index is taken with a margin: a
+        // 30 fps tick is not exact in floating point, and `k × tick ÷ tick` can land just
+        // under `k`, which sent the same frame twice and read as 33 frames a second.)
+        let next_frame_ms = ((send_start / tick_ms + 1e-6).floor() + 1.0) * tick_ms;
         while next_second_ms <= next_frame_ms.min(total_ms) {
-            // What the viewer reports about the round trip: the smallest of the last 3 s (a
-            // queue that never drains shows; our own bursts do not) and of the last minute.
-            let min_since = |since_ms: f64| {
+            // What arrived this second.
+            arrivals.retain(|a| {
+                let arrived = *a <= next_second_ms;
+                if arrived {
+                    sec.received += 1;
+                }
+                !arrived
+            });
+            // This second's four probes.
+            for i in (0..4).rev() {
+                let p = next_second_ms - f64::from(i) * 250.0;
+                let queue_ms = path_log
+                    .iter()
+                    .rev()
+                    .find(|(sent, _)| *sent <= p)
+                    .map_or(0.0, |(_, departure)| (departure - p).max(0.0));
+                let in_burst = scenario.burst_every_s > 0.0 && {
+                    let phase = (p / 1000.0) % scenario.burst_every_s;
+                    phase * 1000.0 < scenario.burst_len_ms
+                };
+                let lost = in_burst || rng.next_f64() < path.link.loss;
+                let retransmit_ms = if lost { PROBE_RETRANSMIT_MS } else { 0.0 };
+                rtts.push_back((p, 2.0 * path.link.base_delay_ms + queue_ms + retransmit_ms));
+            }
+            while rtts
+                .front()
+                .is_some_and(|(t, _)| next_second_ms - t > RTT_FLOOR_MS)
+            {
+                rtts.pop_front();
+            }
+            // What the viewer reports about the round trip: the 75th percentile of the last
+            // 3 s (most probes delayed = congestion; one behind a keyframe burst does not
+            // count) and the smallest of the last minute (the floor).
+            let within = |since_ms: f64| -> Vec<f64> {
                 rtts.iter()
                     .filter(|(t, _)| next_second_ms - t <= since_ms)
                     .map(|(_, r)| *r)
-                    .fold(f64::INFINITY, f64::min)
+                    .collect()
             };
-            let recent = min_since(RTT_RECENT_MS);
-            let floor = min_since(RTT_FLOOR_MS).min(recent);
+            let recent = {
+                let mut v = within(RTT_RECENT_MS);
+                v.sort_by(|a, b| a.total_cmp(b));
+                v.get(((v.len().max(1) - 1) as f64 * RTT_PERCENTILE).round() as usize)
+                    .copied()
+                    .unwrap_or(f64::INFINITY)
+            };
+            let floor = within(RTT_FLOOR_MS)
+                .into_iter()
+                .fold(f64::INFINITY, f64::min)
+                .min(recent);
             let as_ms = |v: f64| {
                 if v.is_finite() {
                     v.round().max(1.0) as u32

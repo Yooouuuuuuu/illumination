@@ -52,6 +52,15 @@ pub const FAST_DROP_LOSS_PPM: u64 = 20_000;
 /// above it, counts as risen.
 pub const RTT_RISE_FACTOR: f64 = 1.5;
 pub const RTT_RISE_MIN_MS: u32 = 10;
+/// The fast drop repeats only while it is working. A lost clock probe comes back by TCP
+/// retransmission, so during a loss storm the round trip reads as risen too, and unbounded the
+/// fast drop walked the ladder to the bottom in seven seconds of a 15 s storm (harness). The
+/// tell is what gets through when we send less: a saturated link keeps delivering the same
+/// amount, a storm delivers a fixed share, so the count falls with the rate. Within this many
+/// seconds of a fast drop, the next needs the delivered count to have held up: at least
+/// half-way between "fell with the rate" and "unchanged". (The loss ratio is not used: the
+/// first second of an overload fills the path's queue, so its loss reads low.)
+pub const FAST_DROP_MEMORY_SECONDS: u64 = 10;
 /// The round trip's minimum is taken over this many seconds.
 pub const RTT_FLOOR_SECONDS: usize = 60;
 /// Loss at or above the 🔴 zone within this many seconds blocks raises: the same window the FEC
@@ -209,9 +218,9 @@ impl Ladder {
 }
 
 /// Walks the ladder from graded seconds (§5.5). Drop: 🔴 in ≥ 30 % of the last 10 graded
-/// seconds. Raise: 🟢 in ≥ 80 % of the last 15 graded seconds, and no loss above the FEC
-/// threshold. One rung per action; after an action the count starts again at the first
-/// 🔴 or 🟡 (leading 🟡 holds and ⚪ seconds are not counted).
+/// seconds, the latest of them not 🟢. Raise: 🟢 in ≥ 80 % of the last 15 graded seconds, and
+/// no loss above the FEC threshold. One rung per action; after an action the count starts
+/// again at the first 🔴 or 🟡 (leading 🟡 holds and ⚪ seconds are not counted).
 ///
 /// Back-off (from the harness, 2026-10-30): a raise that is followed by a drop within 60 s
 /// "failed"; each failure doubles the green run the rung needs before it is tried again
@@ -305,7 +314,10 @@ impl LatencyController {
         let horizon = RAISE_RECENT_FACTOR * (RAISE_WINDOW << MAX_BACKOFF_DOUBLINGS) as u64;
         self.history.retain(|(t, _)| clock - t < horizon);
         let n = self.history.len();
-        if n >= DROP_WINDOW {
+        // A drop needs the second that completes the count to be bad itself: four 🔴 and then
+        // six 🟢 is a path that has recovered (a loss storm's wake, harness 2026-11-03), and
+        // dropping into six seconds of green evidence costs a rung for nothing.
+        if n >= DROP_WINDOW && grade != Grade::Green {
             let window = &self.history[n - DROP_WINDOW..];
             let recent = clock - window[0].0 < DROP_RECENT_SECONDS;
             let red = window.iter().filter(|(_, g)| *g == Grade::Red).count() as f64;
@@ -459,8 +471,10 @@ pub struct SecondReport {
     pub received: u32,
     pub lost: u32,
     /// Round trip of the viewer's clock probes over the last few seconds, ms (0 = unknown):
-    /// the *smallest* of them, so a queue that never drains shows and our own bursts do not.
-    /// Its rise above `rtt_floor_ms` is how congestion is told from random loss.
+    /// the 75th percentile of them, so a path that delays most probes shows while one probe
+    /// caught behind a keyframe burst does not (the minimum stayed flat through 70 s of
+    /// overload on Wi-Fi, 2026-11-03). Its rise above `rtt_floor_ms` is how congestion is told
+    /// from random loss.
     pub rtt_ms: u32,
     /// The smallest round trip of the last minute, ms (0 = unknown): the path without a queue.
     /// The probes before the stream started set it, so a session that starts above the link
@@ -486,6 +500,28 @@ pub struct Adapter {
     recent_loss: std::collections::VecDeque<(u32, u32)>,
     /// Round trips of the last [`RTT_FLOOR_SECONDS`] seconds (unknown ones left out).
     rtts: std::collections::VecDeque<u32>,
+    /// Seconds observed so far.
+    seconds: u64,
+    /// The last fast drop, which the next one has to justify.
+    last_fast_drop: Option<FastDrop>,
+}
+
+/// A fast drop: when, what got through in the second that called for it, and the share of
+/// the rate kept.
+#[derive(Debug, Clone, Copy)]
+struct FastDrop {
+    second: u64,
+    received: u32,
+    rate_kept: f64,
+}
+
+impl FastDrop {
+    /// Whether `received` shows this drop worked: the delivered count held up instead of
+    /// falling with the rate (a blackout delivers nothing either way and proves nothing).
+    fn worked(&self, received: u32) -> bool {
+        let held = f64::from(self.received) * (1.0 + self.rate_kept) / 2.0;
+        received > 0 && f64::from(received) >= held
+    }
 }
 
 impl Adapter {
@@ -495,6 +531,19 @@ impl Adapter {
             fec: FecController::new(fec_floor, fec_ceiling),
             recent_loss: std::collections::VecDeque::new(),
             rtts: std::collections::VecDeque::new(),
+            seconds: 0,
+            last_fast_drop: None,
+        }
+    }
+
+    /// Whether a fast drop may follow the last one: either that one is more than
+    /// [`FAST_DROP_MEMORY_SECONDS`] ago, or it visibly worked.
+    fn fast_drop_justified(&self, received: u32) -> bool {
+        match self.last_fast_drop {
+            Some(last) if self.seconds - last.second < FAST_DROP_MEMORY_SECONDS => {
+                last.worked(received)
+            }
+            _ => true,
         }
     }
 
@@ -581,10 +630,21 @@ impl Adapter {
         );
         decision.grade = Some(grade);
         // Congestion this second: loss with a queue building. One rung down at once, at most
-        // one per second while it lasts; the window rules take over again below.
+        // one per second, and only while the loss answers to it; the window rules take over
+        // again below.
+        self.seconds += 1;
         let loss_now = loss_ppm(u64::from(report.received), u64::from(report.lost));
-        if loss_now >= FAST_DROP_LOSS_PPM && timing_rose && self.latency.step(Move::Down).is_some()
+        let before = self.latency.rung().bitrate_bps;
+        if loss_now >= FAST_DROP_LOSS_PPM
+            && timing_rose
+            && self.fast_drop_justified(report.received)
+            && self.latency.step(Move::Down).is_some()
         {
+            self.last_fast_drop = Some(FastDrop {
+                second: self.seconds,
+                received: report.received,
+                rate_kept: self.latency.rung().bitrate_bps as f64 / before as f64,
+            });
             decision.rung = Some(self.latency.rung());
             decision.reason = format!(
                 "congestion: loss {:.1} % with rtt {} ms (floor {floor_ms} ms)",
@@ -696,16 +756,17 @@ mod tests {
     #[test]
     fn rtt_floor_tells_congestion_from_random_loss() {
         let mut a = Adapter::new(top(), 5, 30);
-        let second = |rtt_ms, lost| SecondReport {
+        let report = |rtt_ms, received, lost| SecondReport {
             shown: 60,
             within_limit: 60,
             decoded: 60,
             frames_lost: 0,
-            received: 1000 - lost,
+            received,
             lost,
             rtt_ms,
             rtt_floor_ms: 0,
         };
+        let second = |rtt_ms, lost| report(rtt_ms, 1000 - lost, lost);
         // Ten quiet seconds set the floor at 12 ms (no floor reported: the host's own view).
         for _ in 0..10 {
             assert_eq!(a.observe(second(12, 0)).rung, None);
@@ -725,17 +786,57 @@ mod tests {
             assert_eq!(a.observe(second(13, 30)).rung, None);
         }
         assert_eq!(a.rung_index(), 0);
-        // 3 % loss with the rtt tripled: congestion, one rung down at once, and again next second.
-        let d = a.observe(second(36, 30));
+        // A link that carries 1000 packets a second, sent 1400: congestion, one rung down at
+        // once.
+        let d = a.observe(report(36, 1000, 400));
         assert_eq!(a.rung_index(), 1);
         assert!(d.reason.starts_with("congestion"), "{}", d.reason);
-        a.observe(second(40, 30));
+        // At 80 % of the rate the link still delivers its 1000: the drop worked, the next
+        // follows at once.
+        a.observe(report(40, 1000, 120));
+        assert_eq!(a.rung_index(), 2);
+        // Had the delivered count fallen with the rate instead, whatever is losing packets is
+        // not our rate, and the fast drop stops (a loss storm delays every probe too, and must
+        // not cost the whole ladder); the window rules go on judging the picture.
+        for _ in 0..8 {
+            a.observe(report(40, 700, 200));
+        }
         assert_eq!(a.rung_index(), 2);
         // Clean again: no further drop, and no raise until the loss window is clean.
         for _ in 0..20 {
             assert_eq!(a.observe(second(12, 0)).rung, None);
         }
         assert_eq!(a.rung_index(), 2);
+    }
+
+    #[test]
+    fn a_loss_storm_costs_one_rung_per_ten_seconds() {
+        // 75 % of everything lost for 25 s, probes retransmitted, the picture still judged fine
+        // (the viewer shows what assembles): what gets through falls with the rate, so the
+        // first drop is free, the next is refused, and the memory expires after 10 s. A
+        // blackout (nothing through at all) proves nothing and costs one rung per 10 s too.
+        for (received_per_mbps, lost_per_mbps) in [(25.0, 75.0), (0.0, 100.0)] {
+            let mut a = Adapter::new(top(), 5, 30);
+            let mut drops = Vec::new();
+            for s in 0..25 {
+                let mbps = a.rung().bitrate_bps as f64 / 1e6;
+                let storm = SecondReport {
+                    shown: 60,
+                    within_limit: 60,
+                    decoded: 60,
+                    frames_lost: 0,
+                    received: (received_per_mbps * mbps) as u32,
+                    lost: (lost_per_mbps * mbps) as u32,
+                    rtt_ms: 260,
+                    rtt_floor_ms: 12,
+                };
+                if a.observe(storm).rung.is_some() {
+                    drops.push(s);
+                }
+            }
+            assert_eq!(drops, vec![0, 10, 20]);
+            assert_eq!(a.rung_index(), 3);
+        }
     }
 
     #[test]
@@ -815,14 +916,17 @@ mod tests {
             }
         }
         assert_eq!(c.index(), 0);
-        // Ten consecutive graded seconds with three red: the drop as designed.
+        // Ten consecutive graded seconds with three red: the drop as designed — on a bad
+        // second. Three reds and then seven greens is a path that has recovered, no drop; the
+        // next red completes a window of three reds again and drops.
         for _ in 0..3 {
             assert_eq!(c.observe(Grade::Red, false), None);
         }
-        for _ in 0..6 {
+        for _ in 0..7 {
             assert_eq!(c.observe(Grade::Green, false), None);
         }
-        assert_eq!(c.observe(Grade::Green, false), Some(Move::Down));
+        assert_eq!(c.index(), 0, "the tenth second was green");
+        assert_eq!(c.observe(Grade::Red, false), Some(Move::Down));
     }
 
     #[test]

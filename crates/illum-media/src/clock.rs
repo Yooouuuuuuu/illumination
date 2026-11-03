@@ -83,16 +83,32 @@ impl ClockSync {
     }
 
     /// The smallest round trip among the probes of the last `recent` (ending at the newest
-    /// probe): a queue that never drains shows in it, a burst that delayed one probe does not.
+    /// probe).
     pub fn min_rtt_within(&self, recent: Duration) -> Option<Duration> {
+        self.percentile_rtt_within(recent, 0.0)
+    }
+
+    /// The `p`-th fraction (0 = smallest, 1 = largest) of the round trips of the last
+    /// `recent`, ending at the newest probe. The 0.75 point is what the host judges congestion
+    /// by (§5.5 rule 6): on Wi-Fi a path above its capacity delays *most* probes by tens of ms
+    /// while some still slip through at the floor, so the minimum stayed flat for 70 s of
+    /// 12 % loss (2026-11-03); one probe caught behind a keyframe burst does not move the
+    /// 0.75 point.
+    pub fn percentile_rtt_within(&self, recent: Duration, p: f64) -> Option<Duration> {
         let newest = self.samples.back()?.mid_us;
         let recent_us = recent.as_micros() as u64;
-        self.samples
+        let mut rtts: Vec<u64> = self
+            .samples
             .iter()
             .filter(|s| s.mid_us + recent_us >= newest)
             .map(|s| s.rtt_us)
-            .min()
-            .map(Duration::from_micros)
+            .collect();
+        if rtts.is_empty() {
+            return None;
+        }
+        rtts.sort_unstable();
+        let idx = ((rtts.len() - 1) as f64 * p.clamp(0.0, 1.0)).round() as usize;
+        Some(Duration::from_micros(rtts[idx.min(rtts.len() - 1)]))
     }
 
     /// The host clock at local time `local_us`.

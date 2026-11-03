@@ -11,6 +11,51 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-03
+
+What the first adaptive session on 0.10.1 showed (laptop viewing the desktop
+over Wi-Fi): 70 s at the top rung with 10–13 % loss and no picture, because
+the fast drop never fired.
+
+### Fixed
+
+- **The round trip the host judges by is the 75th percentile of the last 3 s
+  of probes, not the minimum.** On Wi-Fi a path above its capacity delays most
+  probes by tens of ms while some still get through at the floor; the minimum
+  stayed at 12 ms through 70 s of 12 % loss, so neither the fast drop nor the
+  "frozen by overload" rule fired. One probe caught behind a keyframe burst
+  still does not move the 75th percentile. The simulator models the same
+  statistic and a lost probe's TCP retransmission.
+- **Swap chain with two frames in flight** instead of one: a frame arriving
+  before the panel had taken the previous one blocked the window for up to a
+  refresh, which showed as 10–17 ms of "draw" and tipped frames over the
+  50 ms limit, costing a rung for nothing. Mailbox presentation still shows
+  the newest frame.
+- **The fast drop repeats only while it is working.** A lost clock probe
+  comes back by TCP retransmission, so during a loss storm the round trip
+  reads as risen as well, and unbounded the fast drop walked the ladder to
+  the bottom in seven seconds of a 15 s storm (harness). The tell is what gets
+  through when the host sends less: a saturated link keeps delivering the
+  same amount, a storm delivers a fixed share. Within 10 s of a fast drop the
+  next one needs the received count to have held up; a 15 s storm now costs
+  three rungs and the top is back within 90 s, while a 20 Mb/s start still
+  gets under a 12 Mb/s link in three seconds.
+- **The 10 s drop rule needs the second that completes the count to be bad
+  itself.** Four 🔴 seconds followed by six 🟢 ones are a path that has
+  recovered; the rule dropped a rung into six seconds of green evidence five
+  seconds after a storm ended.
+- The simulator's clock probes are sampled on the wall clock, four a second,
+  like the viewer's, instead of at frame boundaries, where the host's own
+  pacer backlog read as path queueing; a packet counts as received in the
+  second it arrives, not the second it was sent; and a 30 fps tick no longer
+  sends the same frame twice on a floating-point boundary, which had shown as
+  33 frames a second and 46–63 ms of latency at that rung on a clean link.
+- **Connecting took five seconds on the laptop**: the viewer probed every
+  encoder (two seconds of failing to open NVENC, AMF and QSV, which a viewer
+  never needs) and then the GPU decoders (three seconds on a two-GPU laptop)
+  before every connection. The viewer now skips the encoder probe, and the GPU
+  decoder answer is kept in the home folder for a week.
+
 ## [0.10.1] - 2026-11-03
 
 ### Changed

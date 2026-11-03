@@ -63,11 +63,15 @@ fn congestion_at_the_top_drops_within_seconds() {
 }
 
 #[test]
-fn a_loss_storm_with_flat_timing_leaves_the_ladder_alone() {
+fn a_loss_storm_costs_a_few_rungs_and_comes_back() {
     // Fifteen seconds at 75 % loss on a fast path (what a path flip looked like on
-    // 2026-11-02): nothing gets through, but nothing is queueing either. Parity rises, the
-    // ladder holds, and the picture is back within seconds of the storm ending.
-    let s = Scenario::new("15 s at 75 % loss", 180, Link::clean(100_000_000))
+    // 2026-11-02). Nothing gets through; the clock probes are lost too and come back by TCP
+    // retransmission, so the round trip reads as risen and the fast drop fires — but what gets
+    // through falls with the rate, so the next fast drop is refused until the memory of the
+    // last expires (10 s), and the storm costs a few rungs (one fast drop per 10 s plus the
+    // "frozen" 🔴 window rule), not the whole ladder. The picture is back within seconds of the
+    // storm ending, the top rung within two minutes.
+    let s = Scenario::new("15 s at 75 % loss", 240, Link::clean(100_000_000))
         .then(
             60,
             Link {
@@ -78,15 +82,21 @@ fn a_loss_storm_with_flat_timing_leaves_the_ladder_alone() {
         .then(75, Link::clean(100_000_000));
     let o = run(&s, &settings(20_000_000), 8);
     show(&o);
-    assert!(
-        o.seconds.iter().all(|s| s.rung_index == 0),
-        "loss without a queue never walks the ladder down"
-    );
+    let lowest = o.seconds[60..90]
+        .iter()
+        .map(|s| s.rung_index)
+        .max()
+        .unwrap();
+    assert!(lowest <= 3, "the storm cost {lowest} rungs");
     let back = o.seconds[75..]
         .iter()
         .position(|s| s.grade == Grade::Green)
         .expect("green again after the storm");
     assert!(back <= 5, "took {back} s to show again after the storm");
+    assert_eq!(
+        o.seconds[200].rung_index, 0,
+        "back at the top within two minutes"
+    );
 }
 
 #[test]
@@ -121,23 +131,24 @@ fn wifi_at_10_mbps_settles_below_the_link() {
     );
     let o = run(&s, &settings(20_000_000), 2);
     show(&o);
-    // Settled: under the link, apart from the occasional probe of the rung just above it (the
-    // raise rule tries it again after a green run that doubles with every failure, 15 → 30 →
-    // 60 → 120 s; each probe costs about ten 🔴 seconds before the 10 s window undoes it).
+    // Settled: sending under the link's capacity and green, apart from the occasional probe of
+    // the rung just above it (the raise rule tries it again after a green run that doubles
+    // with every failure, 15 → 30 → 60 → 120 s; each probe costs about ten 🔴 seconds before
+    // the 10 s window undoes it). The 10.2 Mb/s rung itself sends about 9.8 Mb/s once parity
+    // and headers have come out of it, so the rung number is not the test.
     let settled = &o.seconds[o.seconds.len() - 60..];
-    let under = settled
-        .iter()
-        .filter(|s| s.rung.bitrate_bps < 10_000_000)
-        .count();
+    let under = settled.iter().filter(|s| s.sent_bps <= 10_000_000).count();
     assert!(
         under >= 48,
         "ends below the link's capacity for most of the time: {under}/60 s"
     );
+    let green = settled.iter().filter(|s| s.grade == Grade::Green).count();
+    assert!(green >= 48, "ends green for most of the time: {green}/60 s");
     assert!(o.scores.flaps <= 2, "flaps: {}", o.scores.flaps);
     let first_fit = o
         .seconds
         .iter()
-        .position(|s| s.rung.bitrate_bps < 10_000_000)
+        .position(|s| s.sent_bps <= 10_000_000)
         .expect("drops below 10 Mb/s");
     eprintln!("first rung under the link after {first_fit} s");
     assert!(
