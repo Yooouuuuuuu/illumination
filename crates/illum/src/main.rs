@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use illum::host::{AudioFactory, HostConfig, SourceFactory, serve_session};
 #[cfg(windows)]
 use illum::host::{InputFactory, LayoutFn};
-use illum::viewer::{Notify, ViewParams, run_viewer_session};
+use illum::viewer::{MediaSlot, Notify, ViewParams, run_viewer_session_sharing_media};
 use illum_core::Role;
 use illum_core::input::InputMsg;
 #[cfg(windows)]
@@ -735,13 +735,18 @@ fn run_view(
         });
     }
     let sender = conn.sender();
+    let media_slot = MediaSlot::default();
     let session = {
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
         let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
         let params = args.params.clone();
+        let media_slot = media_slot.clone();
         runtime.spawn(async move {
-            let result = run_viewer_session(conn, params, shared, notify).await;
+            let result =
+                run_viewer_session_sharing_media(conn, params, shared, notify, media_slot.clone())
+                    .await;
+            *media_slot.lock().expect("media slot") = None;
             waker.wake(UiEvent::Exit);
             result
         })
@@ -749,9 +754,20 @@ fn run_view(
 
     let input = with_input.then(|| {
         let input_sender = sender.clone();
-        Arc::new(InputOut::new(move |ev| {
+        let out = Arc::new(InputOut::new(move |ev| {
             input_sender.send(Channel::Input, ev.encode())
-        }))
+        }));
+        // Mouse moves take the UDP path while it is up (§6); the reliable path otherwise.
+        out.set_unreliable(Some(Box::new(move |ev| {
+            match media_slot.lock().expect("media slot").as_ref() {
+                Some(client) => {
+                    client.send_input(&ev.encode());
+                    true
+                }
+                None => false,
+            }
+        })));
+        out
     });
     // Keys Windows keeps for itself (Win, Alt+Tab, …) go to the host while the viewer has focus.
     #[cfg(windows)]

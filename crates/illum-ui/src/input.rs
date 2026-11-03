@@ -284,6 +284,9 @@ pub fn translate_key(
 }
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
+/// Mouse moves leave at most this often, the newest position winning: a 1000 Hz mouse does not
+/// become a thousand datagrams a second, and 250 a second is more than any screen can show.
+pub const MOVE_INTERVAL: Duration = Duration::from_millis(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Held {
@@ -295,30 +298,56 @@ struct OutState {
     held: HashSet<Held>,
     last_sent: Instant,
     last_move: Option<(i32, i32)>,
+    /// A move not sent yet: the previous one left less than [`MOVE_INTERVAL`] ago.
+    pending_move: Option<(i32, i32)>,
+    next_move_at: Instant,
 }
 
+/// Sends a move on the unreliable path; `false` when that path is not up (TCP carries it then).
+pub type UnreliableSend = Box<dyn Fn(&InputEvent) -> bool + Send + Sync>;
+
 /// Sends input events with sequence numbers. Shared by the window and the system-key hook.
+/// Everything goes in order on the reliable path except moves, which take the unreliable one
+/// when it is up (architecture §6): newest wins, and a lost one is replaced by the next.
 pub struct InputOut {
     send: Box<dyn Fn(InputEvent) + Send + Sync>,
+    unreliable: Mutex<Option<UnreliableSend>>,
     seq: AtomicU32,
+    /// Moves on the unreliable path number themselves, so a late one is dropped among moves
+    /// only and never a key behind it.
+    move_seq: AtomicU32,
     state: Mutex<OutState>,
 }
 
 impl InputOut {
     pub fn new(send: impl Fn(InputEvent) + Send + Sync + 'static) -> InputOut {
+        let now = Instant::now();
         InputOut {
             send: Box::new(send),
+            unreliable: Mutex::new(None),
             seq: AtomicU32::new(0),
+            move_seq: AtomicU32::new(0),
             state: Mutex::new(OutState {
                 held: HashSet::new(),
-                last_sent: Instant::now(),
+                last_sent: now,
                 last_move: None,
+                pending_move: None,
+                next_move_at: now,
             }),
         }
     }
 
+    /// The unreliable path for moves, once the media path is up (`None` when it goes down).
+    pub fn set_unreliable(&self, path: Option<UnreliableSend>) {
+        *self.unreliable.lock().expect("unreliable path") = path;
+    }
+
     pub fn send(&self, msg: InputMsg) {
+        if let InputMsg::MouseMove { x, y } = msg {
+            return self.send_move(x, y);
+        }
         let mut state = self.state.lock().expect("input state");
+        let now = Instant::now();
         match &msg {
             InputMsg::Key { key, down: true } => {
                 state.held.insert(Held::Key(*key));
@@ -326,27 +355,71 @@ impl InputOut {
             InputMsg::Key { key, down: false } => {
                 state.held.remove(&Held::Key(*key));
             }
-            InputMsg::MouseButton { button, down: true } => {
+            InputMsg::MouseButton {
+                button, down: true, ..
+            } => {
                 state.held.insert(Held::Button(*button));
             }
             InputMsg::MouseButton {
                 button,
                 down: false,
+                ..
             } => {
                 state.held.remove(&Held::Button(*button));
-            }
-            InputMsg::MouseMove { x, y } => {
-                if state.last_move == Some((*x, *y)) {
-                    return;
-                }
-                state.last_move = Some((*x, *y));
             }
             InputMsg::ReleaseAll => state.held.clear(),
             _ => {}
         }
-        state.last_sent = Instant::now();
+        // A button or wheel carries its position, but the host's hover should match it too.
+        if matches!(msg, InputMsg::MouseButton { .. } | InputMsg::Wheel { .. }) {
+            self.flush_move(&mut state, now);
+        }
+        state.last_sent = now;
+        self.send_reliable(msg);
+    }
+
+    fn send_reliable(&self, msg: InputMsg) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         (self.send)(InputEvent { seq, msg });
+    }
+
+    /// The pointer moved: sent at once when the last move is [`MOVE_INTERVAL`] old, otherwise
+    /// kept as the pending position until [`InputOut::service`] flushes it.
+    pub fn send_move(&self, x: i32, y: i32) {
+        self.move_at(x, y, Instant::now());
+    }
+
+    fn move_at(&self, x: i32, y: i32, now: Instant) {
+        let mut state = self.state.lock().expect("input state");
+        state.pending_move = Some((x, y));
+        if now >= state.next_move_at {
+            self.flush_move(&mut state, now);
+        }
+    }
+
+    fn flush_move(&self, state: &mut OutState, now: Instant) {
+        let Some(pos) = state.pending_move.take() else {
+            return;
+        };
+        if state.last_move == Some(pos) {
+            return;
+        }
+        state.last_move = Some(pos);
+        state.next_move_at = now + MOVE_INTERVAL;
+        let msg = InputMsg::MouseMove { x: pos.0, y: pos.1 };
+        let unreliable = self.unreliable.lock().expect("unreliable path");
+        if let Some(path) = unreliable.as_ref() {
+            let seq = self.move_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            if path(&InputEvent {
+                seq,
+                msg: msg.clone(),
+            }) {
+                return;
+            }
+        }
+        drop(unreliable);
+        state.last_sent = now;
+        self.send_reliable(msg);
     }
 
     /// Tells the host to let go of everything (e.g. the viewer lost focus).
@@ -357,19 +430,35 @@ impl InputOut {
         }
     }
 
-    /// While anything is held, sends a heartbeat when due. Returns when to call again.
-    pub fn heartbeat(&self) -> Option<Instant> {
-        let state = self.state.lock().expect("input state");
-        if state.held.is_empty() {
-            return None;
+    /// Housekeeping for the idle event loop: flushes a pending move once its turn comes, sends
+    /// a heartbeat when due while anything is held, and says when to call again.
+    pub fn service(&self) -> Option<Instant> {
+        self.service_at(Instant::now())
+    }
+
+    fn service_at(&self, now: Instant) -> Option<Instant> {
+        let mut state = self.state.lock().expect("input state");
+        let mut next: Option<Instant> = None;
+        if state.pending_move.is_some() {
+            if now >= state.next_move_at {
+                self.flush_move(&mut state, now);
+            } else {
+                next = Some(state.next_move_at);
+            }
         }
-        let due = state.last_sent + HEARTBEAT_INTERVAL;
-        drop(state);
-        if Instant::now() >= due {
-            self.send(InputMsg::Heartbeat);
-            return Some(Instant::now() + HEARTBEAT_INTERVAL);
+        if !state.held.is_empty() {
+            let due = state.last_sent + HEARTBEAT_INTERVAL;
+            let due = if now >= due {
+                state.last_sent = now;
+                drop(state);
+                self.send_reliable(InputMsg::Heartbeat);
+                now + HEARTBEAT_INTERVAL
+            } else {
+                due
+            };
+            next = Some(next.map_or(due, |n| n.min(due)));
         }
-        Some(due)
+        next
     }
 }
 
@@ -610,12 +699,12 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let s = sent.clone();
         let out = InputOut::new(move |ev| s.lock().unwrap().push(ev));
-        assert_eq!(out.heartbeat(), None, "nothing held, no heartbeat");
+        assert_eq!(out.service(), None, "nothing held, no heartbeat");
         out.send(InputMsg::Key { key: A, down: true });
         out.send(InputMsg::MouseMove { x: 1, y: 1 });
         out.send(InputMsg::MouseMove { x: 1, y: 1 }); // duplicate position dropped
         assert!(
-            out.heartbeat().is_some(),
+            out.service().is_some(),
             "something held: heartbeats scheduled"
         );
         out.release_all();
@@ -624,5 +713,61 @@ mod tests {
         let seqs: Vec<u32> = sent.iter().map(|e| e.seq).collect();
         assert_eq!(seqs, [1, 2, 3]);
         assert_eq!(sent[2].msg, InputMsg::ReleaseAll);
+    }
+
+    #[test]
+    fn moves_are_coalesced_and_prefer_the_unreliable_path() {
+        let tcp = Arc::new(Mutex::new(Vec::new()));
+        let udp = Arc::new(Mutex::new(Vec::new()));
+        let (t, u) = (tcp.clone(), udp.clone());
+        let out = InputOut::new(move |ev| t.lock().unwrap().push(ev));
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        // No unreliable path yet: moves take TCP, one per MOVE_INTERVAL, the newest position.
+        out.move_at(1, 1, t0);
+        out.move_at(2, 2, t0 + ms(1));
+        out.move_at(3, 3, t0 + ms(2));
+        assert_eq!(tcp.lock().unwrap().len(), 1, "the rest wait their turn");
+        assert_eq!(out.service_at(t0 + ms(2)), Some(t0 + MOVE_INTERVAL));
+        assert_eq!(out.service_at(t0 + MOVE_INTERVAL), None);
+        let sent: Vec<InputMsg> = tcp.lock().unwrap().iter().map(|e| e.msg.clone()).collect();
+        assert_eq!(
+            sent,
+            [
+                InputMsg::MouseMove { x: 1, y: 1 },
+                InputMsg::MouseMove { x: 3, y: 3 }
+            ]
+        );
+        // With the path up, moves go there with their own numbering; a click still goes on
+        // TCP, flushes the pending move first, and the reliable numbering is untouched.
+        out.set_unreliable(Some(Box::new(move |ev| {
+            u.lock().unwrap().push(ev.clone());
+            true
+        })));
+        out.move_at(4, 4, t0 + ms(10));
+        out.move_at(5, 5, t0 + ms(11));
+        out.send(InputMsg::MouseButton {
+            button: MouseButton::Left,
+            down: true,
+            x: 5,
+            y: 5,
+        });
+        let udp: Vec<(u32, InputMsg)> = udp
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.seq, e.msg.clone()))
+            .collect();
+        assert_eq!(
+            udp,
+            [
+                (1, InputMsg::MouseMove { x: 4, y: 4 }),
+                (2, InputMsg::MouseMove { x: 5, y: 5 })
+            ]
+        );
+        let tcp = tcp.lock().unwrap();
+        assert_eq!(tcp.len(), 3);
+        assert!(matches!(tcp[2].msg, InputMsg::MouseButton { .. }));
+        assert_eq!(tcp[2].seq, 3);
     }
 }

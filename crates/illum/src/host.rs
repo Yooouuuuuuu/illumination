@@ -218,8 +218,27 @@ const LAYOUT_CHECK: Duration = Duration::from_secs(1);
 
 /// The input thread. Dropping it releases every held key and button on the host.
 struct InputWorker {
-    tx: Option<mpsc::Sender<InputEvent>>,
+    tx: Option<mpsc::Sender<Arrived>>,
+    /// The thread stops on this, not on the channel closing: the media-in thread holds a feed
+    /// into the same channel for as long as the media path lives.
+    stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// What the input thread receives: in order from the TCP channel, or a move from the UDP path.
+enum Arrived {
+    Reliable(InputEvent),
+    Unreliable(InputEvent),
+}
+
+/// Hands moves from the UDP path to the input thread (held by the media-in thread).
+#[derive(Clone)]
+struct InputFeed(mpsc::Sender<Arrived>);
+
+impl InputFeed {
+    fn unreliable(&self, ev: InputEvent) {
+        let _ = self.0.send(Arrived::Unreliable(ev));
+    }
 }
 
 impl InputWorker {
@@ -228,16 +247,19 @@ impl InputWorker {
         layout: Option<LayoutFn>,
         sender: Sender,
     ) -> InputWorker {
-        let (tx, rx) = mpsc::channel::<InputEvent>();
+        let (tx, rx) = mpsc::channel::<Arrived>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
         let thread = std::thread::Builder::new()
             .name("input".into())
             .spawn(move || {
                 let mut state = InputState::new(sink, Instant::now());
                 let mut last_layout: Option<String> = None;
                 let mut next_layout_check = Instant::now();
-                loop {
+                while !stop_flag.load(Ordering::SeqCst) {
                     match rx.recv_timeout(INPUT_TICK) {
-                        Ok(ev) => state.handle(ev, Instant::now()),
+                        Ok(Arrived::Reliable(ev)) => state.handle(ev, Instant::now()),
+                        Ok(Arrived::Unreliable(ev)) => state.handle_unreliable(ev, Instant::now()),
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
@@ -259,20 +281,26 @@ impl InputWorker {
             .expect("spawn input thread");
         InputWorker {
             tx: Some(tx),
+            stop,
             thread: Some(thread),
         }
     }
 
     fn send(&self, ev: InputEvent) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(ev);
+            let _ = tx.send(Arrived::Reliable(ev));
         }
+    }
+
+    fn feed(&self) -> Option<InputFeed> {
+        self.tx.clone().map(InputFeed)
     }
 }
 
 impl Drop for InputWorker {
     fn drop(&mut self) {
-        self.tx = None; // disconnects the channel: the thread releases everything and exits
+        self.stop.store(true, Ordering::SeqCst); // the thread releases everything and exits
+        self.tx = None;
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -392,6 +420,7 @@ impl MediaLink {
         settings: StreamSettings,
         audio: Option<AudioFactory>,
         sender: Sender,
+        input: Option<InputFeed>,
     ) -> MediaLink {
         let inbound = hub.register(&keys);
         let stop = Arc::new(AtomicBool::new(false));
@@ -436,19 +465,30 @@ impl MediaLink {
         }
         let adapter = Arc::new(Mutex::new(adapter));
 
-        // Learns the viewer's address from its punches; exits when the hub drops the channel.
+        // Learns the viewer's address from its punches and passes its mouse moves to the input
+        // thread; exits when the hub drops the channel.
         let media_in = {
             let (peer, session_id) = (peer.clone(), keys.session_id);
             std::thread::Builder::new()
                 .name("media-in".into())
                 .spawn(move || {
                     while let Ok(msg) = inbound.recv() {
-                        if msg.stream == MediaStream::Punch {
-                            let mut slot = peer.lock().expect("peer lock");
-                            if *slot != Some(msg.from) {
-                                tracing::info!(target: "media", "[{session_id:016x}] Viewer media address {}.", msg.from);
-                                *slot = Some(msg.from);
+                        match msg.stream {
+                            MediaStream::Punch => {
+                                let mut slot = peer.lock().expect("peer lock");
+                                if *slot != Some(msg.from) {
+                                    tracing::info!(target: "media", "[{session_id:016x}] Viewer media address {}.", msg.from);
+                                    *slot = Some(msg.from);
+                                }
                             }
+                            MediaStream::Input => {
+                                if let (Some(feed), Ok(ev)) =
+                                    (&input, InputEvent::decode(&msg.payload))
+                                {
+                                    feed.unreliable(ev);
+                                }
+                            }
+                            MediaStream::Video | MediaStream::Audio => {}
                         }
                     }
                 })
@@ -891,6 +931,18 @@ pub async fn serve_session(
                 capture = None; // stop any previous stream first
                 link = None;
                 input = None; // and release anything held on the previous display
+                if let Some(make_sink) = &config.input {
+                    match make_sink(index) {
+                        Ok(sink) => {
+                            input = Some(InputWorker::start(
+                                sink,
+                                config.layout.clone(),
+                                conn.sender(),
+                            ))
+                        }
+                        Err(e) => tracing::warn!(target: "session", "Input unavailable: {e}"),
+                    }
+                }
                 match (&config.screen, conn.media_keys.clone()) {
                     (Some(f), Some(keys)) => {
                         let settings = StreamSettings::from_request(
@@ -928,6 +980,7 @@ pub async fn serve_session(
                             settings,
                             config.audio.clone(),
                             conn.sender(),
+                            input.as_ref().and_then(InputWorker::feed),
                         );
                         conn.send_control(&ControlMsg::MediaEndpoint { port: media.port() });
                         conn.send_control(&l.quality(""));
@@ -939,18 +992,6 @@ pub async fn serve_session(
                     (_, None) => conn.send_control(&ControlMsg::ScreenError {
                         reason: "no media keys for this session".into(),
                     }),
-                }
-                if let Some(make_sink) = &config.input {
-                    match make_sink(index) {
-                        Ok(sink) => {
-                            input = Some(InputWorker::start(
-                                sink,
-                                config.layout.clone(),
-                                conn.sender(),
-                            ))
-                        }
-                        Err(e) => tracing::warn!(target: "session", "Input unavailable: {e}"),
-                    }
                 }
             }
             ControlMsg::ScreenStop => {

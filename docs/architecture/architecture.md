@@ -122,8 +122,8 @@ media that must arrive *now* or not at all.
 
 | Path | Carries | Properties |
 |---|---|---|
-| **TLS 1.3 over TCP** (exists since M1) | pairing, hello, permissions, **input**, cursor, clipboard, files, feedback and probes | Everything arrives, in order. Priorities inside this path: input and cursor first, then control, then clipboard and files. |
-| **UDP**, same port number | **video and audio** | Never resent. Encrypted with keys **exported from the TLS session** (RFC 5705 keying material), so no second handshake is invented. Each packet is authenticated. |
+| **TLS 1.3 over TCP** (exists since M1) | pairing, hello, permissions, **input** (keys, buttons, wheel, text), cursor, clipboard, files, feedback and probes | Everything arrives, in order. Priorities inside this path: input and cursor first, then control, then clipboard and files. |
+| **UDP**, same port number | **video and audio**, and **mouse moves** the other way (v0.11.2) | Never resent. Encrypted with keys **exported from the TLS session** (RFC 5705 keying material), so no second handshake is invented. Each packet is authenticated. A move is the one input event where the newest replaces the rest, so it belongs here: on TCP a 1000 Hz mouse queued clicks behind itself and one lost segment froze the pointer for a retransmit. |
 
 **Why media left TCP** (the override in §2):
 - The first two-machine test (v0.4.0, laptop → this PC over Tailscale) sent about 13 Mb/s of
@@ -735,8 +735,18 @@ Unicode (`SendInput` with `KEYEVENTF_UNICODE`).
 **Mouse:** absolute coordinates mapped per monitor, using each monitor's DPI.
 - *v0.4.0:* positions are in pixels of the shown display. The host is per-monitor DPI-aware and
   converts to normalised virtual-desktop coordinates for `SendInput`.
-- The viewer draws the host's cursor shape at its own mouse position while controlling, so the
-  cursor never lags.
+- The pointer the user sees is the OS's own while controlling (Native, §5.4), or the host's
+  shape drawn at the local mouse position (Embedded); either way it never waits for the host.
+- **Moves travel on the UDP path, newest wins (v0.11.2, step 2 of the control review).** The
+  viewer sends at most one move per **4 ms** (the latest position; a 1000 Hz mouse is not a
+  thousand events) on the media path's `Input` stream, with its own sequence numbers; the host
+  drops a move overtaken by a newer one and never a key behind it (keys stay on TCP with the
+  reliable numbering). Before the media path is up, moves go on TCP as before. **Buttons and
+  wheels carry the pointer's position**, and the host moves there before pressing, so a click
+  lands where the mouse was even when the move before it is still in flight or lost; the viewer
+  also flushes a pending move before a click so the host's hover state matches. A press off the
+  picture (the letterbox bars) is nobody's; a release there still lets go, at the last place the
+  pointer was on the picture.
 
 **Special keys:**
 - Ctrl+Alt+Del is sent by the service with `SendSAS`. The installer sets

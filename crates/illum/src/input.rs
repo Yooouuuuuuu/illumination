@@ -25,6 +25,9 @@ pub struct InputState<S: InputSink> {
     held_keys: HashSet<Key>,
     held_buttons: HashSet<MouseButton>,
     last_seq: Option<u32>,
+    /// Moves from the unreliable path number themselves; a late one is dropped among moves
+    /// only, never a key behind it.
+    last_move_seq: Option<u32>,
     last_heard: Instant,
     repeat: Option<(Key, Instant)>,
 }
@@ -36,9 +39,23 @@ impl<S: InputSink> InputState<S> {
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             last_seq: None,
+            last_move_seq: None,
             last_heard: now,
             repeat: None,
         }
+    }
+
+    /// A move that came over the unreliable path (newest wins; anything else there is ignored).
+    pub fn handle_unreliable(&mut self, ev: InputEvent, now: Instant) {
+        let InputMsg::MouseMove { x, y } = ev.msg else {
+            return;
+        };
+        if self.last_move_seq.is_some_and(|last| ev.seq <= last) {
+            return; // overtaken by a newer position
+        }
+        self.last_move_seq = Some(ev.seq);
+        self.last_heard = now;
+        self.sink.mouse_move(x, y);
     }
 
     pub fn sink(&self) -> &S {
@@ -72,7 +89,15 @@ impl<S: InputSink> InputState<S> {
             }
             InputMsg::Text(text) => self.sink.text(&text),
             InputMsg::MouseMove { x, y } => self.sink.mouse_move(x, y),
-            InputMsg::MouseButton { button, down: true } => {
+            // A button or wheel carries where the pointer was: the move before it may still be
+            // in flight on the other path, or lost, and a click must land where the mouse was.
+            InputMsg::MouseButton {
+                button,
+                down: true,
+                x,
+                y,
+            } => {
+                self.sink.mouse_move(x, y);
                 if self.held_buttons.insert(button) {
                     self.sink.button(button, true);
                 }
@@ -80,12 +105,18 @@ impl<S: InputSink> InputState<S> {
             InputMsg::MouseButton {
                 button,
                 down: false,
+                x,
+                y,
             } => {
+                self.sink.mouse_move(x, y);
                 if self.held_buttons.remove(&button) {
                     self.sink.button(button, false);
                 }
             }
-            InputMsg::Wheel { dx, dy } => self.sink.wheel(dx, dy),
+            InputMsg::Wheel { dx, dy, x, y } => {
+                self.sink.mouse_move(x, y);
+                self.sink.wheel(dx, dy);
+            }
             InputMsg::Heartbeat => {}
             InputMsg::ReleaseAll => self.release_all(),
         }
@@ -336,6 +367,8 @@ mod tests {
             InputMsg::MouseButton {
                 button: MouseButton::Left,
                 down: true,
+                x: 5,
+                y: 6,
             },
         );
         h.send(10, InputMsg::ReleaseAll);
@@ -343,7 +376,17 @@ mod tests {
         assert!(h.log().contains(&"button Left up".to_string()));
         assert!(!h.state.anything_held());
         h.run_until(10, 3000);
-        assert_eq!(h.log().len(), 4, "nothing more happens afterwards");
+        assert_eq!(
+            h.log(),
+            [
+                "key 70004 down",
+                "move 5,6",
+                "button Left down",
+                "key 70004 up",
+                "button Left up"
+            ],
+            "nothing more happens afterwards"
+        );
     }
 
     #[test]
@@ -351,7 +394,54 @@ mod tests {
         let mut h = Harness::new();
         h.send(0, InputMsg::Text("你好".into()));
         h.send(1, InputMsg::MouseMove { x: 10, y: 20 });
-        h.send(2, InputMsg::Wheel { dx: 0, dy: -120 });
-        assert_eq!(h.log(), ["text 你好", "move 10,20", "wheel 0,-120"]);
+        h.send(
+            2,
+            InputMsg::Wheel {
+                dx: 0,
+                dy: -120,
+                x: 10,
+                y: 20,
+            },
+        );
+        assert_eq!(
+            h.log(),
+            ["text 你好", "move 10,20", "move 10,20", "wheel 0,-120"],
+            "the wheel brings its position along"
+        );
+    }
+
+    #[test]
+    fn unreliable_moves_keep_their_own_order_and_never_block_keys() {
+        let mut h = Harness::new();
+        let at = |ms| h.at(ms);
+        let (t0, t1) = (at(0), at(1));
+        let mv = |seq, x| InputEvent {
+            seq,
+            msg: InputMsg::MouseMove { x, y: 0 },
+        };
+        h.state.handle_unreliable(mv(2, 2), t0);
+        h.state.handle_unreliable(mv(1, 1), t0); // overtaken: dropped
+        h.state.handle_unreliable(mv(3, 3), t0);
+        // A key numbered below the moves' numbers is a different sequence: it goes through.
+        h.state.handle(
+            InputEvent {
+                seq: 1,
+                msg: InputMsg::Key { key: A, down: true },
+            },
+            t1,
+        );
+        // Anything but a move on the unreliable path is ignored.
+        h.state.handle_unreliable(
+            InputEvent {
+                seq: 9,
+                msg: InputMsg::Key {
+                    key: A,
+                    down: false,
+                },
+            },
+            t1,
+        );
+        assert_eq!(h.log(), ["move 2,0", "move 3,0", "key 70004 down"]);
+        assert!(h.state.anything_held());
     }
 }

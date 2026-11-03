@@ -124,7 +124,12 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
             down: false,
         },
         InputMsg::Text("你好".into()),
-        InputMsg::Wheel { dx: 0, dy: -120 },
+        InputMsg::Wheel {
+            dx: 0,
+            dy: -120,
+            x: 10,
+            y: 20,
+        },
         InputMsg::Key {
             key: enter,
             down: true,
@@ -148,6 +153,7 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
             "key 70004 down",
             "key 70004 up",
             "text 你好",
+            "move 10,20",
             "wheel 0,-120",
             "key 70028 down"
         ]

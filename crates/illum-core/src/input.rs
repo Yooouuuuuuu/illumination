@@ -6,11 +6,17 @@
 //! 1 key        u32 usage | u8 down                (USB HID usage, page << 16 | id: keymap.rs)
 //! 2 text       u16 len | len bytes UTF-8          (IME results and Local-mode characters)
 //! 3 move       i32 x | i32 y                      (pixels of the shown display, absolute)
-//! 4 button     u8 button | u8 down
-//! 5 wheel      i32 dx | i32 dy                    (1/120 notch units, Windows convention)
+//! 4 button     u8 button | u8 down | i32 x | i32 y
+//! 5 wheel      i32 dx | i32 dy | i32 x | i32 y    (1/120 notch units, Windows convention)
 //! 6 heartbeat                                     (sent while keys or buttons are held)
 //! 7 release all
 //! ```
+//!
+//! Everything travels on the TCP input channel, in order, except **moves**, which go on the UDP
+//! media path when it is up (`MediaStream::Input`) with their own sequence numbers: newest wins,
+//! a lost one is replaced by the next, and a 1000 Hz mouse never queues a click behind itself.
+//! Buttons and wheels carry the pointer's position, so a click lands where the mouse was even
+//! when the move before it is still in flight or lost.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
@@ -53,11 +59,29 @@ pub struct Key {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMsg {
-    Key { key: Key, down: bool },
+    Key {
+        key: Key,
+        down: bool,
+    },
     Text(String),
-    MouseMove { x: i32, y: i32 },
-    MouseButton { button: MouseButton, down: bool },
-    Wheel { dx: i32, dy: i32 },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    /// At pointer position `(x, y)`, pixels of the shown display.
+    MouseButton {
+        button: MouseButton,
+        down: bool,
+        x: i32,
+        y: i32,
+    },
+    /// At pointer position `(x, y)`.
+    Wheel {
+        dx: i32,
+        dy: i32,
+        x: i32,
+        y: i32,
+    },
     Heartbeat,
     ReleaseAll,
 }
@@ -101,13 +125,17 @@ impl InputEvent {
                 out.extend_from_slice(&x.to_le_bytes());
                 out.extend_from_slice(&y.to_le_bytes());
             }
-            InputMsg::MouseButton { button, down } => {
+            InputMsg::MouseButton { button, down, x, y } => {
                 out.push(button.to_u8());
                 out.push(*down as u8);
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
             }
-            InputMsg::Wheel { dx, dy } => {
+            InputMsg::Wheel { dx, dy, x, y } => {
                 out.extend_from_slice(&dx.to_le_bytes());
                 out.extend_from_slice(&dy.to_le_bytes());
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
             }
             InputMsg::Heartbeat | InputMsg::ReleaseAll => {}
         }
@@ -154,16 +182,20 @@ impl InputEvent {
                     InputMsg::MouseButton {
                         button,
                         down: b[1] != 0,
+                        x: i32_at(7)?,
+                        y: i32_at(11)?,
                     },
-                    7,
+                    15,
                 )
             }
             5 => (
                 InputMsg::Wheel {
                     dx: i32_at(5)?,
                     dy: i32_at(9)?,
+                    x: i32_at(13)?,
+                    y: i32_at(17)?,
                 },
-                13,
+                21,
             ),
             6 => (InputMsg::Heartbeat, 5),
             7 => (InputMsg::ReleaseAll, 5),
@@ -228,8 +260,15 @@ mod tests {
             InputMsg::MouseButton {
                 button: MouseButton::Forward,
                 down: true,
+                x: 3,
+                y: 4,
             },
-            InputMsg::Wheel { dx: 0, dy: -240 },
+            InputMsg::Wheel {
+                dx: 0,
+                dy: -240,
+                x: 1919,
+                y: 0,
+            },
             InputMsg::Heartbeat,
             InputMsg::ReleaseAll,
         ];

@@ -409,6 +409,7 @@ impl ViewerWindow {
             view_mode: ViewMode::default(),
             window_mouse: None,
             local_mouse: None,
+            last_on_picture: None,
             hovering: false,
             ime_allowed: None,
             uploaded: None,
@@ -446,6 +447,8 @@ struct App {
     window_mouse: Option<(f64, f64)>,
     /// The local mouse in host pixels, while it is over the picture.
     local_mouse: Option<(i32, i32)>,
+    /// Where it last was on the picture (a button released off the picture lets go there).
+    last_on_picture: Option<(i32, i32)>,
     hovering: bool,
     ime_allowed: Option<bool>,
     /// The picture the GPU holds, so redraws for a moved mouse do not upload it again.
@@ -758,7 +761,7 @@ impl App {
             WindowEvent::Ime(Ime::Disabled) => self.composing = false,
             WindowEvent::CursorMoved { .. } => {
                 if let Some((x, y)) = self.local_mouse {
-                    input.send(InputMsg::MouseMove { x, y });
+                    input.send_move(x, y);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -770,17 +773,26 @@ impl App {
                     winit::event::MouseButton::Forward => MouseButton::Forward,
                     winit::event::MouseButton::Other(_) => return,
                 };
-                input.send(InputMsg::MouseButton {
-                    button,
-                    down: *state == ElementState::Pressed,
-                });
+                let down = *state == ElementState::Pressed;
+                // A press off the picture (the letterbox bars) is nobody's; a release there
+                // still lets go, at the last place the pointer was on the picture.
+                let position = if down {
+                    self.local_mouse
+                } else {
+                    self.local_mouse.or(self.last_on_picture)
+                };
+                if let Some((x, y)) = position {
+                    input.send(InputMsg::MouseButton { button, down, x, y });
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => ((x * 120.0) as i32, (y * 120.0) as i32),
                     MouseScrollDelta::PixelDelta(p) => (p.x as i32, p.y as i32),
                 };
-                input.send(InputMsg::Wheel { dx, dy });
+                if let Some((x, y)) = self.local_mouse {
+                    input.send(InputMsg::Wheel { dx, dy, x, y });
+                }
             }
             _ => {}
         }
@@ -876,6 +888,9 @@ impl ApplicationHandler<UiEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.window_mouse = Some((position.x, position.y));
                 self.local_mouse = self.to_host(position.x, position.y);
+                if self.local_mouse.is_some() {
+                    self.last_on_picture = self.local_mouse;
+                }
                 self.request_redraw();
             }
             _ => {}
@@ -887,12 +902,13 @@ impl ApplicationHandler<UiEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Heartbeats while keys or buttons are held, so the host knows we're still here.
+        // Pending mouse moves and, while keys or buttons are held, heartbeats so the host knows
+        // we're still here.
         let next = self
             .options
             .input
             .as_ref()
-            .and_then(|input| input.heartbeat());
+            .and_then(|input| input.service());
         event_loop.set_control_flow(match next {
             Some(when) => ControlFlow::WaitUntil(when),
             None => ControlFlow::Wait,

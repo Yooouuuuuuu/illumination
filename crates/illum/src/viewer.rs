@@ -448,11 +448,27 @@ fn media_loop(
     }
 }
 
+/// The media client while the media path is up, for whoever sends on it from outside the
+/// session task (the window's mouse moves).
+pub type MediaSlot = Arc<Mutex<Option<Arc<MediaClient>>>>;
+
 pub async fn run_viewer_session(
+    conn: Connection,
+    params: ViewParams,
+    shared: Shared,
+    notify: Notify,
+) -> Result<(), NetError> {
+    run_viewer_session_sharing_media(conn, params, shared, notify, MediaSlot::default()).await
+}
+
+/// As [`run_viewer_session`], publishing the media client in `media_slot` while the media path
+/// is up (the window sends mouse moves on it).
+pub async fn run_viewer_session_sharing_media(
     mut conn: Connection,
     params: ViewParams,
     shared: Shared,
     notify: Notify,
+    media_slot: MediaSlot,
 ) -> Result<(), NetError> {
     if params.latency_limit_ms > 0 {
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
@@ -519,9 +535,11 @@ pub async fn run_viewer_session(
                         .media_target
                         .unwrap_or_else(|| SocketAddr::new(conn.peer_address.ip(), port));
                     media = None;
+                    *media_slot.lock().expect("media slot") = None;
                     match MediaClient::connect(target, &keys) {
                         Ok((client, inbound)) => {
                             tracing::info!(target: "media", "Media path to {target}.");
+                            *media_slot.lock().expect("media slot") = Some(client.clone());
                             media = Some(MediaIn::start(
                                 client,
                                 inbound,

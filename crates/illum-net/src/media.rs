@@ -6,7 +6,7 @@
 //! Datagram layout:
 //! ```text
 //! 0      u8   magic 0x49
-//! 1      u8   stream (0 punch, 1 video, 2 audio)
+//! 1      u8   stream (0 punch, 1 video, 2 audio, 3 input)
 //! 2..10  u64  session id (little-endian; lets the host find the session before decrypting)
 //! 10..18 u64  sequence number per stream and direction (never reused under one key)
 //! 18..   ciphertext, then a 16-byte authentication tag
@@ -39,6 +39,9 @@ pub enum MediaStream {
     Punch = 0,
     Video = 1,
     Audio = 2,
+    /// Viewer → host: mouse moves (architecture §6), newest wins; everything else about input
+    /// stays on the TCP path, in order.
+    Input = 3,
 }
 
 impl MediaStream {
@@ -47,6 +50,7 @@ impl MediaStream {
             0 => MediaStream::Punch,
             1 => MediaStream::Video,
             2 => MediaStream::Audio,
+            3 => MediaStream::Input,
             _ => return None,
         })
     }
@@ -478,6 +482,11 @@ impl MediaClient {
             .expect("sealer lock")
             .seal(stream, payload);
         let _ = self.socket.send(&datagram);
+    }
+
+    /// A mouse move for the host (an encoded input event), newest wins.
+    pub fn send_input(&self, payload: &[u8]) {
+        self.send(MediaStream::Input, payload);
     }
 }
 

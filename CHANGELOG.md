@@ -11,6 +11,24 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-03
+
+Step 2 of the control review: mouse moves. Protocol 12.
+
+### Changed
+
+- **Mouse moves travel on the UDP path, newest wins.** On TCP a 1000 Hz
+  mouse queued clicks behind its own moves and one lost segment froze the
+  pointer until the retransmit. The viewer now sends at most one move per
+  4 ms, the latest position, on the media path's own `Input` stream with its
+  own sequence numbers; the host drops a move overtaken by a newer one and
+  never a key behind it. Before the media path is up, moves go on TCP as
+  before.
+- **Buttons and wheels carry the pointer's position**, and the host moves
+  there before pressing, so a click lands where the mouse was even when the
+  move before it is still in flight or lost. A press on the letterbox bars
+  does nothing; a release there still lets go.
+
 ## [0.11.1] - 2026-11-03
 
 Step 1 of the control review: the key codes on the wire. Protocol 11.
