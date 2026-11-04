@@ -752,6 +752,9 @@ fn run_view(
     }
     let sender = conn.sender();
     let media_slot = MediaSlot::default();
+    // Shared with the window: pause the screen while minimized, and tell a static host from a
+    // dead path (§5.4).
+    let flags = Arc::new(illum::viewer::MediaFlags::default());
     // Clipboard both ways when both sides offer it (§8); a copy here is sent, the host's applied.
     let clipboard = if args.params.clipboard && hello.capabilities.iter().any(|c| c == "clipboard")
     {
@@ -768,6 +771,7 @@ fn run_view(
         let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
         let params = args.params.clone();
         let media_slot = media_slot.clone();
+        let flags = flags.clone();
         runtime.spawn(async move {
             let result = run_viewer_session_sharing_media(
                 conn,
@@ -776,6 +780,7 @@ fn run_view(
                 notify,
                 media_slot.clone(),
                 clipboard,
+                flags,
             )
             .await;
             *media_slot.lock().expect("media slot") = None;
@@ -846,6 +851,17 @@ fn run_view(
                     #[cfg(not(windows))]
                     let _ = focused;
                 }),
+                // Minimized: ask the host to pause the screen (audio, input and the connection
+                // stay). The media loop also reads the flag so it does not alarm (§5.4).
+                on_minimize: {
+                    let (sender, flags) = (sender.clone(), flags.clone());
+                    Box::new(move |minimized| {
+                        flags
+                            .screen_paused
+                            .store(minimized, std::sync::atomic::Ordering::Relaxed);
+                        sender.send_control(&ControlMsg::ScreenPause { paused: minimized });
+                    })
+                },
                 gpu: args.gpu,
             },
         )

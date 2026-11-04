@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to framing or control messages.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Default port, used for both TCP (control, input) and UDP (video, audio). Unassigned in the
 /// IANA registry and used by no well-known program (architecture §4.1).
@@ -183,6 +183,12 @@ pub enum ControlMsg {
     },
     /// Controller → host: stop streaming.
     ScreenStop,
+    /// Controller → host: pause (true) or resume (false) the **screen only**. Audio, input and
+    /// the connection keep going; the viewer sends this when its window is minimized (§5.4).
+    /// Resume comes back with a keyframe, so nothing reconnects.
+    ScreenPause {
+        paused: bool,
+    },
     /// Host → controller: the screen cannot be streamed.
     ScreenError {
         reason: String,
@@ -300,6 +306,7 @@ mod tests {
                 rtt_floor_ms: 11,
             },
             ControlMsg::ScreenStop,
+            ControlMsg::ScreenPause { paused: true },
             ControlMsg::ScreenError {
                 reason: "busy".into(),
             },

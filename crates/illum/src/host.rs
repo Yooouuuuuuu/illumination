@@ -429,6 +429,9 @@ struct MediaLink {
     session_id: u64,
     stop: Arc<AtomicBool>,
     want_keyframe: Arc<AtomicBool>,
+    /// The screen is paused (the viewer is minimized, §5.4): the video thread stops capturing,
+    /// encoding and sending; audio, input and the connection go on.
+    paused: Arc<AtomicBool>,
     adapter: Arc<Mutex<Adapter>>,
     target: Arc<Mutex<Target>>,
     /// A measurement run: the target never moves and the controllers are not consulted.
@@ -452,6 +455,7 @@ impl MediaLink {
         let inbound = hub.register(&keys);
         let stop = Arc::new(AtomicBool::new(false));
         let want_keyframe = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
         let peer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
         let adapter = Adapter::new(
             Limits {
@@ -600,8 +604,12 @@ impl MediaLink {
         });
 
         let media_out = {
-            let (stop, want_keyframe, target) =
-                (stop.clone(), want_keyframe.clone(), target.clone());
+            let (stop, want_keyframe, target, paused) = (
+                stop.clone(),
+                want_keyframe.clone(),
+                target.clone(),
+                paused.clone(),
+            );
             let mut sealer = keys.sealer();
             std::thread::Builder::new()
                 .name("media-out".into())
@@ -650,6 +658,14 @@ impl MediaLink {
                     let mut stats = HostCounters::default();
                     let mut next_stats = Instant::now() + Duration::from_secs(1);
                     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
+                        // Paused: the viewer is minimized (§5.4). Stop capturing, encoding and
+                        // sending the screen; the audio and input threads carry on. The resume
+                        // (set_paused(false)) asks for a keyframe, so the picture comes straight
+                        // back without a reconnect.
+                        if paused.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
                         if Instant::now() >= next_stats {
                             next_stats += Duration::from_secs(1);
                             sender.send_control(&std::mem::take(&mut stats).message());
@@ -787,6 +803,7 @@ impl MediaLink {
             session_id: keys.session_id,
             stop,
             want_keyframe,
+            paused,
             adapter,
             target,
             fixed: settings.fixed,
@@ -796,6 +813,15 @@ impl MediaLink {
 
     fn request_keyframe(&self) {
         self.want_keyframe.store(true, Ordering::SeqCst);
+    }
+
+    /// Pause or resume the screen (the audio and input keep going). Resuming asks for a
+    /// keyframe so the viewer has a reference again.
+    fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::SeqCst);
+        if !paused {
+            self.want_keyframe.store(true, Ordering::SeqCst);
+        }
     }
 
     /// The rung and parity in use, for the viewer's title bar.
@@ -1047,6 +1073,12 @@ pub async fn serve_session(
                 capture = None;
                 link = None;
                 input = None;
+            }
+            ControlMsg::ScreenPause { paused } => {
+                // The viewer minimized (or restored): stop or resume the screen only.
+                if let Some(l) = &link {
+                    l.set_paused(paused);
+                }
             }
             ControlMsg::FrameLost { seq } => {
                 tracing::debug!(target: "media", "Viewer lost frame {seq}; sending a keyframe.");

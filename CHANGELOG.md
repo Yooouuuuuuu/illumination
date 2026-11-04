@@ -11,6 +11,29 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-11-04
+
+Protocol 15.
+
+### Added
+
+- **The screen pauses while the viewer is minimized.** Minimizing the window
+  sends a new `ScreenPause` message; the host stops capturing, encoding and
+  sending the screen, and resumes with a keyframe when the window is restored.
+  The connection, input and **audio keep flowing** — so the remote's sound
+  still plays with the window down — and nothing actually reconnects. This is
+  what RDP does by default. The trigger is a real minimize, not being covered
+  by another window.
+
+### Fixed
+
+- **The viewer no longer cries "no video" when the host screen is simply
+  static.** It used to treat any silence as a dead path and re-establish once
+  a minute. It now uses the host's own per-second `HostStats`: it only says
+  "video stalled; reconnecting…" when the host reports it sent video and none
+  arrived. A quiet host (nothing changing) stays quiet. Together with the
+  pause above, the two causes of the old false alarm are gone.
+
 ## [0.11.5] - 2026-11-03
 
 ### Fixed

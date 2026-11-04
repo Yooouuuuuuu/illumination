@@ -344,6 +344,21 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
   - On the CPU path BGRA is translated to the window's `0x00RRGGBB` in exactly one function
     (`illum_media::scale::bgra_to_0rgb`), and a test pins the channel order.
   - Frame pacing to the display refresh (Moonlight's optional feature) is a v2 idea.
+- **Pausing while minimized (v0.11.6).** When the viewer window is minimized it sends
+  `ScreenPause { paused: true }`; the host stops capturing, encoding and sending the **screen**
+  only, and resumes with a keyframe on `ScreenPause { paused: false }` when the window is
+  restored. The TLS connection, the input channel and the **audio stream keep going** — they
+  cost almost nothing, so the remote's sound still plays with the window down. Nothing
+  reconnects; it only looks like a quick reconnect because the resume is a keyframe. This is
+  what RDP does by default (it suppresses graphics when minimized) and what the industry
+  patents describe. The trigger is a real minimize (a zero-sized window), not merely being
+  covered by another window. The surface-size fix of v0.11.5 and this share the aim of a window
+  that is never streamed to when nobody is watching it.
+- **Telling a static host from a dead path (v0.11.6).** The viewer used to cry "no video is
+  arriving; re-establishing" whenever video stopped — but a host whose screen is not changing
+  sends nothing, which looks the same as a dead path. The host already reports, in `HostStats`,
+  how much it sent each second; the viewer now only says **"video stalled; reconnecting…"** when
+  the host says it *did* send and nothing arrived. A quiet host stays quiet in the title.
 
 ### 5.5 Adaptation: the latency controller
 See [`adaptation.d2`](adaptation.d2). Decided 2026-10-22. The design is ours; the comparison with

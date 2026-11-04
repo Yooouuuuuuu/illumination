@@ -424,6 +424,9 @@ pub struct ViewerOptions {
     pub input: Option<Arc<InputOut>>,
     pub keyboard: KeyboardMode,
     pub pointer: PointerMode,
+    /// Called when the window is minimized (true) or restored (false), so the session can ask
+    /// the host to pause or resume the screen (architecture §5.4).
+    pub on_minimize: Box<dyn Fn(bool)>,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Draw on the GPU (falling back to the CPU if none is usable); false forces the CPU path.
@@ -463,6 +466,7 @@ impl ViewerWindow {
             local_mouse: None,
             last_on_picture: None,
             hovering: false,
+            minimized: false,
             ime_allowed: None,
             uploaded: None,
             worn: None,
@@ -502,6 +506,8 @@ struct App {
     /// Where it last was on the picture (a button released off the picture lets go there).
     last_on_picture: Option<(i32, i32)>,
     hovering: bool,
+    /// Whether the window is minimized, so the transition fires `on_minimize` once (§5.4).
+    minimized: bool,
     ime_allowed: Option<bool>,
     /// The picture the GPU holds, so redraws for a moved mouse do not upload it again.
     uploaded: Option<Arc<Picture>>,
@@ -906,7 +912,16 @@ impl ApplicationHandler<UiEvent> for App {
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.draw(event_loop),
-            WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::Resized(size) => {
+                // A minimize comes through as a zero-sized resize on Windows; tell the session
+                // so it can pause the screen (§5.4). Only a real minimize, not being covered.
+                let minimized = size.width == 0 || size.height == 0;
+                if minimized != self.minimized {
+                    self.minimized = minimized;
+                    (self.options.on_minimize)(minimized);
+                }
+                self.request_redraw();
+            }
             WindowEvent::Focused(focused) => {
                 (self.options.on_focus)(*focused);
                 if !*focused {

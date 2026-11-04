@@ -43,6 +43,7 @@ for a released product. See **D0**.
 | Cursor sub-protocol: position, shape (LZ4 BGRA) | `illum-media::cursor` | **Freeze.** |
 | Clipboard sub-protocol: text (kind byte 1; files add a kind later, additively) | `illum-core::clipboard` | **Freeze.** |
 | Feedback messages: `MediaReport`, `HostStats`, `Quality`, `VideoAck`, `FrameLost`, `TimeRequest/Reply`, `InputAck`, `KeyboardLayout` | `illum-core::protocol` | **Freeze the shapes.** These are telemetry/feedback and already tolerate added fields via serde defaults. |
+| `ScreenPause { paused }` — pause the screen while the viewer is minimized (v0.11.6, §5.4) | `illum-core::protocol` | **Freeze.** Added pre-freeze; audio/input/connection keep going while paused. |
 
 Everything in this table is either done and stable, or (Hello/capabilities) stable in shape. The
 media kernel behind it — transport, FEC, pacer, the two adaptation controllers and the harness,

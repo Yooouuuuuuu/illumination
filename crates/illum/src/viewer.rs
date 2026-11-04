@@ -18,7 +18,7 @@ use illum_net::{Connection, MediaClient, MediaStream, NetError, Sender};
 use illum_ui::{HostSecond, Quality, Shared};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +26,17 @@ use std::time::{Duration, Instant};
 
 /// Called whenever there is something new to draw.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
+/// Shared between the window, the control loop and the media loop (§5.4). `screen_paused`: the
+/// viewer is minimized and has asked the host to pause the screen, so the media loop keeps the
+/// path warm but does not alarm about the silence it expects. `host_sent_us`: when the host
+/// last reported it sent video (its clock-independent `now_us`), 0 = never, which lets the
+/// media loop tell a static host — sending nothing because nothing changed — from a dead path.
+#[derive(Default)]
+pub struct MediaFlags {
+    pub screen_paused: AtomicBool,
+    pub host_sent_us: AtomicU64,
+}
 
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
 const PROBE_INTERVAL: Duration = Duration::from_millis(250);
@@ -146,6 +157,7 @@ struct MediaIn {
 }
 
 impl MediaIn {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         client: Arc<MediaClient>,
         inbound: mpsc::Receiver<illum_net::Inbound>,
@@ -154,6 +166,7 @@ impl MediaIn {
         sender: Sender,
         audio: bool,
         hw_decode: bool,
+        flags: Arc<MediaFlags>,
     ) -> MediaIn {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -171,6 +184,7 @@ impl MediaIn {
                         &stop,
                         audio_out.as_ref(),
                         hw_decode,
+                        &flags,
                     )
                 })
                 .expect("spawn media-in thread")
@@ -202,6 +216,7 @@ fn media_loop(
     stop: &AtomicBool,
     audio_out: Option<&AudioOut>,
     hw_decode: bool,
+    flags: &MediaFlags,
 ) {
     let started = Instant::now();
     let mut reassembler = Reassembler::default();
@@ -229,7 +244,11 @@ fn media_loop(
 
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
         let now = Instant::now();
-        let silent = got_video && now.duration_since(last_media) >= SILENCE_AFTER;
+        // Paused: the window is minimized and we asked the host to stop the screen (§5.4).
+        // Expect no video; keep punching slowly so audio and the path stay warm, and do not
+        // alarm about the silence.
+        let paused = flags.screen_paused.load(Ordering::Relaxed);
+        let silent = !paused && got_video && now.duration_since(last_media) >= SILENCE_AFTER;
         if now >= next_punch {
             client.send(MediaStream::Punch, &[]);
             next_punch = now
@@ -377,14 +396,24 @@ fn media_loop(
         } else {
             awaiting_since = None;
         }
-        let wanted = if got_video && now.duration_since(last_media) >= SILENCE_AFTER {
+        // "Video stalled" only when the host says it *is* sending and we are not receiving it.
+        // A static host (nothing changing, so nothing sent) is silent too, but that is not a
+        // fault — HostStats shows it sent nothing, so we stay quiet instead of crying wolf.
+        let host_sent_recently = {
+            let sent = flags.host_sent_us.load(Ordering::Relaxed);
+            sent != 0 && now_us().saturating_sub(sent) < 5_000_000
+        };
+        let wanted = if paused {
+            None
+        } else if got_video && now.duration_since(last_media) >= SILENCE_AFTER && host_sent_recently
+        {
             if now.duration_since(last_silence_request) >= SILENCE_AFTER {
                 last_silence_request = now;
                 sender.send_control(&ControlMsg::FrameLost {
                     seq: expected_seq.unwrap_or(0),
                 });
             }
-            Some("no video is arriving; re-establishing the media path…")
+            Some("video stalled; reconnecting…")
         } else if awaiting_since.is_some_and(|s| now.duration_since(s) >= KEYFRAME_TIMEOUT) {
             Some("waiting for a keyframe from the host…")
         } else {
@@ -463,12 +492,21 @@ pub async fn run_viewer_session(
     shared: Shared,
     notify: Notify,
 ) -> Result<(), NetError> {
-    run_viewer_session_sharing_media(conn, params, shared, notify, MediaSlot::default(), None).await
+    run_viewer_session_sharing_media(
+        conn,
+        params,
+        shared,
+        notify,
+        MediaSlot::default(),
+        None,
+        Arc::new(MediaFlags::default()),
+    )
+    .await
 }
 
 /// As [`run_viewer_session`], publishing the media client in `media_slot` while the media path
-/// is up (the window sends mouse moves on it), and syncing the clipboard through `clipboard`
-/// when the window set one up (§8).
+/// is up (the window sends mouse moves on it), syncing the clipboard through `clipboard` when
+/// the window set one up (§8), and sharing `flags` with the window (pause while minimized, §5.4).
 pub async fn run_viewer_session_sharing_media(
     mut conn: Connection,
     params: ViewParams,
@@ -476,6 +514,7 @@ pub async fn run_viewer_session_sharing_media(
     notify: Notify,
     media_slot: MediaSlot,
     clipboard: Option<ClipboardSync>,
+    flags: Arc<MediaFlags>,
 ) -> Result<(), NetError> {
     if params.latency_limit_ms > 0 {
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
@@ -562,6 +601,7 @@ pub async fn run_viewer_session_sharing_media(
                                 conn.sender(),
                                 params.audio,
                                 params.hw_decode,
+                                flags.clone(),
                             ));
                         }
                         Err(e) => {
@@ -621,6 +661,11 @@ pub async fn run_viewer_session_sharing_media(
                     keyframe_bytes,
                     encode_us,
                 }) => {
+                    // The host sent video this second: remember when, so the media loop can tell
+                    // a dead path from a host that simply had nothing to send (§5.4).
+                    if sent > 0 {
+                        flags.host_sent_us.store(now_us(), Ordering::Relaxed);
+                    }
                     if let Some(r) = shared.lock().expect("view state lock").recorder.as_mut() {
                         r.host(HostSecond {
                             taken,
