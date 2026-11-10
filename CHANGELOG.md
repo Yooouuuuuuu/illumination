@@ -11,6 +11,21 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-11-10
+
+### Fixed
+
+- **The viewer now recovers promptly from a lost reference frame.** When a
+  frame is lost during congestion, every H.265 delta after it chains off the
+  gap and the decoder prints "Could not find ref with POC …" and produces no
+  picture — but FFmpeg reports that identically to a normally buffered frame
+  (no output, no error), so the viewer kept feeding undecodable deltas and
+  never asked for the keyframe that would re-anchor it. It recovered only when
+  another path (the 8 s rebuild, or restoring the window) happened to deliver
+  a keyframe. The viewer now treats a run of five empty decodes as a lost
+  reference and asks for a keyframe at once, turning a flood of decoder errors
+  and a slow recovery into a couple of errors and a sub-second one.
+
 ## [0.11.7] - 2026-11-10
 
 ### Fixed

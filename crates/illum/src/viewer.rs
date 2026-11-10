@@ -61,6 +61,11 @@ const SILENCE_AFTER: Duration = Duration::from_secs(3);
 /// A real stall this long — the host says it is sending but no video arrives — is not cured by
 /// asking for a keyframe (the media path is stuck, e.g. a route flip). Rebuild the path.
 const RECONNECT_AFTER: Duration = Duration::from_secs(8);
+/// This many frames fed to the decoder with no picture out means it has lost its reference (a
+/// frame was lost and every delta since chains off it): ask for a keyframe. Our encoders are
+/// one-in-one-out, so a run of empty decodes is never normal; a few allow for a decoder that
+/// buffers one or two frames when it opens.
+const NO_PICTURE_LIMIT: u32 = 5;
 
 /// What the viewer asks for (architecture §5.8; 0 = the host's default).
 #[derive(Debug, Clone)]
@@ -248,6 +253,8 @@ fn media_loop(
     let mut notice: Option<&'static str> = None;
     let mut last_silence_request = Instant::now();
     let mut last_reconnect = Instant::now();
+    // Frames fed to the decoder in a row that produced no picture: a lost reference (§5.6).
+    let mut no_picture: u32 = 0;
 
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
         let now = Instant::now();
@@ -356,6 +363,7 @@ fn media_loop(
                     match dec.decode(&data, meta.keyframe) {
                         Ok(Some(frame)) => {
                             awaiting_keyframe = false;
+                            no_picture = 0;
                             let decode_us =
                                 decode_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                             let mut state = shared.lock().expect("view state lock");
@@ -371,7 +379,23 @@ fn media_loop(
                             drop(state);
                             notify();
                         }
-                        Ok(None) => awaiting_keyframe = false, // accepted; the picture follows
+                        Ok(None) => {
+                            // No picture out. One or two in a row is a decoder that buffers a
+                            // frame when it opens; a run of them means the reference is gone (a
+                            // lost frame, every delta since chained off it — the "Could not find
+                            // ref" the HEVC decoder prints). FFmpeg reports that the same way as a
+                            // buffered frame, so we infer it from the run and ask for a keyframe,
+                            // the only thing that re-anchors the decoder (2026-11-10).
+                            no_picture += 1;
+                            if no_picture >= NO_PICTURE_LIMIT {
+                                no_picture = 0;
+                                awaiting_keyframe = true;
+                                last_keyframe_request = Instant::now();
+                                sender.send_control(&ControlMsg::FrameLost {
+                                    seq: meta.seq as u64,
+                                });
+                            }
+                        }
                         Err(e) if decoder_is_hw => {
                             // A GPU decoder that cannot take this stream (a profile it does not
                             // support, say) would fail every frame for ever: the CPU decoder

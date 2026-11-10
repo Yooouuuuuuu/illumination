@@ -589,6 +589,17 @@ been captured. As a backstop the viewer **rebuilds the whole media path** (it re
 the host reports in `HostStats` that it is sending, yet nothing arrives, which is a stuck path
 (a route flip, or keyframes lost for good), not something a keyframe request can cure.
 
+**A lost reference is inferred from empty decodes (v0.11.8).** When a frame is lost, every
+delta after it references the gap; the decoder cannot build a picture and FFmpeg prints
+"Could not find ref with POC …". But it reports that **the same way as a normally buffered
+frame** — a packet accepted, no frame out — so the reassembler being happy (the delta's own
+packets all arrived) is not enough to notice. Our encoders are one-in-one-out, so a **run of
+empty decodes** (five, which still allows for a decoder that buffers a frame or two when it
+opens) means the reference is gone. The viewer then asks for a keyframe, the only thing that
+re-anchors the decoder, instead of feeding it more undecodable deltas. This catches a reference
+loss the reassembler did not flag (a frame whose every packet was dropped leaves no partial to
+expire), whatever its cause.
+
 **Implemented in v0.5.1** (`illum_media::fec`, `illum_media::packets`): Reed–Solomon over
 GF(2⁸) (`reed-solomon-erasure`). A frame's packets are grouped into **blocks of at most 128
 data packets**, each with its own parity (the field allows 255 shards per block; a 2 MB tile
