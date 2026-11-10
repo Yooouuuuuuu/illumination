@@ -11,6 +11,24 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-11-10
+
+### Fixed
+
+- **The video no longer dies permanently after a loss spell.** Two causes,
+  both fixed:
+  - The host only encoded when the screen changed, so a keyframe asked for
+    while the host sat idle was never sent — a viewer that had lost its
+    reference during a loss spell then waited for ever, video dead while input
+    (on TCP) kept working. The host now re-sends the last frame as a keyframe
+    when one is owed and the screen is static, so a keyframe request is always
+    answerable.
+  - The viewer only re-punched and re-asked for a keyframe when video stalled;
+    it never rebuilt the path. After eight seconds of a real stall (the host
+    reports it is sending, nothing arrives — a route flip, keyframes lost for
+    good) the viewer now rebuilds the whole media path by asking the host to
+    start the screen again.
+
 ## [0.11.6] - 2026-11-04
 
 Protocol 15.

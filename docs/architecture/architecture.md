@@ -578,6 +578,17 @@ v0.10.0, §5.5 rule 9). A
 keyframe is ~180 packets and the one frame that must arrive; at 5–10 % parity on a Wi-Fi burst
 it mostly died, the retry died too, and the picture stalled for seconds (the first live run).
 
+**A keyframe request is always answerable (v0.11.7).** Keyframe-on-loss stands in for reference
+invalidation until the vendor SDKs are worth it, but it had a hole: the capture emits a frame
+only when the screen changes, so a keyframe asked for while the host sat **static** had no frame
+to attach to and was never sent. A viewer that lost its reference during a loss spell then waited
+for ever — the video died permanently while input (on TCP) kept working (2026-11-09). The host
+now **re-sends the last frame as a keyframe**, dated now, when one is owed and nothing new has
+been captured. As a backstop the viewer **rebuilds the whole media path** (it re-sends
+`ScreenStart`, and the control loop reconnects the socket) after eight seconds of a real stall —
+the host reports in `HostStats` that it is sending, yet nothing arrives, which is a stuck path
+(a route flip, or keyframes lost for good), not something a keyframe request can cure.
+
 **Implemented in v0.5.1** (`illum_media::fec`, `illum_media::packets`): Reed–Solomon over
 GF(2⁸) (`reed-solomon-erasure`). A frame's packets are grouped into **blocks of at most 128
 data packets**, each with its own parity (the field allows 255 shards per block; a 2 MB tile

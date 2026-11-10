@@ -58,6 +58,9 @@ const KEYFRAME_TIMEOUT: Duration = Duration::from_secs(2);
 /// No media datagram for this long, with the control channel alive, is a path problem: punch
 /// fast again, ask for a keyframe, and say so (9 s of silence went unnoticed in those runs).
 const SILENCE_AFTER: Duration = Duration::from_secs(3);
+/// A real stall this long — the host says it is sending but no video arrives — is not cured by
+/// asking for a keyframe (the media path is stuck, e.g. a route flip). Rebuild the path.
+const RECONNECT_AFTER: Duration = Duration::from_secs(8);
 
 /// What the viewer asks for (architecture §5.8; 0 = the host's default).
 #[derive(Debug, Clone)]
@@ -167,6 +170,7 @@ impl MediaIn {
         audio: bool,
         hw_decode: bool,
         flags: Arc<MediaFlags>,
+        reconnect: ControlMsg,
     ) -> MediaIn {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -185,6 +189,7 @@ impl MediaIn {
                         audio_out.as_ref(),
                         hw_decode,
                         &flags,
+                        &reconnect,
                     )
                 })
                 .expect("spawn media-in thread")
@@ -217,6 +222,7 @@ fn media_loop(
     audio_out: Option<&AudioOut>,
     hw_decode: bool,
     flags: &MediaFlags,
+    reconnect: &ControlMsg,
 ) {
     let started = Instant::now();
     let mut reassembler = Reassembler::default();
@@ -241,6 +247,7 @@ fn media_loop(
     let mut awaiting_since: Option<Instant> = None;
     let mut notice: Option<&'static str> = None;
     let mut last_silence_request = Instant::now();
+    let mut last_reconnect = Instant::now();
 
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
         let now = Instant::now();
@@ -413,6 +420,16 @@ fn media_loop(
                     seq: expected_seq.unwrap_or(0),
                 });
             }
+            // A long stall is not cured by a keyframe request — the path itself is stuck (a
+            // route flip, keyframes lost for good). Rebuild the whole media path by asking the
+            // host to start the screen again; the control loop then reconnects the socket.
+            if now.duration_since(last_media) >= RECONNECT_AFTER
+                && now.duration_since(last_reconnect) >= RECONNECT_AFTER
+            {
+                last_reconnect = now;
+                tracing::warn!(target: "media", "No video for {} s though the host is sending; rebuilding the media path.", RECONNECT_AFTER.as_secs());
+                sender.send_control(reconnect);
+            }
             Some("video stalled; reconnecting…")
         } else if awaiting_since.is_some_and(|s| now.duration_since(s) >= KEYFRAME_TIMEOUT) {
             Some("waiting for a keyframe from the host…")
@@ -519,7 +536,8 @@ pub async fn run_viewer_session_sharing_media(
     if params.latency_limit_ms > 0 {
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
     }
-    conn.send_control(&ControlMsg::ScreenStart {
+    // Kept so the media loop can re-send it to rebuild a stuck media path (§5.5).
+    let screen_start = ControlMsg::ScreenStart {
         display: params.display,
         max_bitrate_kbps: params.max_bitrate_kbps,
         max_fps: params.max_fps,
@@ -530,7 +548,8 @@ pub async fn run_viewer_session_sharing_media(
         fixed: params.fixed,
         scale_percent: params.scale_percent,
         scale_rungs: params.scale_rungs,
-    });
+    };
+    conn.send_control(&screen_start);
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.
     let probes: Arc<Mutex<HashMap<u64, u64>>> = Arc::default();
@@ -602,6 +621,7 @@ pub async fn run_viewer_session_sharing_media(
                                 params.audio,
                                 params.hw_decode,
                                 flags.clone(),
+                                screen_start.clone(),
                             ));
                         }
                         Err(e) => {

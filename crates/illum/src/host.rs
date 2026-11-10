@@ -652,6 +652,9 @@ impl MediaLink {
                     let mut force_keyframe = false;
                     let mut seq: u32 = 0;
                     let mut last_keyframe: Option<Instant> = None;
+                    // The last frame sent, kept so a keyframe can be re-sent from it while the
+                    // screen is static (the capture emits a frame only on change).
+                    let mut last_frame: Option<Frame> = None;
                     // Frame-rate cap: the next capture time a frame is due.
                     let mut due_us: u64 = 0;
                     // Once a second, what happened here, for the viewer's measurement records.
@@ -670,8 +673,20 @@ impl MediaLink {
                             next_stats += Duration::from_secs(1);
                             sender.send_control(&std::mem::take(&mut stats).message());
                         }
-                        let Some((frame, captured_us)) = latest.take_wait(Duration::from_millis(50)) else {
-                            continue;
+                        let keyframe_owed = want_keyframe.load(Ordering::SeqCst)
+                            && last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_MIN_INTERVAL);
+                        let (frame, captured_us) = match latest.take_wait(Duration::from_millis(50))
+                        {
+                            Some(fc) => fc,
+                            // The screen is static (the capture emits a frame only on change). If
+                            // a keyframe is owed, re-send the last frame as one, dated now, so the
+                            // viewer can recover: otherwise a lost reference waits for ever for a
+                            // frame that never comes and the video dies permanently (2026-11-09).
+                            None if keyframe_owed => match &last_frame {
+                                Some(f) => (f.clone(), now_us()),
+                                None => continue,
+                            },
+                            None => continue,
                         };
                         stats.taken += 1;
                         // Apply what the controllers decided.
@@ -791,6 +806,9 @@ impl MediaLink {
                             }
                             seq = seq.wrapping_add(1);
                         }
+                        // Keep what we just sent, so a keyframe can be re-sent from it while the
+                        // screen is static (see the take above).
+                        last_frame = Some(frame);
                     }
                 })
                 .expect("spawn media-out thread")
