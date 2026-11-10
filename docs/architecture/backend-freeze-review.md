@@ -127,10 +127,11 @@ given the decisions in section 6.
 
 ## 5. Smaller things to confirm
 
-- **Reconnect after a network blip.** Not built; a timed-out session just ends. Resuming media
-  after a TCP reconnect would want a *resume token* on the wire — the one deferral here with a
-  possible wire implication. Recommend consciously excluding it from v1 (**D5**) so we are not
-  surprised later.
+- **Reconnect after a network blip.** Built in v0.11.9: on an unexpected drop the viewer keeps
+  the window and re-dials the host, resuming with a fresh `ScreenStart`. This needed **no wire
+  change** — a reconnect is just a new session to an already-paired device. A *seamless* resume
+  (same session id, no stream restart, a resume token on the wire) is still a future option
+  (**D5**), but it is an optimisation, not a gap, so it stays deferred.
 - **Multiple displays** — now in scope; see §3b. The display list is the only new wire piece.
 - **Config versioning.** §9 wants per-device settings versioned from day one; the trust store is
   already versioned (`store::wrong_version_is_refused`). Extend the same discipline to any

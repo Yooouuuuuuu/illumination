@@ -11,6 +11,21 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.9] - 2026-11-11
+
+### Added
+
+- **The viewer reconnects on its own when the connection drops.** Until now a
+  dropped TCP control connection (a route flip, the host's link dying) ended
+  the session and closed the window — you had to relaunch. The window now stays
+  open, shows "connection lost; reconnecting…", and re-dials the host with a
+  backoff until it answers, then resumes the stream. The clipboard, input and
+  media slot are kept across the reconnection; only the stream itself restarts.
+  A clean end — you close the window, or the host says goodbye — still exits
+  without retrying. On by default; `illum view <host> --no-reconnect` turns it
+  off (the setting is there for the future UI to expose). No protocol change:
+  a reconnect is a fresh session to an already-paired device.
+
 ## [0.11.8] - 2026-11-10
 
 ### Fixed

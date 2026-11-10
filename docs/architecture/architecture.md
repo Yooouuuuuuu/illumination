@@ -702,6 +702,7 @@ The viewer's own, switchable at any time (nothing travels to the host):
 | Setting | Default | Choices |
 |---|---|---|
 | **Pointer** (§5.4) | Native: your own pointer, wearing the host's cursor shape; it never lags behind the picture and never disappears | Embedded: the host's cursor drawn inside the picture, at the host's size, as a screenshot of the host would show it |
+| **Reconnect** (§5.5, v0.11.9) | On: an unexpected drop keeps the window and re-dials the host until it answers, then resumes | Off (`--no-reconnect`): a drop ends the session |
 
 The setting's help text says exactly that; the choice is about feel, and the words have to let
 someone pick without reading this document.

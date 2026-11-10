@@ -142,6 +142,9 @@ enum Command {
         /// Don't sync the clipboard with the host (text is synced both ways by default, §8).
         #[arg(long)]
         no_clipboard: bool,
+        /// Don't re-dial the host when the connection drops (it reconnects by default).
+        #[arg(long)]
+        no_reconnect: bool,
         /// Decode on the CPU only (the default uses the GPU's decoder where it exists, and
         /// offers AV1 only then).
         #[arg(long)]
@@ -326,6 +329,7 @@ fn main() -> std::process::ExitCode {
             fec_max,
             mute,
             no_clipboard,
+            no_reconnect,
             software_decode,
             software_render,
             fixed,
@@ -353,6 +357,7 @@ fn main() -> std::process::ExitCode {
                     latency_limit_ms: *latency_limit,
                     audio: !*mute,
                     clipboard: !*no_clipboard,
+                    reconnect: !*no_reconnect,
                     hw_decode: !*software_decode,
                     fixed: *fixed,
                     scale_percent: *scale,
@@ -750,40 +755,88 @@ fn run_view(
             waker.wake(UiEvent::Exit);
         });
     }
-    let sender = conn.sender();
+    // All host-bound sends from the window go through this; the reconnect loop points it at the
+    // current connection (§5.5).
+    let live = illum::viewer::LiveSender::default();
+    live.set(Some(conn.sender()));
     let media_slot = MediaSlot::default();
     // Shared with the window: pause the screen while minimized, and tell a static host from a
     // dead path (§5.4).
     let flags = Arc::new(illum::viewer::MediaFlags::default());
-    // Clipboard both ways when both sides offer it (§8); a copy here is sent, the host's applied.
+    // Clipboard both ways when both sides offer it (§8); a copy here is sent through whichever
+    // connection is live, the host's applied. Kept across reconnections, hence the Arc.
     let clipboard = if args.params.clipboard && hello.capabilities.iter().any(|c| c == "clipboard")
     {
-        let sender = sender.clone();
+        let live = live.clone();
         illum::clipboard::ClipboardSync::start(move |text| {
-            sender.send(Channel::Clipboard, ClipboardMsg::Text(text).to_bytes());
+            live.send(Channel::Clipboard, ClipboardMsg::Text(text).to_bytes());
         })
+        .map(Arc::new)
     } else {
         None
     };
+    // The session runs in a loop: an unexpected drop, with reconnect on (the default), re-dials
+    // the host and resumes — keeping the window, clipboard, input and media slot — with a
+    // backoff. A clean end (the host said goodbye) stops it (§5.5).
     let session = {
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
         let notify: Notify = Arc::new(move || redraw.wake(UiEvent::Redraw));
         let params = args.params.clone();
-        let media_slot = media_slot.clone();
-        let flags = flags.clone();
+        let (media_slot, flags, live, clipboard) = (
+            media_slot.clone(),
+            flags.clone(),
+            live.clone(),
+            clipboard.clone(),
+        );
+        let (ep, target) = (ep.clone(), target.to_string());
+        let reconnect = args.params.reconnect;
         runtime.spawn(async move {
-            let result = run_viewer_session_sharing_media(
-                conn,
-                params,
-                shared,
-                notify,
-                media_slot.clone(),
-                clipboard,
-                flags,
-            )
-            .await;
-            *media_slot.lock().expect("media slot") = None;
+            let mut next = Some(conn);
+            let mut backoff = Duration::from_secs(1);
+            let result = loop {
+                let conn = match next.take() {
+                    Some(c) => c,
+                    None => {
+                        shared.lock().expect("view state lock").status =
+                            Some("connection lost; reconnecting…".into());
+                        notify();
+                        match connect(&ep, &target).await {
+                            Ok(c) => {
+                                backoff = Duration::from_secs(1);
+                                shared.lock().expect("view state lock").status = None;
+                                notify();
+                                c
+                            }
+                            Err(_) => {
+                                tokio::time::sleep(backoff).await;
+                                backoff = (backoff * 2).min(Duration::from_secs(10));
+                                continue;
+                            }
+                        }
+                    }
+                };
+                live.set(Some(conn.sender()));
+                let r = run_viewer_session_sharing_media(
+                    conn,
+                    params.clone(),
+                    shared.clone(),
+                    notify.clone(),
+                    media_slot.clone(),
+                    clipboard.clone(),
+                    flags.clone(),
+                )
+                .await;
+                live.set(None);
+                *media_slot.lock().expect("media slot") = None;
+                match r {
+                    Ok(()) => break Ok(()),
+                    Err(e) if reconnect => {
+                        tracing::warn!(target: "media", "Connection ended ({e}); reconnecting.");
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
             waker.wake(UiEvent::Exit);
             result
         })
@@ -791,12 +844,12 @@ fn run_view(
 
     let input = with_input.then(|| {
         // Each event's departure is noted, so the host's acknowledgement becomes "input N ms".
-        let (input_sender, sent) = (sender.clone(), shared.clone());
+        let (input_live, sent) = (live.clone(), shared.clone());
         let out = Arc::new(InputOut::new(move |ev| {
             sent.lock()
                 .expect("view state lock")
                 .input_sent(false, ev.seq);
-            input_sender.send(Channel::Input, ev.encode())
+            input_live.send(Channel::Input, ev.encode());
         }));
         // Mouse moves take the UDP path while it is up (§6); the reliable path otherwise.
         let sent = shared.clone();
@@ -833,7 +886,7 @@ fn run_view(
         }
         None => None,
     };
-    let ack = sender.clone();
+    let ack = live.clone();
     let mode = if with_input { "" } else { " (view only)" };
     let state_for_report = shared.clone();
     window
@@ -854,12 +907,12 @@ fn run_view(
                 // Minimized: ask the host to pause the screen (audio, input and the connection
                 // stay). The media loop also reads the flag so it does not alarm (§5.4).
                 on_minimize: {
-                    let (sender, flags) = (sender.clone(), flags.clone());
+                    let (live, flags) = (live.clone(), flags.clone());
                     Box::new(move |minimized| {
                         flags
                             .screen_paused
                             .store(minimized, std::sync::atomic::Ordering::Relaxed);
-                        sender.send_control(&ControlMsg::ScreenPause { paused: minimized });
+                        live.send_control(&ControlMsg::ScreenPause { paused: minimized });
                     })
                 },
                 gpu: args.gpu,
@@ -867,9 +920,10 @@ fn run_view(
         )
         .map_err(anyhow::Error::msg)?;
 
-    // Window closed (or the session ended): say goodbye and wait briefly for a clean close.
-    sender.send_control(&ControlMsg::ScreenStop);
-    sender.send_control(&ControlMsg::Bye);
+    // Window closed (or the session ended): say goodbye on whichever connection is live and
+    // wait briefly for a clean close.
+    live.send_control(&ControlMsg::ScreenStop);
+    live.send_control(&ControlMsg::Bye);
     if let Some(path) = &args.report {
         let mut state = state_for_report.lock().expect("view state lock");
         let seconds = state.recorder.take().map(|r| r.seconds).unwrap_or_default();

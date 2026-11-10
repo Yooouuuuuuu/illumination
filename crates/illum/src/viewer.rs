@@ -91,6 +91,9 @@ pub struct ViewParams {
     pub record: bool,
     /// Sync the clipboard both ways with the host (§8); off with `--no-clipboard`.
     pub clipboard: bool,
+    /// Re-dial the host and resume when the connection drops unexpectedly (default on; off with
+    /// `--no-reconnect`). A clean end (the window closed, or the host said goodbye) never retries.
+    pub reconnect: bool,
     /// Where to send media instead of the host's TCP address (tests insert a lossy relay here).
     pub media_target: Option<SocketAddr>,
 }
@@ -111,7 +114,33 @@ impl ViewParams {
             scale_rungs: false,
             record: false,
             clipboard: true,
+            reconnect: true,
             media_target: None,
+        }
+    }
+}
+
+/// A control sender that follows reconnections (§5.5): every host-bound send from the window —
+/// input, clipboard, video acks, the pause on minimize — goes through it, and the reconnect
+/// loop repoints it at the current connection. Sends while disconnected are dropped.
+#[derive(Clone, Default)]
+pub struct LiveSender(Arc<Mutex<Option<Sender>>>);
+
+impl LiveSender {
+    /// Point at the current connection, or `None` while disconnected.
+    pub fn set(&self, sender: Option<Sender>) {
+        *self.0.lock().expect("live sender") = sender;
+    }
+
+    pub fn send(&self, channel: Channel, payload: Vec<u8>) {
+        if let Some(s) = self.0.lock().expect("live sender").as_ref() {
+            s.send(channel, payload);
+        }
+    }
+
+    pub fn send_control(&self, msg: &ControlMsg) {
+        if let Some(s) = self.0.lock().expect("live sender").as_ref() {
+            s.send_control(msg);
         }
     }
 }
@@ -554,7 +583,7 @@ pub async fn run_viewer_session_sharing_media(
     shared: Shared,
     notify: Notify,
     media_slot: MediaSlot,
-    clipboard: Option<ClipboardSync>,
+    clipboard: Option<Arc<ClipboardSync>>,
     flags: Arc<MediaFlags>,
 ) -> Result<(), NetError> {
     if params.latency_limit_ms > 0 {
