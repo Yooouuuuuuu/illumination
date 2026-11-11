@@ -86,12 +86,16 @@ To check colours, run the host with `--test-pattern`. The top half shows eight p
 right: **red, green, blue, cyan, magenta, yellow, white, black**.
 
 **Keyboard modes** (`illum view <host> --keyboard …`):
-- `remote`: sends key positions, so the host's layout and IME apply
-- `local`: sends characters as you type them here, including your IME's result
-- `auto` (default): remote when both machines use the same layout
+- `remote` (default): sends key positions and **grabs the keyboard** while the window is focused,
+  so the host's layout and IME apply and nothing (Alt+Tab, Win, your local IME) acts on your own
+  machine. Click another window to release the grab.
+- `local`: sends characters as you type them here, including your IME's result — for typing into
+  a host that doesn't have your language's IME. Only the system keys are grabbed.
+- `auto`: remote when both machines use the same layout, otherwise local.
 
-`--view-only` sends no input. While the viewer has focus, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
-Alt+F4 go to the host.
+`--view-only` sends no input. In the default `remote` mode, while the viewer has focus the
+**whole keyboard** goes to the host — Win, Alt+Tab, shortcuts, everything; click another window
+to get your own keyboard back. (Ctrl+Alt+Del is reserved by Windows and comes later.)
 
 **Pointer** (`illum view <host> --pointer …`):
 - `native` (default): your own pointer, wearing the host's cursor shape. The OS moves it, so it

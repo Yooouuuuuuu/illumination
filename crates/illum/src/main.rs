@@ -104,9 +104,11 @@ enum Command {
         /// Which of the host's displays to show (0 = primary; see `illum displays` on the host).
         #[arg(long, default_value_t = 0)]
         screen: u32,
-        /// How keys are sent: remote (key positions; the host's layout and IME apply),
-        /// local (characters as typed here), or auto (remote when both layouts match).
-        #[arg(long, default_value = "auto", value_parser = parse_keyboard)]
+        /// How keys are sent. remote (the default): key positions, with the keyboard grabbed so
+        /// the host's layout and IME apply and no key acts on this machine; local: characters as
+        /// typed here, using this machine's IME (for a host without your language's IME); auto:
+        /// remote when both layouts match.
+        #[arg(long, default_value = "remote", value_parser = parse_keyboard)]
         keyboard: KeyboardMode,
         /// Where the pointer lives while you control the host. native: your own pointer,
         /// wearing the host's cursor shape; the OS moves it, so it never lags behind the picture
@@ -875,7 +877,15 @@ fn run_view(
             match illum_win::SystemKeyHook::install(move |key, down| {
                 input.send(InputMsg::Key { key, down })
             }) {
-                Ok(hook) => Some(hook),
+                Ok(hook) => {
+                    // Remote (physical-key) mode grabs every key for the host; local/auto grab
+                    // only the system keys and leave typing to this machine's layout/IME (§6).
+                    illum_win::SystemKeyHook::set_grab(matches!(
+                        args.keyboard,
+                        KeyboardMode::Remote
+                    ));
+                    Some(hook)
+                }
                 Err(e) => {
                     println!(
                         "Note: Win, Alt+Tab and similar keys will stay on this machine ({e})."

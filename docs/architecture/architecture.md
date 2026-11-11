@@ -720,10 +720,15 @@ on this link" message is still to do.
 
 ## 6. Input
 
-**Keyboard modes** (as AnyDesk):
-- **Remote:** sends physical key positions (USB HID usages, see "Key codes on the wire").
-- **Local:** translates using the controller's layout.
-- **Auto:** Remote if both layouts match, otherwise Local.
+**Keyboard modes** (as AnyDesk; **Remote is the default** since v0.11.10):
+- **Remote:** sends physical key positions (USB HID usages, see "Key codes on the wire") **and
+  grabs the keyboard** (see "Keyboard grab" below): the host's layout and IME apply, and nothing
+  acts on the controller. This is RustDesk's "Map" mode and the right default.
+- **Local:** translates using the controller's layout and IME, sending the composed characters —
+  for typing into a host that lacks your language's IME. The keyboard is **not** grabbed (the
+  local IME must see the keys), so only the system keys below go to the host.
+- **Auto:** Remote if both layouts match, otherwise Local. Like Local, it does not full-grab;
+  pick Remote explicitly for the grab when the layouts differ but you want the host to handle them.
 
 The host reports its layout at session start and whenever it changes. AnyDesk logs
 `Keyboard layout changed to: zh_cl`.
@@ -808,6 +813,19 @@ whether input delay is the network or the host.
   Win, Apps, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+F4 to the host while the viewer has focus.
   Injected keys are ignored by the hook. The hook is registered with the program's module handle;
   without it Windows may refuse a global hook, which is why v0.4.0 kept Alt+Tab local.
+- **Keyboard grab (v0.11.10, Remote mode).** The same hook, in Remote mode, captures **every**
+  key while the viewer is focused — not only the system ones — forwards it as a physical key and
+  swallows it locally, so the controller's own Windows and its IME never see the keystroke. This
+  is how RustDesk, AnyDesk and RDP keep local Alt+Tab, local shortcuts and a local Chinese IME
+  from fighting the remote session (the control review of 2026-11-11 found both: Alt+Tab acted
+  locally, and a local IME doubled/stuck a letter). The host does everything: its layout and its
+  IME compose. **Release is by unfocusing** the window (the mouse is never grabbed, so click
+  another window); a dedicated release hotkey is a follow-up for fullscreen. **Ctrl+Alt+Del** is
+  reserved by Windows and cannot be grabbed; it is sent from the host side (`SendSAS`, §6, later).
+  While grabbed, the viewer's own `Ctrl+Alt+Shift+…` hotkeys go to the host too; the window
+  controls return in the UI milestone. The grab is Windows-only today (the hook lives in
+  `illum-win`); the other OSes get their own when they land, and the wire (physical usages) is
+  already the same everywhere.
 
 ## 7. Secure desktop (UAC, lock screen)
 

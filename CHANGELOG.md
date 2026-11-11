@@ -11,6 +11,23 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.10] - 2026-11-11
+
+### Changed
+
+- **The keyboard is grabbed in `remote` mode, which is now the default.** While
+  the viewer window is focused, every key — Alt+Tab, the Windows key,
+  shortcuts, and your local IME's keys — goes to the host and nothing acts on
+  your own machine. This fixes two findings from the control review: local
+  Alt+Tab switching your *own* windows instead of the host's, and a local
+  Chinese IME doubling/sticking a letter it grabbed at the same moment we
+  forwarded it. The host's layout and IME now do all the work. Release the
+  grab by clicking another window (the mouse is never grabbed). `local` mode
+  (type with your own IME, for a host that lacks your language) grabs only the
+  system keys, as before; `auto` is unchanged. It is the standard RustDesk /
+  AnyDesk / RDP behavior. Windows only for now; Ctrl+Alt+Del stays reserved
+  by Windows. No protocol change (keys already travel as physical codes).
+
 ## [0.11.9] - 2026-11-11
 
 ### Added

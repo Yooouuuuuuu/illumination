@@ -205,6 +205,10 @@ impl InputSink for WinInjector {
 type Forward = Box<dyn Fn(Key, bool) + Send>;
 
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Full keyboard grab: capture every key for the host, not only the system ones (architecture
+/// §6). On, the local Windows and the local IME never see a keystroke while the viewer is
+/// focused, so there is no local Alt+Tab and no local composition fighting the forwarding.
+static GRAB: AtomicBool = AtomicBool::new(false);
 
 fn forward_slot() -> &'static Mutex<Option<Forward>> {
     static SLOT: OnceLock<Mutex<Option<Forward>>> = OnceLock::new();
@@ -230,7 +234,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
         let key =
             usage_from_windows_scancode(info.scanCode as u16, extended).map(|usage| Key { usage });
-        if let Some(key) = key.filter(|_| !injected && is_system_key(info.vkCode, alt, ctrl)) {
+        // Grab everything (physical-key mode), or just the keys Windows keeps for itself.
+        let wanted = GRAB.load(Ordering::SeqCst) || is_system_key(info.vkCode, alt, ctrl);
+        if let Some(key) = key.filter(|_| !injected && wanted) {
             let down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
             if let Some(forward) = forward_slot().lock().expect("hook lock").as_ref() {
                 forward(key, down);
@@ -263,9 +269,15 @@ impl SystemKeyHook {
         Ok(SystemKeyHook(hook))
     }
 
-    /// Forward system keys only while the viewer window has focus.
+    /// Forward captured keys only while the viewer window has focus.
     pub fn set_active(active: bool) {
         HOOK_ACTIVE.store(active, Ordering::SeqCst);
+    }
+
+    /// Capture **every** key for the host (physical-key mode), not only the system keys. The
+    /// local machine and its IME get nothing while the viewer is focused.
+    pub fn set_grab(grab: bool) {
+        GRAB.store(grab, Ordering::SeqCst);
     }
 }
 
