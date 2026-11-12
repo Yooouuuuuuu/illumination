@@ -653,12 +653,12 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
             tracing::info!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
                 Ok(conn) => {
-                    let name = conn
+                    let (name, version) = conn
                         .peer_hello
                         .as_ref()
-                        .map(|h| h.device_name.clone())
+                        .map(|h| (h.device_name.clone(), h.app_version.clone()))
                         .unwrap_or_default();
-                    tracing::info!(target: "service", "[{peer}] Session with \"{name}\" started.");
+                    tracing::info!(target: "service", "[{peer}] Session with \"{name}\" (Illumination {version}) started.");
                     match serve_session(conn, config, ep.timeouts.idle, media).await {
                         Ok(()) => tracing::info!(target: "service", "[{peer}] Session ended."),
                         Err(err) => {
@@ -903,6 +903,18 @@ fn run_view(
     let keyboard_grabbed = _hook.is_some() && matches!(args.keyboard, KeyboardMode::Remote);
     #[cfg(not(windows))]
     let keyboard_grabbed = false;
+    // Said out loud, and in the log, so a report of "the keys act here" can be read against
+    // which build ran and what it did with the keyboard.
+    let keyboard_note = match (with_input, keyboard_grabbed) {
+        (false, _) => "not sent (view only)",
+        (true, true) => "every key goes to the host while this window has focus",
+        (true, false) => "typed here; only Win, Alt+Tab and the like go to the host",
+    };
+    println!(
+        "Illumination {}. Keyboard: {keyboard_note}.",
+        env!("CARGO_PKG_VERSION")
+    );
+    tracing::info!(target: "input", "Illumination {}; keyboard: {keyboard_note}.", env!("CARGO_PKG_VERSION"));
     let ack = live.clone();
     let mode = if with_input { "" } else { " (view only)" };
     let state_for_report = shared.clone();
@@ -921,6 +933,12 @@ fn run_view(
                     illum_win::SystemKeyHook::set_active(focused);
                     if !focused {
                         hotkeys.reset();
+                        // How the grab did while the window had focus: counts, never the keys.
+                        #[cfg(windows)]
+                        {
+                            let (taken, left) = illum_win::SystemKeyHook::take_counts();
+                            tracing::info!(target: "input", "Focus left: {taken} key presses went to the host, {left} stayed on this machine.");
+                        }
                     }
                 }),
                 // Minimized: ask the host to pause the screen (audio, input and the connection

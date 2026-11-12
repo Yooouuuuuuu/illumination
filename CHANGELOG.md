@@ -11,6 +11,25 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.12] - 2026-11-12
+
+### Changed
+
+- **The viewer says which build it is and what it does with the keyboard** when
+  it connects (`Illumination 0.11.12. Keyboard: every key goes to the host
+  while this window has focus.`), and `viewer.log` records, each time the
+  window loses focus, how many key presses went to the host and how many
+  stayed on this machine — counts only, never the keys. The host's log names
+  the viewer's version. A report that "the keys still act here" can now be
+  read against what actually ran.
+
+### Fixed
+
+- The keyboard grab also takes keys that another program re-injects on your
+  machine (a key remapper, an on-screen keyboard, a vendor hotkey tool). Until
+  now every injected key was left to your own machine; only what Illumination
+  itself injects is left alone now, which is how RustDesk tells them apart.
+
 ## [0.11.11] - 2026-11-12
 
 ### Fixed

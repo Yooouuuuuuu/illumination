@@ -842,6 +842,17 @@ whether input delay is the network or the host.
     one that is not, so the host sees each once and does its own repeating.
   - The window sees no press under a grab, so the hook's side picks out the viewer's own
     `Ctrl+Alt+Shift+F2` (`GrabHotkeys`) and hands it to the window; it is not sent to the host.
+  - **Only our own injection is left alone (v0.11.12).** The hook used to ignore every injected
+    key, so a key that a remapper, an on-screen keyboard or a vendor hotkey tool re-injects on
+    the controller was never grabbed. RustDesk marks what it injects (`dwExtraInfo`, its
+    `ENIGO_INPUT_EXTRA_VALUE`) and skips only that; the Windows injector now marks its input the
+    same way (`OWN_INPUT`) and the hook takes everything else.
+  - **Checked against the real system:** two ignored tests in `illum-win` drive the installed
+    hook with real key events and read back what Windows saw — a grabbed press never reaches it,
+    and a grabbed Windows key (press swallowed, release passed) does not open the Start menu.
+  - **Told, not guessed:** the viewer prints its version and what it does with the keyboard at
+    start, and logs, each time focus leaves, how many key presses went to the host and how many
+    stayed on this machine (counts only, never the keys). The host logs the viewer's version.
   - Differences kept: the grab follows window focus (RustDesk also needs the pointer inside the
     picture), and the lock keys are forwarded as keys (RustDesk sends lock *state* with each key).
 

@@ -9,7 +9,7 @@
 use crate::DisplayInfo;
 use illum_core::input::{InputSink, Key, MouseButton};
 use illum_core::keymap::{usage, usage_from_windows_scancode, windows_scancode};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -28,8 +28,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowThreadProcessId,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE,
-    PeekMessageW, PostThreadMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    HHOOK, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_EXTENDED, MSG, PM_NOREMOVE, PeekMessageW,
+    PostThreadMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT,
     WM_SYSKEYDOWN,
 };
@@ -71,7 +71,7 @@ fn keyboard(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
                 wScan: scan,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: OWN_INPUT,
             },
         },
     }
@@ -86,7 +86,7 @@ fn virtual_key(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
                 wScan: 0,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: OWN_INPUT,
             },
         },
     }
@@ -102,7 +102,7 @@ fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
                 mouseData: data as u32,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: OWN_INPUT,
             },
         },
     }
@@ -212,6 +212,12 @@ static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// §6). On, the local Windows and the local IME never see a key press while the viewer is
 /// focused, so there is no local Alt+Tab and no local composition fighting the forwarding.
 static GRAB: AtomicBool = AtomicBool::new(false);
+/// Marks the input this program injects (`dwExtraInfo`), so the hook can tell it from typing.
+const OWN_INPUT: usize = 0x494C_4C55;
+/// Key presses the hook took for the host, and presses it left to this machine, since the last
+/// [`SystemKeyHook::take_counts`]. Counts only: what was typed is nobody's business.
+static TAKEN: AtomicU64 = AtomicU64::new(0);
+static LEFT: AtomicU64 = AtomicU64::new(0);
 
 fn forward_slot() -> &'static Mutex<Option<Forward>> {
     static SLOT: OnceLock<Mutex<Option<Forward>>> = OnceLock::new();
@@ -256,11 +262,13 @@ fn verdict(wanted: bool, lock_key: bool, down: bool) -> Verdict {
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && HOOK_ACTIVE.load(Ordering::SeqCst) {
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let injected = info.flags.0 & LLKHF_INJECTED.0 != 0;
+        // Our own injection (this machine is also a host) is not typing. Anything else is: a
+        // remapper or an on-screen keyboard injects too, and RustDesk tells them apart the same way.
+        let ours = info.dwExtraInfo == OWN_INPUT;
         let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
         let key =
             usage_from_windows_scancode(info.scanCode as u16, extended).map(|usage| Key { usage });
-        if let Some(key) = key.filter(|_| !injected) {
+        if let Some(key) = key.filter(|_| !ours) {
             let alt = info.flags.0 & LLKHF_ALTDOWN.0 != 0;
             let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
             // Grab everything (physical-key mode), or just the keys Windows keeps for itself.
@@ -274,8 +282,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 }
             }
             if verdict == Verdict::ForwardAndSwallow {
+                TAKEN.fetch_add(1, Ordering::Relaxed);
                 return LRESULT(1);
             }
+        }
+        if wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN {
+            LEFT.fetch_add(1, Ordering::Relaxed);
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -350,6 +362,15 @@ impl SystemKeyHook {
     pub fn set_grab(grab: bool) {
         GRAB.store(grab, Ordering::SeqCst);
     }
+
+    /// `(taken, left)`: key presses taken for the host and presses left to this machine while
+    /// the hook was active, since the last call. For the log, to show the grab is holding.
+    pub fn take_counts() -> (u64, u64) {
+        (
+            TAKEN.swap(0, Ordering::Relaxed),
+            LEFT.swap(0, Ordering::Relaxed),
+        )
+    }
 }
 
 impl Drop for SystemKeyHook {
@@ -380,6 +401,83 @@ mod tests {
             !is_system_key(0x41, true, true),
             "Ctrl+Alt+A is not intercepted"
         );
+    }
+
+    /// A key as another program would inject it: not marked as ours, so the hook treats it as
+    /// typed.
+    fn typed(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+        let mut input = keyboard(scan, flags | KEYEVENTF_SCANCODE);
+        input.Anonymous.ki.dwExtraInfo = 0;
+        input
+    }
+
+    // The hook is one per process and these tests drive the real one: one at a time.
+    static REAL_HOOK: Mutex<()> = Mutex::new(());
+
+    /// Drives the real hook with F15 and reads back what the system saw.
+    #[test]
+    #[ignore = "injects F15 into the real desktop for a moment"]
+    fn grab_keeps_a_real_press_from_the_system() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        const VK_F15: i32 = 0x7E;
+        let _one = REAL_HOOK.lock().unwrap();
+        let f15 = Key {
+            usage: illum_core::keymap::keyboard(0x6A),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let hook = SystemKeyHook::install(move |key, down| log.lock().unwrap().push((key, down)))
+            .expect("hook installs");
+        SystemKeyHook::set_active(true);
+        let press = |grab: bool, input: fn(u16, KEYBD_EVENT_FLAGS) -> INPUT| {
+            SystemKeyHook::set_grab(grab);
+            send(&[input(0x66, KEYEVENTF_SCANCODE)]);
+            std::thread::sleep(Duration::from_millis(100));
+            let system_saw_it = unsafe { GetAsyncKeyState(VK_F15) } < 0;
+            send(&[input(0x66, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)]);
+            std::thread::sleep(Duration::from_millis(100));
+            system_saw_it
+        };
+        let without_grab = press(false, typed);
+        let own_injection = press(true, keyboard);
+        let with_grab = press(true, typed);
+        SystemKeyHook::set_active(false);
+        drop(hook);
+        assert!(without_grab, "no grab: the system sees the press");
+        assert!(own_injection, "what this program injects is never grabbed");
+        assert!(!with_grab, "grab: the press never reaches the system");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(f15, true), (f15, false)],
+            "only the grabbed press and release were forwarded"
+        );
+    }
+
+    /// The Windows key under the grab: its press is swallowed and its release passed on, and
+    /// the local Start menu must stay shut (it would take the foreground).
+    #[test]
+    #[ignore = "injects the Windows key into the real desktop for a moment"]
+    fn grab_keeps_the_windows_key_from_the_start_menu() {
+        use std::time::Duration;
+        let _one = REAL_HOOK.lock().unwrap();
+        let hook = SystemKeyHook::install(|_, _| {}).expect("hook installs");
+        SystemKeyHook::set_active(true);
+        SystemKeyHook::set_grab(true);
+        let before = unsafe { GetForegroundWindow() };
+        send(&[typed(0x5B, KEYEVENTF_EXTENDEDKEY)]);
+        std::thread::sleep(Duration::from_millis(80));
+        send(&[typed(0x5B, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP)]);
+        std::thread::sleep(Duration::from_millis(800));
+        let after = unsafe { GetForegroundWindow() };
+        SystemKeyHook::set_active(false);
+        drop(hook);
+        if before != after {
+            // The Start menu opened: close it again before failing.
+            send(&[typed(0x01, KEYBD_EVENT_FLAGS(0))]);
+            send(&[typed(0x01, KEYEVENTF_KEYUP)]);
+        }
+        assert_eq!(before, after, "the local Start menu opened");
     }
 
     #[test]
