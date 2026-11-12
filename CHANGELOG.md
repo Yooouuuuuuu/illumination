@@ -11,6 +11,26 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.11] - 2026-11-12
+
+### Fixed
+
+- **The keyboard grab now holds: it is built the way RustDesk builds it.** In
+  0.11.10 the Windows key still opened the Start menu on your own machine
+  first. The hook sat on the window's thread, and Windows silently removes a
+  keyboard hook whose thread answers late (that thread also sets up the GPU
+  and draws). The hook now has a thread of its own that does nothing else,
+  as in RustDesk.
+- Copied from RustDesk as well: a grabbed key *press* is kept from your
+  machine, its *release* still reaches it (so nothing stays stuck locally),
+  and CapsLock / NumLock keep working on both machines.
+- **Your local input method is no longer switched off** while grabbed. Its
+  keys simply never reach it, so it has nothing to compose; the language
+  switch and its indicator are left alone.
+- Holding a key under the grab repeats once (the host's repeat), not twice.
+- `Ctrl+Alt+Shift+F2` (fit / original size) works under the grab again and is
+  not sent to the host.
+
 ## [0.11.10] - 2026-11-11
 
 ### Changed

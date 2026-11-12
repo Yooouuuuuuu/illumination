@@ -12,7 +12,7 @@ pub mod input;
 pub mod measure;
 pub mod workload;
 
-pub use input::{InputOut, KeyboardMode};
+pub use input::{GrabHotkeys, Grabbed, InputOut, KeyboardMode};
 pub use measure::{HostSecond, Recorder, SecondRecord};
 pub use workload::run_workload;
 
@@ -335,6 +335,8 @@ pub enum UiEvent {
     Redraw,
     /// The session ended; close the window.
     Exit,
+    /// The fit / original size hotkey, seen by a keyboard grab instead of the window.
+    ToggleView,
 }
 
 /// Lets the network side wake or close the window from any thread.
@@ -423,6 +425,9 @@ pub struct ViewerOptions {
     /// `None` for view-only.
     pub input: Option<Arc<InputOut>>,
     pub keyboard: KeyboardMode,
+    /// A keyboard grab outside the window delivers the keys (architecture §6); the window then
+    /// leaves this machine's IME as it is.
+    pub keyboard_grabbed: bool,
     pub pointer: PointerMode,
     /// Called when the window is minimized (true) or restored (false), so the session can ask
     /// the host to pause or resume the screen (architecture §5.4).
@@ -575,9 +580,11 @@ impl App {
             .effective(state.host_layout.as_deref(), state.local_layout.as_deref())
     }
 
-    /// Local mode uses this machine's IME; Remote mode lets the host's IME do the work.
+    /// Local mode uses this machine's IME; Remote mode lets the host's IME do the work. Under a
+    /// keyboard grab the local IME is left alone, as RustDesk leaves it: no key press reaches
+    /// it, so it has nothing to compose and nothing needs switching off.
     fn sync_ime(&mut self, mode: KeyboardMode) {
-        let allowed = mode == KeyboardMode::Local;
+        let allowed = mode == KeyboardMode::Local || self.options.keyboard_grabbed;
         if self.ime_allowed != Some(allowed) {
             if let Some(s) = &self.window {
                 s.window.set_ime_allowed(allowed);
@@ -771,16 +778,20 @@ impl App {
         match key.usage {
             usage::F2 => {
                 if event.state == ElementState::Pressed && !event.repeat {
-                    self.view_mode = match self.view_mode {
-                        ViewMode::Fit => ViewMode::Original,
-                        ViewMode::Original => ViewMode::Fit,
-                    };
-                    self.request_redraw();
+                    self.toggle_view();
                 }
                 true
             }
             _ => false,
         }
+    }
+
+    fn toggle_view(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Fit => ViewMode::Original,
+            ViewMode::Original => ViewMode::Fit,
+        };
+        self.request_redraw();
     }
 
     fn input_event(&mut self, event: &WindowEvent) {
@@ -806,7 +817,11 @@ impl App {
                 };
                 let msgs = translate_key(mode, self.mods, self.composing, press, &mut self.texted);
                 for msg in msgs {
-                    input.send(msg);
+                    match msg {
+                        // A keyboard grab may have reported this key already.
+                        InputMsg::Key { key, down } => input.key(key, down),
+                        other => input.send(other),
+                    }
                 }
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => self.composing = !text.is_empty(),
@@ -899,11 +914,14 @@ impl ApplicationHandler<UiEvent> for App {
             (self.options.on_focus)(true);
         }
         self.window = Some(Surface { window, backend });
+        let mode = self.effective_mode();
+        self.sync_ime(mode);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UiEvent) {
         match event {
             UiEvent::Redraw => self.request_redraw(),
+            UiEvent::ToggleView => self.toggle_view(),
             UiEvent::Exit => event_loop.exit(),
         }
     }

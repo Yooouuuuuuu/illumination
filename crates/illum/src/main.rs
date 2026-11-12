@@ -15,7 +15,6 @@ use illum::host::{InputFactory, LayoutFn};
 use illum::viewer::{MediaSlot, Notify, ViewParams, run_viewer_session_sharing_media};
 use illum_core::Role;
 use illum_core::clipboard::ClipboardMsg;
-use illum_core::input::InputMsg;
 #[cfg(windows)]
 use illum_core::input::InputSink;
 use illum_core::protocol::Channel;
@@ -869,13 +868,17 @@ fn run_view(
         })));
         out
     });
-    // Keys Windows keeps for itself (Win, Alt+Tab, …) go to the host while the viewer has focus.
+    // The keyboard goes to the host while the viewer has focus: a hook on its own thread takes
+    // every key (remote mode) or the ones Windows keeps for itself (Win, Alt+Tab, …) (§6).
+    let hotkeys = Arc::new(illum_ui::GrabHotkeys::default());
     #[cfg(windows)]
     let _hook = match &input {
         Some(input) => {
-            let input = input.clone();
-            match illum_win::SystemKeyHook::install(move |key, down| {
-                input.send(InputMsg::Key { key, down })
+            let (input, hotkeys, waker) = (input.clone(), hotkeys.clone(), waker.clone());
+            match illum_win::SystemKeyHook::install(move |key, down| match hotkeys.key(key, down) {
+                illum_ui::Grabbed::Host => input.key(key, down),
+                illum_ui::Grabbed::ToggleView => waker.wake(UiEvent::ToggleView),
+                illum_ui::Grabbed::Viewer => {}
             }) {
                 Ok(hook) => {
                     // Remote (physical-key) mode grabs every key for the host; local/auto grab
@@ -896,6 +899,10 @@ fn run_view(
         }
         None => None,
     };
+    #[cfg(windows)]
+    let keyboard_grabbed = _hook.is_some() && matches!(args.keyboard, KeyboardMode::Remote);
+    #[cfg(not(windows))]
+    let keyboard_grabbed = false;
     let ack = live.clone();
     let mode = if with_input { "" } else { " (view only)" };
     let state_for_report = shared.clone();
@@ -907,12 +914,14 @@ fn run_view(
                 on_presented: Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
                 input,
                 keyboard: args.keyboard,
+                keyboard_grabbed,
                 pointer: args.pointer,
-                on_focus: Box::new(|focused| {
+                on_focus: Box::new(move |focused| {
                     #[cfg(windows)]
                     illum_win::SystemKeyHook::set_active(focused);
-                    #[cfg(not(windows))]
-                    let _ = focused;
+                    if !focused {
+                        hotkeys.reset();
+                    }
                 }),
                 // Minimized: ask the host to pause the screen (audio, input and the connection
                 // stay). The media loop also reads the flag so it does not alarm (§5.4).

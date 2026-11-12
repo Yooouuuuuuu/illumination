@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Input on Windows (architecture §6):
 //! - [`WinInjector`]: host side, injects with `SendInput` (scancodes, Unicode text, absolute mouse).
-//! - [`SystemKeyHook`]: controller side, a low-level keyboard hook that forwards keys Windows would
-//!   otherwise keep for itself (Win, Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+F4) while the viewer has focus.
+//! - [`SystemKeyHook`]: controller side, a low-level keyboard hook on its own thread that takes
+//!   the keyboard for the host while the viewer has focus: every key (the grab), or only the keys
+//!   Windows would otherwise keep for itself (Win, Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+F4).
 //! - Keyboard layout helpers for the Auto keyboard mode.
 
 use crate::DisplayInfo;
@@ -12,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -25,10 +27,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_APPS, VK_CONTROL, VK_ESCAPE, VK_F4, VK_LWIN, VK_PAUSE, VK_RWIN, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, HHOOK,
-    KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowThreadProcessId,
+    HHOOK, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT,
+    WM_SYSKEYDOWN,
 };
 
 /// Makes coordinates and metrics physical pixels, matching what Desktop Duplication captures.
@@ -206,7 +209,7 @@ type Forward = Box<dyn Fn(Key, bool) + Send>;
 
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Full keyboard grab: capture every key for the host, not only the system ones (architecture
-/// §6). On, the local Windows and the local IME never see a keystroke while the viewer is
+/// §6). On, the local Windows and the local IME never see a key press while the viewer is
 /// focused, so there is no local Alt+Tab and no local composition fighting the forwarding.
 static GRAB: AtomicBool = AtomicBool::new(false);
 
@@ -225,48 +228,116 @@ fn is_system_key(vk: u32, alt: bool, ctrl: bool) -> bool {
         || (ctrl && vk == VK_ESCAPE)
 }
 
+/// What the hook does with one key event.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Verdict {
+    /// Not ours: the local system handles it as usual.
+    Pass,
+    /// Goes to the host, and the local system sees it too.
+    ForwardAndPass,
+    /// Goes to the host; the local system never sees it.
+    ForwardAndSwallow,
+}
+
+/// The rule RustDesk's grab loop applies (`start_grab_loop` in its `keyboard.rs`): a captured
+/// **press** is swallowed, a captured **release** still reaches the local system, so nothing
+/// that was held when the grab began stays stuck here; the lock keys always reach the local
+/// system as well, so its lock lights keep working.
+fn verdict(wanted: bool, lock_key: bool, down: bool) -> Verdict {
+    if !wanted {
+        Verdict::Pass
+    } else if down && !lock_key {
+        Verdict::ForwardAndSwallow
+    } else {
+        Verdict::ForwardAndPass
+    }
+}
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && HOOK_ACTIVE.load(Ordering::SeqCst) {
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let injected = info.flags.0 & LLKHF_INJECTED.0 != 0;
-        let alt = info.flags.0 & LLKHF_ALTDOWN.0 != 0;
-        let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
         let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
         let key =
             usage_from_windows_scancode(info.scanCode as u16, extended).map(|usage| Key { usage });
-        // Grab everything (physical-key mode), or just the keys Windows keeps for itself.
-        let wanted = GRAB.load(Ordering::SeqCst) || is_system_key(info.vkCode, alt, ctrl);
-        if let Some(key) = key.filter(|_| !injected && wanted) {
+        if let Some(key) = key.filter(|_| !injected) {
+            let alt = info.flags.0 & LLKHF_ALTDOWN.0 != 0;
+            let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
+            // Grab everything (physical-key mode), or just the keys Windows keeps for itself.
+            let wanted = GRAB.load(Ordering::SeqCst) || is_system_key(info.vkCode, alt, ctrl);
+            let lock_key = key.usage == usage::CAPS_LOCK || key.usage == usage::NUM_LOCK;
             let down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
-            if let Some(forward) = forward_slot().lock().expect("hook lock").as_ref() {
-                forward(key, down);
+            let verdict = verdict(wanted, lock_key, down);
+            if verdict != Verdict::Pass {
+                if let Some(forward) = forward_slot().lock().expect("hook lock").as_ref() {
+                    forward(key, down);
+                }
             }
-            return LRESULT(1); // swallowed: the local system doesn't see it
+            if verdict == Verdict::ForwardAndSwallow {
+                return LRESULT(1);
+            }
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Uninstalls the hook when dropped.
-pub struct SystemKeyHook(HHOOK);
+/// The keyboard hook, on a thread of its own. Uninstalls when dropped.
+///
+/// Windows calls a low-level hook on the thread that installed it, through that thread's
+/// message loop, and **silently removes** a hook whose thread answers too slowly. A window's
+/// thread also draws and sets up the GPU, so the hook must not live there: like RustDesk's grab
+/// loop, it gets a thread that does nothing but pump its messages.
+pub struct SystemKeyHook {
+    thread_id: u32,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 
 impl SystemKeyHook {
-    /// Installs the hook. Call on the thread that runs the window's message loop.
+    /// Installs the hook on its own thread. `forward` is called there for each captured key.
     pub fn install(forward: impl Fn(Key, bool) + Send + 'static) -> Result<SystemKeyHook, String> {
         *forward_slot().lock().expect("hook lock") = Some(Box::new(forward));
-        // A global hook needs the module that holds the hook procedure: this executable.
-        let module =
-            unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
-        let hook = unsafe {
-            SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(hook_proc),
-                Some(HINSTANCE(module.0)),
-                0,
-            )
+        let (ready, installed) = std::sync::mpsc::channel::<Result<u32, String>>();
+        let thread = std::thread::Builder::new()
+            .name("key-hook".into())
+            .spawn(move || {
+                // A global hook needs the module that holds the hook procedure: this executable.
+                let hook = unsafe { GetModuleHandleW(None) }
+                    .map_err(|e| format!("GetModuleHandleW: {e}"))
+                    .and_then(|module| {
+                        unsafe {
+                            SetWindowsHookExW(
+                                WH_KEYBOARD_LL,
+                                Some(hook_proc),
+                                Some(HINSTANCE(module.0)),
+                                0,
+                            )
+                        }
+                        .map_err(|e| format!("SetWindowsHookExW: {e}"))
+                    });
+                let hook: HHOOK = match hook {
+                    Ok(hook) => hook,
+                    Err(e) => {
+                        let _ = ready.send(Err(e));
+                        return;
+                    }
+                };
+                let mut msg = MSG::default();
+                // Creates this thread's message queue before anyone posts WM_QUIT to it.
+                let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
+                let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
+                // The hook procedure runs inside GetMessageW; WM_QUIT (from Drop) ends the loop.
+                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {}
+                let _ = unsafe { UnhookWindowsHookEx(hook) };
+            })
+            .map_err(|e| format!("hook thread: {e}"))?;
+        match installed.recv() {
+            Ok(Ok(thread_id)) => Ok(SystemKeyHook {
+                thread_id,
+                thread: Some(thread),
+            }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("the hook thread ended early".into()),
         }
-        .map_err(|e| format!("SetWindowsHookExW: {e}"))?;
-        Ok(SystemKeyHook(hook))
     }
 
     /// Forward captured keys only while the viewer window has focus.
@@ -284,7 +355,10 @@ impl SystemKeyHook {
 impl Drop for SystemKeyHook {
     fn drop(&mut self) {
         HOOK_ACTIVE.store(false, Ordering::SeqCst);
-        let _ = unsafe { UnhookWindowsHookEx(self.0) };
+        let _ = unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
         *forward_slot().lock().expect("hook lock") = None;
     }
 }
@@ -305,6 +379,22 @@ mod tests {
         assert!(
             !is_system_key(0x41, true, true),
             "Ctrl+Alt+A is not intercepted"
+        );
+    }
+
+    #[test]
+    fn grab_swallows_presses_and_passes_releases() {
+        assert_eq!(verdict(false, false, true), Verdict::Pass);
+        assert_eq!(verdict(true, false, true), Verdict::ForwardAndSwallow);
+        assert_eq!(
+            verdict(true, false, false),
+            Verdict::ForwardAndPass,
+            "a release reaches the local system, so nothing stays stuck there"
+        );
+        assert_eq!(
+            verdict(true, true, true),
+            Verdict::ForwardAndPass,
+            "CapsLock and NumLock keep working locally"
         );
     }
 }

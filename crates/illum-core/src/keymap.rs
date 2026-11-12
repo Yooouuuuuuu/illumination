@@ -31,6 +31,7 @@ pub mod usage {
     pub const ENTER: u32 = keyboard(0x28);
     pub const ESCAPE: u32 = keyboard(0x29);
     pub const TAB: u32 = keyboard(0x2B);
+    pub const CAPS_LOCK: u32 = keyboard(0x39);
     pub const F2: u32 = keyboard(0x3B);
     pub const F4: u32 = keyboard(0x3D);
     pub const PAUSE: u32 = keyboard(0x48);
@@ -39,7 +40,11 @@ pub mod usage {
     pub const NUM_LOCK: u32 = keyboard(0x53);
     pub const CONTEXT_MENU: u32 = keyboard(0x65);
     pub const CONTROL_LEFT: u32 = keyboard(0xE0);
+    pub const SHIFT_LEFT: u32 = keyboard(0xE1);
+    pub const ALT_LEFT: u32 = keyboard(0xE2);
     pub const CONTROL_RIGHT: u32 = keyboard(0xE4);
+    pub const SHIFT_RIGHT: u32 = keyboard(0xE5);
+    pub const ALT_RIGHT: u32 = keyboard(0xE6);
     pub const META_LEFT: u32 = keyboard(0xE3);
     pub const META_RIGHT: u32 = keyboard(0xE7);
 }

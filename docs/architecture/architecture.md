@@ -822,10 +822,28 @@ whether input delay is the network or the host.
   IME compose. **Release is by unfocusing** the window (the mouse is never grabbed, so click
   another window); a dedicated release hotkey is a follow-up for fullscreen. **Ctrl+Alt+Del** is
   reserved by Windows and cannot be grabbed; it is sent from the host side (`SendSAS`, §6, later).
-  While grabbed, the viewer's own `Ctrl+Alt+Shift+…` hotkeys go to the host too; the window
-  controls return in the UI milestone. The grab is Windows-only today (the hook lives in
-  `illum-win`); the other OSes get their own when they land, and the wire (physical usages) is
-  already the same everywhere.
+  The grab is Windows-only today (the hook lives in `illum-win`); the other OSes get their own
+  when they land, and the wire (physical usages) is already the same everywhere.
+- **The grab is built as RustDesk builds it (v0.11.11).** Read from its source (`start_grab_loop`
+  in `src/keyboard.rs`, and `windows/grab.rs` of its `rdev` fork) after the v0.11.10 hook was
+  found not to hold: the Windows key still opened the controller's own Start menu.
+  - **The hook has a thread of its own** that only pumps its messages. Windows calls a low-level
+    hook on the thread that installed it and silently removes one whose thread answers late;
+    ours sat on the window's thread, which also sets up the GPU and draws. Once removed, keys
+    reached the local system first and the host only through the window.
+  - **A captured press is swallowed; a captured release still reaches the local system**, so a
+    key that was down when the grab began does not stay stuck here. **CapsLock and NumLock**
+    always reach the local system too (and the host), so the lock lights stay right.
+  - **The local IME is not switched off.** No key press reaches it, so it has nothing to
+    compose; its language switch and indicator are left as they are. (Without a grab — Remote
+    mode where the hook could not be installed — the window still turns its IME off.)
+  - The hook and the window can both report a key, and the hook reports this machine's
+    auto-repeat as more presses: `InputOut::key` drops a press of a held key and a release of
+    one that is not, so the host sees each once and does its own repeating.
+  - The window sees no press under a grab, so the hook's side picks out the viewer's own
+    `Ctrl+Alt+Shift+F2` (`GrabHotkeys`) and hands it to the window; it is not sent to the host.
+  - Differences kept: the grab follows window focus (RustDesk also needs the pointer inside the
+    picture), and the lock keys are forwarded as keys (RustDesk sends lock *state* with each key).
 
 ## 7. Secure desktop (UAC, lock screen)
 

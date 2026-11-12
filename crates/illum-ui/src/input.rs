@@ -283,6 +283,60 @@ pub fn translate_key(
     }
 }
 
+/// Whose a key from a keyboard grab is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grabbed {
+    /// The host's.
+    Host,
+    /// The viewer's hotkey that switches between fit and original size.
+    ToggleView,
+    /// Part of a viewer hotkey (its repeat or its release): nobody else's.
+    Viewer,
+}
+
+/// Picks the viewer's own hotkeys (Ctrl+Alt+Shift+F2) out of a keyboard grab. Under a grab the
+/// window never sees a key press, so it cannot spot them itself.
+#[derive(Default)]
+pub struct GrabHotkeys {
+    held: Mutex<HashSet<u32>>,
+}
+
+impl GrabHotkeys {
+    pub fn key(&self, key: Key, down: bool) -> Grabbed {
+        use illum_core::keymap::usage::*;
+        let mut held = self.held.lock().expect("grab hotkeys");
+        if key.usage != F2 {
+            if down {
+                held.insert(key.usage);
+            } else {
+                held.remove(&key.usage);
+            }
+            return Grabbed::Host;
+        }
+        let either = |a, b| held.contains(&a) || held.contains(&b);
+        let chord = either(CONTROL_LEFT, CONTROL_RIGHT)
+            && either(ALT_LEFT, ALT_RIGHT)
+            && either(SHIFT_LEFT, SHIFT_RIGHT);
+        match (down, held.contains(&F2)) {
+            (true, true) => Grabbed::Viewer,
+            (true, false) if chord => {
+                held.insert(F2);
+                Grabbed::ToggleView
+            }
+            (false, true) => {
+                held.remove(&F2);
+                Grabbed::Viewer
+            }
+            _ => Grabbed::Host,
+        }
+    }
+
+    /// The grab stopped (focus left): whatever was held is no longer known to be.
+    pub fn reset(&self) {
+        self.held.lock().expect("grab hotkeys").clear();
+    }
+}
+
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 /// Mouse moves leave at most this often, the newest position winning: a 1000 Hz mouse does not
 /// become a thousand datagrams a second, and 250 a second is more than any screen can show.
@@ -376,6 +430,21 @@ impl InputOut {
         }
         state.last_sent = now;
         self.send_reliable(msg);
+    }
+
+    /// A key going down or up, from the window or from a keyboard grab. Both may report the
+    /// same key, and a grab reports this machine's auto-repeat as more presses, so a press of a
+    /// key already held and a release of one that is not are dropped: only the host repeats.
+    pub fn key(&self, key: Key, down: bool) {
+        let held = self
+            .state
+            .lock()
+            .expect("input state")
+            .held
+            .contains(&Held::Key(key));
+        if down != held {
+            self.send(InputMsg::Key { key, down });
+        }
     }
 
     fn send_reliable(&self, msg: InputMsg) {
@@ -473,6 +542,53 @@ mod tests {
     const ENTER: Key = Key {
         usage: illum_core::keymap::usage::ENTER,
     };
+
+    #[test]
+    fn key_drops_repeats_and_stray_releases() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = sent.clone();
+        let out = InputOut::new(move |ev| log.lock().unwrap().push(ev.msg));
+        out.key(A, false); // released without a press we saw (held before the grab began)
+        out.key(A, true);
+        out.key(A, true); // this machine's auto-repeat
+        out.key(A, false);
+        out.key(A, false); // the window reporting the release the grab already sent
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![
+                InputMsg::Key { key: A, down: true },
+                InputMsg::Key {
+                    key: A,
+                    down: false
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn grab_hotkey_stays_with_the_viewer() {
+        use illum_core::keymap::usage::*;
+        let k = |usage| Key { usage };
+        let hot = GrabHotkeys::default();
+        assert_eq!(
+            hot.key(k(F2), true),
+            Grabbed::Host,
+            "plain F2 is the host's"
+        );
+        assert_eq!(hot.key(k(F2), false), Grabbed::Host);
+        for m in [CONTROL_LEFT, ALT_RIGHT, SHIFT_LEFT] {
+            assert_eq!(hot.key(k(m), true), Grabbed::Host);
+        }
+        assert_eq!(hot.key(k(F2), true), Grabbed::ToggleView);
+        assert_eq!(
+            hot.key(k(F2), true),
+            Grabbed::Viewer,
+            "a repeat toggles once"
+        );
+        assert_eq!(hot.key(k(F2), false), Grabbed::Viewer);
+        hot.reset();
+        assert_eq!(hot.key(k(F2), true), Grabbed::Host);
+    }
 
     fn t(
         mode: KeyboardMode,
