@@ -383,6 +383,17 @@ pub fn snapshot(
     points: (f32, f32),
     pixels_per_point: f32,
 ) -> Result<(Vec<u8>, u32, u32), String> {
+    snapshot_ui(points, pixels_per_point, |ui| {
+        home.draw(ui, state);
+    })
+}
+
+/// Draws any egui content (styled as the app) to RGBA pixels without a window.
+pub fn snapshot_ui(
+    points: (f32, f32),
+    pixels_per_point: f32,
+    mut draw: impl FnMut(&mut egui::Ui),
+) -> Result<(Vec<u8>, u32, u32), String> {
     let gpu = Arc::new(Gpu::headless()?);
     let (width, height) = (
         (points.0 * pixels_per_point).round() as u32,
@@ -430,12 +441,12 @@ pub fn snapshot(
     let mut painter = Painter::new(gpu.clone(), format);
     // A few frames: sizes that depend on the previous frame settle, as they do in the window.
     let mut output = ctx.run_ui(input(), |ui| {
-        home.draw(ui, state);
+        draw(ui);
     });
     for _ in 0..3 {
         painter.paint(&ctx, output, &view, [width, height]);
         output = ctx.run_ui(input(), |ui| {
-            home.draw(ui, state);
+            draw(ui);
         });
     }
     painter.paint(&ctx, output, &view, [width, height]);
@@ -522,6 +533,28 @@ mod tests {
                 pixels.chunks_exact(4).any(|p| p != first),
                 "{name} came out as one flat colour"
             );
+            write_png(&dir.join(format!("{name}.png")), &pixels, width, height).unwrap();
+        }
+        // The session window's bars, over a stand-in for the picture.
+        for (name, state, points) in [
+            ("session", crate::session_bar::sample(), (1280.0, 420.0)),
+            (
+                "session-view-only",
+                crate::session_bar::BarState {
+                    controlling: false,
+                    notice: Some("connection lost; reconnecting…".into()),
+                    ..crate::session_bar::sample()
+                },
+                (760.0, 360.0),
+            ),
+        ] {
+            let (pixels, width, height) = snapshot_ui(points, 1.0, |ui| {
+                crate::session_bar::draw(ui, &state);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x20, 0x20, 0x20)))
+                    .show(ui, |_| {});
+            })
+            .unwrap();
             write_png(&dir.join(format!("{name}.png")), &pixels, width, height).unwrap();
         }
     }

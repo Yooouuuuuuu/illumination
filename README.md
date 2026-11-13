@@ -23,7 +23,8 @@ After building (below), run `illum.exe` with no arguments on both machines.
   "Allow incoming connections" is ticked, the other machine can reach this one.
 - **Remote desk:** type the other machine's address and press Connect. The first time, each
   machine shows the other's key and asks you to confirm; after that you connect without
-  questions. The session opens in a window of its own.
+  questions. The session opens in a window of its own, with a bar on top (size, keyboard and
+  pointer mode, full screen, Disconnect) and the connection's numbers at the bottom.
 - **Your desks** keeps every machine you have connected to, one click away.
 - **Settings:** picture quality limits, keyboard and pointer mode, sound, clipboard, and the
   machines trusted to connect here.

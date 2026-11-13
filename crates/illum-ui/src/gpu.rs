@@ -545,6 +545,7 @@ pub struct WindowPresenter {
     /// then scales it to the window) so an over-large window never fails to configure.
     max_dim: u32,
     renderer: Renderer,
+    overlay: Option<Overlay>,
 }
 
 impl WindowPresenter {
@@ -613,7 +614,13 @@ impl WindowPresenter {
             view_format,
             max_dim,
             renderer,
+            overlay: None,
         })
+    }
+
+    /// The largest texture side, for egui's own textures.
+    pub fn max_texture_side(&self) -> u32 {
+        self.max_dim
     }
 
     pub fn renderer(&mut self) -> &mut Renderer {
@@ -663,8 +670,109 @@ impl WindowPresenter {
             ..Default::default()
         });
         self.renderer.render(&view, want, placement, cursor);
+        if let Some(overlay) = &self.overlay {
+            overlay.draw(&self.gpu, &view);
+        }
         self.gpu.queue.present(frame);
         true
+    }
+
+    /// Sets what is drawn over the picture from now on (the session's bars): one frame of egui
+    /// output. It is kept and drawn again with every picture until the next call, so the
+    /// interface is laid out only when it changed, not once per video frame.
+    pub fn set_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        mut output: egui::FullOutput,
+        size: [u32; 2],
+    ) {
+        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+        let view_format = self.view_format;
+        let overlay = self.overlay.get_or_insert_with(|| Overlay {
+            renderer: egui_wgpu::Renderer::new(
+                device,
+                view_format,
+                egui_wgpu::RendererOptions {
+                    dithering: false,
+                    ..Default::default()
+                },
+            ),
+            jobs: Vec::new(),
+            screen: egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [1, 1],
+                pixels_per_point: 1.0,
+            },
+        });
+        for (id, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                overlay.renderer.update_texture(device, queue, *id, delta);
+            }
+        }
+        overlay.screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [
+                size[0].clamp(1, self.max_dim),
+                size[1].clamp(1, self.max_dim),
+            ],
+            pixels_per_point: output.pixels_per_point,
+        };
+        overlay.jobs = ctx.tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("overlay buffers"),
+        });
+        let mut commands = overlay.renderer.update_buffers(
+            device,
+            queue,
+            &mut encoder,
+            &overlay.jobs,
+            &overlay.screen,
+        );
+        commands.push(encoder.finish());
+        queue.submit(commands);
+        for id in &output.textures_delta.free {
+            overlay.renderer.free_texture(id);
+        }
+        output.textures_delta.clear();
+    }
+}
+
+/// egui's last output, drawn over the picture.
+struct Overlay {
+    renderer: egui_wgpu::Renderer,
+    jobs: Vec<egui::ClippedPrimitive>,
+    screen: egui_wgpu::ScreenDescriptor,
+}
+
+impl Overlay {
+    fn draw(&self, gpu: &Gpu, view: &wgpu::TextureView) {
+        if self.jobs.is_empty() {
+            return;
+        }
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("overlay"),
+            });
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // over the picture
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.renderer
+                .render(&mut pass.forget_lifetime(), &self.jobs, &self.screen);
+        }
+        gpu.queue.submit([encoder.finish()]);
     }
 }
 

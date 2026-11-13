@@ -946,9 +946,10 @@ fn run_view(
         None => None,
     };
     #[cfg(windows)]
-    let keyboard_grabbed = _hook.is_some() && matches!(args.keyboard, KeyboardMode::Remote);
+    let hooked = _hook.is_some();
     #[cfg(not(windows))]
-    let keyboard_grabbed = false;
+    let hooked = false;
+    let keyboard_grabbed = hooked && matches!(args.keyboard, KeyboardMode::Remote);
     // Said out loud, and in the log, so a report of "the keys act here" can be read against
     // which build ran and what it did with the keyboard.
     let keyboard_note = match (with_input, keyboard_grabbed) {
@@ -973,6 +974,16 @@ fn run_view(
                 input,
                 keyboard: args.keyboard,
                 keyboard_grabbed,
+                host_name: hello.device_name.clone(),
+                host_address: illum_ui::app::shown_address(&normalize_target(target)).to_string(),
+                // Changing the mode in the window moves the grab with it: every key in remote
+                // mode, only the system keys otherwise (§6).
+                on_keyboard: Box::new(move |mode| {
+                    let grab = hooked && mode == KeyboardMode::Remote;
+                    #[cfg(windows)]
+                    illum_win::SystemKeyHook::set_grab(grab);
+                    grab
+                }),
                 pointer: args.pointer,
                 on_focus: Box::new(move |focused| {
                     #[cfg(windows)]

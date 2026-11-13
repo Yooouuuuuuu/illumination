@@ -11,6 +11,25 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-13
+
+### Added
+
+- **The session window has its bars.** On top: who you are connected to,
+  Fit / Original size, the keyboard mode (Remote / Local / Auto), the pointer
+  mode (Native / Embedded), Full screen and Disconnect. At the bottom: the
+  codec, the quality in use and the last second's numbers, which used to sit
+  in the title bar, or a notice such as "connection lost; reconnecting…".
+  The picture is fitted between the two.
+- Keyboard and pointer mode can now be changed while connected; before, they
+  were fixed when the session started.
+- The bars are for the mouse only: every key still goes to the host.
+
+### Changed
+
+- With the bars, the window's title is just the host's name. A machine with no
+  usable GPU gets no bars and keeps the numbers in its title bar.
+
 ## [0.12.0] - 2026-11-13
 
 ### Added

@@ -13,6 +13,7 @@ pub mod gpu;
 pub mod icon;
 pub mod input;
 pub mod measure;
+pub mod session_bar;
 pub mod workload;
 
 pub use input::{GrabHotkeys, Grabbed, InputOut, KeyboardMode};
@@ -440,6 +441,12 @@ pub struct ViewerOptions {
     pub on_focus: Box<dyn Fn(bool)>,
     /// Draw on the GPU (falling back to the CPU if none is usable); false forces the CPU path.
     pub gpu: bool,
+    /// Who the session is with, for the top bar.
+    pub host_name: String,
+    pub host_address: String,
+    /// Called when the keyboard mode is changed in the window. Returns whether the keyboard is
+    /// grabbed in that mode.
+    pub on_keyboard: Box<dyn Fn(KeyboardMode) -> bool>,
 }
 
 pub struct ViewerWindow {
@@ -481,6 +488,13 @@ impl ViewerWindow {
             worn: None,
             cursors: std::collections::HashMap::new(),
             os_cursor_hidden: false,
+            bars: None,
+            over_bar: false,
+            bar_press: false,
+            status_line: String::new(),
+            last_summary: String::new(),
+            bar_notice: None,
+            fullscreen: false,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
     }
@@ -525,6 +539,17 @@ struct App {
     cursors: std::collections::HashMap<u64, CustomCursor>,
     /// Whether the OS pointer is hidden over the window (embedded pointer while controlling).
     os_cursor_hidden: bool,
+    /// The session's bars (GPU presentation only), and what they need between frames.
+    bars: Option<Bars>,
+    /// The pointer is over a bar: it is the bars', not the host's.
+    over_bar: bool,
+    /// A mouse button went down on a bar; its release belongs there too.
+    bar_press: bool,
+    /// The numbers of the last second, for the status strip.
+    status_line: String,
+    last_summary: String,
+    bar_notice: Option<String>,
+    fullscreen: bool,
 }
 
 impl App {
@@ -617,14 +642,21 @@ impl App {
                 state.cursor_shape.clone(),
             )
         };
+        // The bars take the top and bottom of the window; the picture gets what is left.
+        let (top, bottom) = self.lay_out_bars(event_loop, w.get(), h.get());
+        let area_h = h.get().saturating_sub(top + bottom).max(1);
         let pan = self.window_mouse.map_or((0.5, 0.5), |(x, y)| {
-            (x / w.get() as f64, y / h.get() as f64)
+            (x / w.get() as f64, (y - top as f64) / area_h as f64)
         });
-        let place = picture.as_ref().map(|pic| match self.view_mode {
-            ViewMode::Fit => placement(pic.width(), pic.height(), w.get(), h.get()),
-            ViewMode::Original => {
-                placement_original(pic.width(), pic.height(), w.get(), h.get(), pan)
-            }
+        let place = picture.as_ref().map(|pic| {
+            let mut p = match self.view_mode {
+                ViewMode::Fit => placement(pic.width(), pic.height(), w.get(), area_h),
+                ViewMode::Original => {
+                    placement_original(pic.width(), pic.height(), w.get(), area_h, pan)
+                }
+            };
+            p.y += top;
+            p
         });
         if place.is_some() {
             self.placement = place;
@@ -634,7 +666,7 @@ impl App {
         // at *our* mouse position, never waiting for the host to report where it moved. Outside
         // the window, and in view-only, the picture shows the host's pointer where the host has
         // it.
-        let controlling = self.options.input.is_some() && self.hovering;
+        let controlling = self.options.input.is_some() && self.hovering && !self.over_bar;
         let native = self.options.pointer == PointerMode::Native;
         let cursor = match (controlling, native, self.local_mouse) {
             (true, true, _) => CursorPosition::default(),
@@ -652,6 +684,8 @@ impl App {
                     .visible
                     .then_some(cursor_shape.as_ref())
                     .flatten();
+                // Over a bar the pointer is this window's own: the plain arrow.
+                let shape = shape.filter(|_| !self.over_bar);
                 self.wear(event_loop, shape);
             } else {
                 self.hide_os_cursor(self.hovering && cursor_shape.is_some());
@@ -721,6 +755,23 @@ impl App {
             }
         }
         let rtt = state.clock.last_rtt;
+        let notice_now = state.status.clone().or_else(|| state.notice.clone());
+        if state.stats.summary != self.last_summary {
+            self.last_summary = state.stats.summary.clone();
+            let codec = state.codec.map_or("", |c| c.name());
+            let quality = state.quality.map_or(String::new(), |q| {
+                format!(
+                    " · rung {}/{}: {:.1} Mb/s {} fps, parity {} %",
+                    q.rung + 1,
+                    q.rungs,
+                    f64::from(q.bitrate_kbps) / 1000.0,
+                    q.fps,
+                    q.fec_percent
+                )
+            });
+            self.status_line = format!("{codec}{quality} · {}", self.last_summary);
+        }
+        self.bar_notice = notice_now;
         let title = if let Some(status) = state.status.clone() {
             Some(format!("{} — {status}", self.options.title))
         } else if state.stats.tick(rtt) {
@@ -753,7 +804,9 @@ impl App {
             None
         };
         drop(state);
-        if let Some(title) = title {
+        // With the bars the numbers are in the status strip; the title bar carries them only
+        // when there are none (the CPU fallback).
+        if let Some(title) = title.filter(|_| self.bars.is_none()) {
             s.window.set_title(&title);
         }
         if let Some((seq, _)) = new_frame {
@@ -876,6 +929,206 @@ impl App {
     }
 }
 
+/// The session's bars between frames (architecture §14).
+struct Bars {
+    ctx: egui::Context,
+    input: egui_winit::State,
+    /// Something happened to them: lay them out again at the next draw.
+    dirty: bool,
+    /// When an animation of theirs wants its next frame.
+    redraw_at: Option<Instant>,
+    /// What they showed last, to notice a change.
+    shown: Option<session_bar::BarState>,
+    /// The room they take at the top and the bottom, in pixels.
+    space: (u32, u32),
+}
+
+impl App {
+    /// The bars need the GPU presenter; with the CPU fallback the window stays bare and the
+    /// title bar carries the numbers, as before.
+    fn open_bars(&mut self) {
+        let Some(s) = self.window.as_ref() else {
+            return;
+        };
+        let Backend::Gpu(presenter) = &s.backend else {
+            return;
+        };
+        let ctx = egui::Context::default();
+        app::apply_style(&ctx);
+        let input = egui_winit::State::new(
+            ctx.clone(),
+            egui::ViewportId::ROOT,
+            &s.window,
+            Some(s.window.scale_factor() as f32),
+            None,
+            Some(presenter.max_texture_side() as usize),
+        );
+        self.bars = Some(Bars {
+            ctx,
+            input,
+            dirty: true,
+            redraw_at: None,
+            shown: None,
+            space: (0, 0),
+        });
+    }
+
+    /// Gives the bars the mouse and layout events they need (never a key: every key is the
+    /// host's). Returns true when the event was the bars' alone and must not reach the host.
+    fn bar_event(&mut self, event: &WindowEvent) -> bool {
+        let (Some(bars), Some(s)) = (self.bars.as_mut(), self.window.as_ref()) else {
+            return false;
+        };
+        let pointer = matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+        );
+        let layout = matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+        );
+        if !pointer && !layout {
+            return false;
+        }
+        let height = f64::from(s.window.inner_size().height);
+        let (top, bottom) = (f64::from(bars.space.0), f64::from(bars.space.1));
+        let over = !matches!(event, WindowEvent::CursorLeft { .. })
+            && self
+                .window_mouse
+                .is_some_and(|(_, y)| y < top || y >= height - bottom);
+        // Also the one event after leaving a bar, so what was highlighted lets go.
+        if over || self.over_bar || self.bar_press || layout {
+            let _ = bars.input.on_window_event(&s.window, event);
+            bars.dirty = true;
+            s.window.request_redraw();
+        }
+        self.over_bar = over;
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } if over => {
+                self.bar_press = true;
+                true
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                ..
+            } if self.bar_press => {
+                self.bar_press = false;
+                true
+            }
+            WindowEvent::MouseWheel { .. } => over,
+            _ => false,
+        }
+    }
+
+    /// Lays the bars out again if anything about them changed, hands the result to the
+    /// presenter (which draws it over every picture until the next change), and carries out
+    /// what was clicked. Returns the room they take at the top and bottom, in pixels.
+    fn lay_out_bars(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        width: u32,
+        height: u32,
+    ) -> (u32, u32) {
+        let Some(mut bars) = self.bars.take() else {
+            return (0, 0);
+        };
+        let state = session_bar::BarState {
+            host_name: self.options.host_name.clone(),
+            host_address: self.options.host_address.clone(),
+            controlling: self.options.input.is_some(),
+            view: self.view_mode,
+            keyboard: self.options.keyboard,
+            keyboard_grabbed: self.options.keyboard_grabbed,
+            pointer: self.options.pointer,
+            fullscreen: self.fullscreen,
+            status: self.status_line.clone(),
+            notice: self.bar_notice.clone(),
+        };
+        let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
+        let mut actions = Vec::new();
+        if (bars.dirty || due || bars.shown.as_ref() != Some(&state))
+            && let Some(s) = self.window.as_mut()
+            && let Backend::Gpu(presenter) = &mut s.backend
+        {
+            let raw = bars.input.take_egui_input(&s.window);
+            let mut space = session_bar::BarSpace::default();
+            let output = bars.ctx.run_ui(raw, |ui| {
+                (actions, space) = session_bar::draw(ui, &state);
+            });
+            let scale = output.pixels_per_point;
+            let delay = output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map_or(Duration::MAX, |v| v.repaint_delay);
+            // What egui would tell the window (cursor, IME) is left unused: the pointer and
+            // the input method are the session's to manage.
+            presenter.set_overlay(&bars.ctx, output, [width, height]);
+            bars.space = (
+                (space.top * scale).ceil() as u32,
+                (space.bottom * scale).ceil() as u32,
+            );
+            bars.dirty = delay.is_zero();
+            bars.redraw_at = (!delay.is_zero() && delay < Duration::from_secs(1))
+                .then(|| Instant::now() + delay);
+            bars.shown = Some(state);
+        }
+        let space = bars.space;
+        let again = bars.dirty || !actions.is_empty();
+        self.bars = Some(bars);
+        for action in actions {
+            self.bar_action(event_loop, action);
+        }
+        if again {
+            self.request_redraw();
+        }
+        space
+    }
+
+    fn bar_action(&mut self, event_loop: &ActiveEventLoop, action: session_bar::BarAction) {
+        use session_bar::BarAction;
+        match action {
+            BarAction::View(view) => self.view_mode = view,
+            BarAction::Keyboard(mode) => {
+                // Nothing stays held on the host across the change.
+                if let Some(input) = &self.options.input {
+                    input.release_all();
+                }
+                self.texted.clear();
+                self.composing = false;
+                self.options.keyboard = mode;
+                self.options.keyboard_grabbed = (self.options.on_keyboard)(mode);
+                let effective = self.effective_mode();
+                self.sync_ime(effective);
+            }
+            BarAction::Pointer(mode) => {
+                self.options.pointer = mode;
+                // Whatever the pointer wore, the next draw dresses it for the new mode.
+                self.worn = None;
+                if let Some(s) = &self.window {
+                    s.window.set_cursor(CursorIcon::Default);
+                }
+            }
+            BarAction::Fullscreen(on) => {
+                if let Some(s) = &self.window {
+                    s.window
+                        .set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                }
+                self.fullscreen = on;
+            }
+            BarAction::Disconnect => event_loop.exit(),
+        }
+    }
+}
+
 impl ApplicationHandler<UiEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -919,6 +1172,7 @@ impl ApplicationHandler<UiEvent> for App {
             (self.options.on_focus)(true);
         }
         self.window = Some(Surface { window, backend });
+        self.open_bars();
         let mode = self.effective_mode();
         self.sync_ime(mode);
     }
@@ -984,6 +1238,9 @@ impl ApplicationHandler<UiEvent> for App {
                 self.request_redraw();
             }
             _ => {}
+        }
+        if self.bar_event(&event) {
+            return;
         }
         if self.hotkey(&event) {
             return;

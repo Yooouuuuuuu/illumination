@@ -217,7 +217,7 @@ outages every 4 s: survived. Not yet measured live.
   this desk, the remote desk, your desks, settings, and the two key questions as dialogs
   (architecture §14). Drawn first on a design canvas,
   <https://claude.ai/artifact/FSra6NbADdEFsJPgXxZeKe>, in the icon's colours. It listens in its
-  own process until the service of M6 exists. Next: the session window's toolbar.
+  own process until the service of M6 exists. The session window got its bars in v0.12.1.
 - Accept panel and permissions (three states)
 - interactive and unattended profiles
 - clipboard (text, then files) with loop prevention

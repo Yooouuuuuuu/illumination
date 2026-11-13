@@ -1060,8 +1060,29 @@ defaults, never a window that will not open. They apply to the next connection.
 pixels with no window; the test `screens_draw` writes each screen to `target/app-pictures`.
 That is how the interface was checked while it was built.
 
-**Not in v0.12.0:** the session window still has its title-bar numbers and no toolbar (the
-display switch, modes, full screen and disconnect of the design: next); the incoming session
-cannot be ended from the app other than by closing it; desks show no online state (nothing
-tells the app); the console window is released only when the app was started by a
-double-click.
+**The session window's bars (v0.12.1, `illum_ui::session_bar`).** A bar on top — who you are
+connected to, Fit / Original, the keyboard mode, the pointer mode, full screen, Disconnect —
+and a status strip at the bottom with the codec, the rung and the last second's numbers (they
+left the title bar), or the notice when there is one ("connection lost; reconnecting…").
+- **The picture gets the room between them:** the placement is computed for that area and
+  moved down by the top bar, so the mapping from window to host pixels, panning in Original
+  size and the embedded cursor all follow without knowing about bars.
+- **Same frame, same GPU:** egui's output is handed to the presenter
+  (`WindowPresenter::set_overlay`) and drawn over every picture in a second pass. It is laid
+  out again only when something about the bars changed (a mouse event over them, a new status
+  line, a mode), not once per video frame.
+- **Mouse only.** No key ever goes to the bars: every key is the host's. A pointer over a bar
+  is the window's own (plain arrow, nothing sent to the host); a click that began on a bar
+  ends there. egui's wishes for the window's cursor and input method are ignored, because the
+  session manages both.
+- **Changing modes while connected.** Keyboard mode moves the grab with it
+  (`ViewerOptions::on_keyboard`; everything held on the host is released first); pointer mode
+  re-dresses the pointer on the next draw.
+- With the CPU fallback (no usable GPU) there are no bars and the title bar carries the
+  numbers, as before.
+
+**Not yet:** switching the host's display, sound and clipboard toggles and Ctrl+Alt+Del in the
+top bar (each needs something the session cannot do while running, or a protocol addition);
+the incoming session cannot be ended from the app other than by closing it; desks show no
+online state (nothing tells the app); the console window is released only when the app was
+started by a double-click.
