@@ -831,6 +831,17 @@ whether input delay is the network or the host.
     hook on the thread that installed it and silently removes one whose thread answers late;
     ours sat on the window's thread, which also sets up the GPU and draws. Once removed, keys
     reached the local system first and the host only through the window.
+  - **The viewer never asks for raw device events (v0.12.4).** This was the real reason the
+    grab did not hold through v0.12.3. Windows does not call a process's own low-level keyboard
+    hook while that process is registered for raw keyboard input and holds the focus, and winit
+    registers for raw input whenever its window has focus. So the hook was installed and alive,
+    passed every test on its own, and was never called in the viewer: measured on 2026-11-13,
+    Windows called it until the window took focus and not once after, while each key still
+    reached the window. The viewer's event loop now sets `DeviceEvents::Never`; with that the
+    same measurement shows every press taken by the hook. RustDesk's window (Flutter) does not
+    read raw input, which is why copying its hook alone was not enough. **Do not turn device
+    events on in the viewer** (raw mouse motion included) without moving the hook to another
+    process.
   - **A captured press is swallowed; a captured release still reaches the local system**, so a
     key that was down when the grab began does not stay stuck here. **CapsLock and NumLock**
     always reach the local system too (and the host), so the lock lights stay right.

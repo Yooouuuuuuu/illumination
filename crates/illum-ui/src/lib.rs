@@ -459,6 +459,13 @@ impl ViewerWindow {
         let event_loop = EventLoop::<UiEvent>::with_user_event()
             .build()
             .map_err(|e| e.to_string())?;
+        // No raw device events, ever. On Windows winit would register this process for raw
+        // keyboard input whenever the window has focus, and Windows does not call a process's
+        // own low-level keyboard hook while that process reads the keyboard raw and holds the
+        // focus: the grab (§6) was installed, alive, and never called. (Seen 2026-11-13: the
+        // hook ran until the window took focus, then not once more.) The viewer uses window
+        // events only.
+        event_loop.listen_device_events(winit::event_loop::DeviceEvents::Never);
         Ok(ViewerWindow { event_loop })
     }
 

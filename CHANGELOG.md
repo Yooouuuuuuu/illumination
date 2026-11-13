@@ -11,6 +11,20 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-13
+
+### Fixed
+
+- **The keyboard grab now holds: Win, Alt+Tab and typing go to the host only.**
+  Through 0.12.3 the Windows key still opened the Start menu on the controlling
+  machine and its input method still composed what was typed. The hook that
+  takes the keys was installed and working, but Windows never called it:
+  Windows skips a program's own keyboard hook while that program reads the
+  keyboard raw and has the focus, and the window library switched raw reading
+  on whenever the session window had focus. The session window no longer asks
+  for raw input. Measured in a live session on one machine: before, the hook
+  took 0 of 10 test presses; after, 10 of 10.
+
 ## [0.12.3] - 2026-11-13
 
 ### Fixed

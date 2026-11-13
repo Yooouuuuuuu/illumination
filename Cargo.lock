@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "illum"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "illum-core"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "illum-ffmpeg"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "ffmpeg-the-third",
  "illum-media",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "illum-media"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "lz4_flex",
  "reed-solomon-erasure",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "illum-net"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "bytes",
  "if-addrs",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "illum-ui"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "illum-win"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "illum-core",
  "illum-media",
