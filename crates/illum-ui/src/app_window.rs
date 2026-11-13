@@ -167,6 +167,8 @@ struct Shown {
     config: wgpu::SurfaceConfiguration,
     painter: Painter,
     input: egui_winit::State,
+    /// The taskbar was told the icon after the first frame (`icon::announce`).
+    icon_announced: bool,
     max_dim: u32,
 }
 
@@ -235,6 +237,7 @@ impl App {
             config,
             painter: Painter::new(gpu, format),
             input,
+            icon_announced: false,
             max_dim,
         })
     }
@@ -292,6 +295,10 @@ impl App {
                     .painter
                     .paint(&self.ctx, output, &view, [want.0, want.1]);
                 shown.painter.gpu.queue.present(frame);
+                if !shown.icon_announced {
+                    shown.icon_announced = true;
+                    crate::icon::announce(&shown.window);
+                }
             }
             // Nothing was drawn: try again shortly rather than leave a stale window.
             None => {

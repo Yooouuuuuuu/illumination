@@ -52,6 +52,29 @@ pub fn with_icon(attrs: WindowAttributes) -> WindowAttributes {
     attrs.with_window_icon(built_in())
 }
 
+/// Sets the window's icons once more. Call it after the window's first frame.
+///
+/// The Windows taskbar asks a new window for its icon as it appears and does not wait long for
+/// the answer. A window that is busy just then (setting up the GPU) answers too late, the
+/// taskbar shows a generic icon, and it never asks again by itself: only a window that *sets*
+/// its icon makes it look again. (Seen 2026-11-13: the window held the right icon, the taskbar
+/// button showed the generic one.)
+pub fn announce(window: &winit::window::Window) {
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::{IconExtWindows, WindowExtWindows};
+        if let (Ok(small), Ok(big)) = (
+            Icon::from_resource(RESOURCE_ID, None),
+            Icon::from_resource(RESOURCE_ID, None),
+        ) {
+            window.set_window_icon(Some(small));
+            window.set_taskbar_icon(Some(big));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

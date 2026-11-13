@@ -495,6 +495,7 @@ impl ViewerWindow {
             last_summary: String::new(),
             bar_notice: None,
             fullscreen: false,
+            icon_announced: false,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
     }
@@ -550,6 +551,8 @@ struct App {
     last_summary: String,
     bar_notice: Option<String>,
     fullscreen: bool,
+    /// The taskbar was told the icon after the first frame.
+    icon_announced: bool,
 }
 
 impl App {
@@ -736,6 +739,11 @@ impl App {
             // The swap chain is being rebuilt; try again without acknowledging anything.
             s.window.request_redraw();
             return;
+        }
+        if !self.icon_announced {
+            // After the first frame, so the taskbar gets an answer (`icon::announce`).
+            self.icon_announced = true;
+            icon::announce(&s.window);
         }
         let mut state = self.shared.lock().expect("view state lock");
         let presented = picture.as_ref().and(latest);

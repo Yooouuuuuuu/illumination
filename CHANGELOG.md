@@ -11,6 +11,16 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-13
+
+### Fixed
+
+- **The taskbar button shows the app's icon.** It showed a generic one, though
+  the window's title bar had the right icon: the taskbar asks a new window for
+  its icon as it appears, the window was still busy setting up the GPU, and
+  the taskbar never asks twice. The app window and the session window now set
+  their icon once more after their first frame, which makes it look again.
+
 ## [0.12.1] - 2026-11-13
 
 ### Added
