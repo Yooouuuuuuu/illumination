@@ -23,11 +23,15 @@ pub struct Gpu {
 impl Gpu {
     /// Picks an adapter that can present to `surface` (any adapter when there is no window, as
     /// in the tests). `Err` when the machine has no usable GPU API at all.
-    fn open(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, String> {
+    pub(crate) fn open(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Gpu, String> {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             force_fallback_adapter: false,
             compatible_surface: surface,
+            apply_limit_buckets: false,
         }))
         .map_err(|e| format!("no GPU adapter: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -40,10 +44,11 @@ impl Gpu {
             required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
         }))
         .map_err(|e| format!("no GPU device: {e}"))?;
         // A validation slip must not take the viewer down: log it and keep drawing.
-        device.on_uncaptured_error(Box::new(|e| {
+        device.on_uncaptured_error(Arc::new(|e| {
             tracing::error!(target: "viewer", "GPU error: {e}");
         }));
         let info = adapter.get_info();
@@ -63,7 +68,8 @@ impl Gpu {
 
     /// A device with no window, for rendering to textures.
     pub fn headless() -> Result<Gpu, String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         Gpu::open(&instance, None)
     }
 }
@@ -174,8 +180,8 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewer"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
         });
         let pipeline = |label, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -200,7 +206,7 @@ impl Renderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
         };
@@ -512,6 +518,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             if let Some((t, _)) = picture {
                 pass.set_pipeline(&self.opaque);
@@ -544,7 +551,11 @@ impl WindowPresenter {
     /// Opens the GPU on `window`. `Err` means "use the CPU fallback" (no adapter, no device, or
     /// a surface the device cannot present to).
     pub fn new(window: Arc<winit::window::Window>) -> Result<WindowPresenter, String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        // The display handle lets wgpu pick the windowing system the window lives on (X11 or
+        // Wayland); Windows and macOS do not need it but take it.
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
+        );
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| format!("no GPU surface: {e}"))?;
@@ -582,6 +593,7 @@ impl WindowPresenter {
             // mailbox presentation the newest frame still wins.
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
+            color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: if view_format == format {
                 vec![]
             } else {
@@ -634,10 +646,14 @@ impl WindowPresenter {
             self.surface.configure(&self.gpu.device, &self.config);
         }
         let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Timeout) => return false,
-            Err(e) => {
-                tracing::debug!(target: "viewer", "swap chain: {e}; rebuilding");
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            // Nothing to draw on right now (minimized, covered, or the panel is busy).
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return false;
+            }
+            other => {
+                tracing::debug!(target: "viewer", "swap chain: {other:?}; rebuilding");
                 self.surface.configure(&self.gpu.device, &self.config);
                 return false;
             }
@@ -647,7 +663,7 @@ impl WindowPresenter {
             ..Default::default()
         });
         self.renderer.render(&view, want, placement, cursor);
-        frame.present();
+        self.gpu.queue.present(frame);
         true
     }
 }
@@ -688,9 +704,9 @@ pub fn read_back(gpu: &Gpu, texture: &wgpu::Texture) -> Vec<u8> {
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |r| r.expect("map read-back buffer"));
     gpu.device
-        .poll(wgpu::PollType::Wait)
+        .poll(wgpu::PollType::wait_indefinitely())
         .expect("wait for read-back");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("mapped read-back buffer");
     let mut out = Vec::with_capacity(row * size.height as usize);
     for y in 0..size.height as usize {
         out.extend_from_slice(&data[y * padded..y * padded + row]);

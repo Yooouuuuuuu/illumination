@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 /// How keys are sent (AnyDesk's three modes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum KeyboardMode {
     /// Physical key positions (USB HID usages); the host's layout and IME apply.
     Remote,

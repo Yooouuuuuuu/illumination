@@ -11,6 +11,51 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-13
+
+### Added
+
+- **The app.** `illum` with no arguments now opens a window instead of a
+  message saying there isn't one:
+  - **This desk:** the address to give to the other machine, this machine's
+    key, and "Allow incoming connections". While it is ticked the app listens,
+    as `illum --service` does.
+  - **Remote desk:** an address and Connect. Problems (nobody there, refused,
+    a changed key) are said in the window. The session opens in a window of
+    its own.
+  - **Your desks:** every machine you have connected to, with Connect and
+    Forget.
+  - **Settings:** highest bitrate and frame rate, delay limit, scaling,
+    reconnecting, keyboard and pointer mode, sound, clipboard, and the list of
+    machines trusted to connect here. Kept in `settings.json`; they apply to
+    the next connection.
+  - **The two questions about keys** are dialogs now: "Is this …?" the first
+    time you connect to a machine, and "… wants to connect" when an unknown
+    machine reaches yours. The taskbar button flashes when one is waiting.
+- Started by a double-click, the app no longer leaves an empty console window
+  next to it.
+- `illum_ui::app_window::snapshot` draws the interface to a picture without a
+  window; the tests keep one of each screen in `target/app-pictures`.
+
+### Changed
+
+- The interface is drawn with `egui` on the window and GPU stack the viewer
+  already used; `wgpu` went from 26 to 30 for it. The viewer's picture is
+  unchanged (its offscreen colour tests pass as before). Building now needs
+  Rust 1.87 or newer.
+- Log files no longer fill with the GPU libraries' shader commentary: from
+  those, only warnings and errors are kept.
+- The app's log is `app.log`.
+
+### Not yet
+
+- The session window has no toolbar yet (display switch, modes, full screen,
+  disconnect): next.
+- Accepting a machine still means trusting it from then on, with everything
+  allowed; accept-once and per-connection permissions need a protocol change.
+- Don't run `illum --service` and the app on the same machine: they want the
+  same port, and the app will say it cannot listen.
+
 ## [0.11.13] - 2026-11-13
 
 ### Added

@@ -122,6 +122,15 @@ impl TrustStore {
         Ok(removed)
     }
 
+    /// Unpairs a device: its next connection has to be accepted again.
+    pub fn forget_peer(&mut self, fingerprint: &str) -> Result<bool, StoreError> {
+        let removed = self.data.paired_peers.remove(fingerprint).is_some();
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
     pub fn paired_peer(&self, fingerprint: &str) -> Option<&PairedPeer> {
         self.data.paired_peers.get(fingerprint)
     }
@@ -227,5 +236,15 @@ mod tests {
         assert!(store.forget_host("h:1").unwrap());
         assert!(!store.forget_host("h:1").unwrap());
         assert!(TrustStore::load(&path).unwrap().known_host("h:1").is_none());
+    }
+
+    #[test]
+    fn forget_removes_pairing() {
+        let path = temp_path("unpair");
+        let mut store = TrustStore::load(&path).unwrap();
+        store.pair("ff", "laptop", "1.2.3.4").unwrap();
+        assert!(store.forget_peer("ff").unwrap());
+        assert!(!store.forget_peer("ff").unwrap());
+        assert!(TrustStore::load(&path).unwrap().paired_peer("ff").is_none());
     }
 }

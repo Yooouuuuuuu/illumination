@@ -5,6 +5,7 @@
 //! `illum connect <ip>` measures round-trip time. The Windows service, the backend and the
 //! full app window arrive in later milestones.
 
+mod app;
 mod prompt;
 
 use anyhow::{Context, Result, bail};
@@ -269,8 +270,18 @@ fn init_logging(cli: &Cli) -> Option<PathBuf> {
         } else {
             LevelFilter::INFO
         });
+    // The GPU libraries narrate every shader they compile at debug level (megabytes for one
+    // window): from them, only what went wrong.
+    let quiet_gpu = tracing_subscriber::filter::filter_fn(|meta| {
+        let chatty = ["naga", "wgpu"]
+            .iter()
+            .any(|lib| meta.target().starts_with(lib));
+        !chatty || *meta.level() <= tracing::Level::WARN
+    });
+    let console = console.with_filter(quiet_gpu.clone());
     let role = match (&cli.command, cli.role()) {
         (Some(Command::View { .. }), Role::Frontend) => "viewer".to_string(),
+        (None, Role::Frontend) => "app".to_string(),
         (_, role) => format!("{role:?}").to_lowercase(),
     };
     let path = cli
@@ -294,6 +305,7 @@ fn init_logging(cli: &Cli) -> Option<PathBuf> {
             .with_ansi(false)
             .with_writer(Arc::new(f))
             .with_filter(LevelFilter::DEBUG)
+            .with_filter(quiet_gpu)
     });
     tracing_subscriber::registry()
         .with(console)
@@ -372,6 +384,11 @@ fn main() -> std::process::ExitCode {
         Some(Command::Workload { screen }) if cli.role() == Role::Frontend => {
             illum_ui::run_workload(*screen).map_err(anyhow::Error::msg)
         }
+        // No command: the app window, which also owns the main thread.
+        None if cli.role() == Role::Frontend => {
+            let home = cli.home.clone().unwrap_or_else(default_home);
+            app::run_app(&runtime, &home, cli.home.clone())
+        }
         _ => runtime.block_on(run(cli)),
     };
     match result {
@@ -397,10 +414,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         (Role::Backend | Role::Control, _) => bail!("role {role:?} is not implemented yet"),
-        (Role::Frontend, None) => {
-            println!("The app window isn't built yet. Try `illum connect <ip>` or `illum --help`.");
-            Ok(())
-        }
+        (Role::Frontend, None) => unreachable!("handled in main"),
         (Role::Frontend, Some(Command::Connect { target, pings })) => {
             run_connect(&home, &target, pings).await
         }
@@ -615,6 +629,33 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
     #[cfg(windows)]
     illum_win::make_dpi_aware();
     let mut ep = endpoint(home)?;
+    let listener = open_listener(&mut ep, &config, bind_to, port).await?;
+    println!(
+        "Device \"{}\" fingerprint: {}",
+        ep.device_name, ep.identity.fingerprint
+    );
+    for addr in listener.local_addrs() {
+        println!("Listening on {addr}");
+    }
+    accept_loop(ep, listener, config, Arc::new(|_| {})).await;
+    Ok(())
+}
+
+/// A desk connected to this one, or left. For whoever shows it (the app's status pill).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionEvent {
+    Started(String),
+    Ended(String),
+}
+
+/// Opens the listening port for a host that offers what `config` has. Narrows `ep`'s
+/// capabilities to match and adds the codecs this machine can encode.
+async fn open_listener(
+    ep: &mut Endpoint,
+    config: &HostConfig,
+    bind_to: &[IpAddr],
+    port: u16,
+) -> Result<Listener> {
     ep.capabilities.retain(|c| match c.as_str() {
         "screen" => config.screen.is_some(),
         "input" => config.input.is_some(),
@@ -634,21 +675,25 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
             "no Tailscale address found on this machine. Start Tailscale, or listen elsewhere with --bind <IP>"
         );
     }
-    let mut listener = Listener::bind(&ep, &addrs, port)
+    Listener::bind(ep, &addrs, port)
         .await
-        .context("opening the listening port")?;
-    println!(
-        "Device \"{}\" fingerprint: {}",
-        ep.device_name, ep.identity.fingerprint
-    );
-    for addr in listener.local_addrs() {
-        println!("Listening on {addr}");
-    }
+        .context("opening the listening port")
+}
+
+/// Accepts connections and serves each as a session, until the listener closes or this future
+/// is dropped (sessions already running carry on).
+async fn accept_loop(
+    ep: Endpoint,
+    mut listener: Listener,
+    config: HostConfig,
+    on_session: Arc<dyn Fn(SessionEvent) + Send + Sync>,
+) {
     while let Some((tcp, peer)) = listener.next().await {
         let ep = ep.clone();
         let acceptor = listener.acceptor();
         let config = config.clone();
         let media = listener.media();
+        let on_session = on_session.clone();
         tokio::spawn(async move {
             tracing::info!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
@@ -659,12 +704,14 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
                         .map(|h| (h.device_name.clone(), h.app_version.clone()))
                         .unwrap_or_default();
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" (Illumination {version}) started.");
+                    on_session(SessionEvent::Started(name.clone()));
                     match serve_session(conn, config, ep.timeouts.idle, media).await {
                         Ok(()) => tracing::info!(target: "service", "[{peer}] Session ended."),
                         Err(err) => {
                             tracing::warn!(target: "service", "[{peer}] Session ended: {}", describe(&err))
                         }
                     }
+                    on_session(SessionEvent::Ended(name));
                 }
                 Err(err) => {
                     tracing::warn!(target: "service", "[{peer}] Not connected: {}", describe(&err))
@@ -672,7 +719,6 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
             }
         });
     }
-    Ok(())
 }
 
 struct ViewArgs {

@@ -7,6 +7,8 @@
 //! are and a shader converts, scales and overlays the cursor; the swap chain shows the newest
 //! frame without queueing. A machine with no usable GPU falls back to `softbuffer` on the CPU.
 
+pub mod app;
+pub mod app_window;
 pub mod gpu;
 pub mod icon;
 pub mod input;
@@ -351,7 +353,8 @@ impl Waker {
 }
 
 /// Where the pointer lives while controlling (architecture §5.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PointerMode {
     /// Your own pointer, wearing the host's cursor shape. The OS moves it, so it never lags
     /// behind the picture and never disappears.

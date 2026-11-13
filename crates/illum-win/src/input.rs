@@ -40,6 +40,18 @@ pub fn make_dpi_aware() {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
+/// Lets go of the console window when it was opened just for this program (started by a
+/// double-click, not from a terminal): the app has its own window and should not sit next to an
+/// empty black one. Started from a terminal, the console is the terminal's and stays.
+pub fn leave_own_console() {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut ids = [0u32; 2];
+    // One process attached to the console: only us.
+    if unsafe { GetConsoleProcessList(&mut ids) } == 1 {
+        let _ = unsafe { FreeConsole() };
+    }
+}
+
 /// Layout of the window the person is typing into (host side), as 8 hex digits.
 pub fn foreground_keyboard_layout() -> String {
     let thread = unsafe { GetWindowThreadProcessId(GetForegroundWindow(), None) };

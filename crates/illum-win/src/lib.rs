@@ -22,7 +22,8 @@ pub use dda::{DdaSource, list_displays};
 pub use gdi::GdiSource;
 #[cfg(windows)]
 pub use input::{
-    SystemKeyHook, WinInjector, foreground_keyboard_layout, make_dpi_aware, own_keyboard_layout,
+    SystemKeyHook, WinInjector, foreground_keyboard_layout, leave_own_console, make_dpi_aware,
+    own_keyboard_layout,
 };
 #[cfg(windows)]
 pub use power::KeepAwake;

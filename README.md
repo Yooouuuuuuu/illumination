@@ -11,10 +11,25 @@ example over a Tailscale tailnet. There is no ID server, no relay and no account
 - **Written in Rust.**
 - **Free:** GPL-3.0-only.
 
-> Status: milestone M4 in progress. You can see and control another machine (keyboard, mouse,
-> IME text) with AV1 / H.265 video over UDP. It still runs from a console, not yet as a Windows
-> service. See
-> [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
+> Status: you can see and control another machine (keyboard, mouse, IME text, sound, clipboard)
+> with AV1 / H.265 video over UDP, from an app window or from the console. It is not yet a
+> Windows service. See [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
+
+## The app
+
+After building (below), run `illum.exe` with no arguments on both machines.
+
+- **This desk** shows the address to give to the other machine and this machine's key. While
+  "Allow incoming connections" is ticked, the other machine can reach this one.
+- **Remote desk:** type the other machine's address and press Connect. The first time, each
+  machine shows the other's key and asks you to confirm; after that you connect without
+  questions. The session opens in a window of its own.
+- **Your desks** keeps every machine you have connected to, one click away.
+- **Settings:** picture quality limits, keyboard and pointer mode, sound, clipboard, and the
+  machines trusted to connect here.
+
+Don't run `illum --service` on a machine at the same time as the app: both want the same port,
+and the app will say it cannot listen.
 
 ## Try it (console)
 
@@ -111,7 +126,7 @@ viewer.
 ## Commands
 
 ```
-illum                  # the app window (not built yet)
+illum                  # the app window
 illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern,
                        #   --no-audio, --no-clipboard)
 illum --backend        # per-session worker, started by the service (later milestone)

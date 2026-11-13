@@ -213,6 +213,11 @@ outages every 4 s: survived. Not yet measured live.
 - [ ] Input reaches an elevated window.
 
 ## M7: Desktop features
+- **The app window (v0.12.0, done ahead of M6):** `illum` with no command opens the home window:
+  this desk, the remote desk, your desks, settings, and the two key questions as dialogs
+  (architecture §14). Drawn first on a design canvas,
+  <https://claude.ai/artifact/FSra6NbADdEFsJPgXxZeKe>, in the icon's colours. It listens in its
+  own process until the service of M6 exists. Next: the session window's toolbar.
 - Accept panel and permissions (three states)
 - interactive and unattended profiles
 - clipboard (text, then files) with loop prevention

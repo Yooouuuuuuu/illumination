@@ -997,10 +997,71 @@ Crates are added only when a milestone needs them.
   encoders, so a broken frame costs a keyframe (§5.3). Worth the vendor SDKs (NVENC's
   `NV_ENC_PIC_PARAMS` invalidation list, AMF, QSV) only if keyframes on loss show up as visible
   stalls in the M5 harness.
-- **UI toolkit** for the window and the viewer surface.
+- ~~UI toolkit~~ decided in v0.12.0: `egui` (§14).
 - Exact threshold for "network stall → release all keys".
 - Parked ideas (not planned, kept so they aren't lost): a **4:4:4 mode** on H.265 for sharper
   coloured text, to try once 4:2:0 is stable (§5.3); a high-quality still frame after the
   screen stops changing; per-area encoder quality from a neighbourhood score; frame pacing to
   the display refresh (v2); an adaptive audio buffer; an emergency drop path if the harness shows
   one is needed.
+
+## 14. The app (v0.12.0)
+
+`illum` with no command opens the app: one window with **This desk** (the address to give out,
+its key, "Allow incoming connections"), **Remote desk** (an address and Connect), **Your desks**
+(every host this desk has connected to) and **Settings**. The layout follows AnyDesk's home
+window with addresses where AnyDesk has IDs; the two questions about keys are dialogs over it.
+The look comes from the icon (`assets/icon`): soft blue ground, navy outlines two pixels wide,
+the strong yellow for the main action, the pale yellow for what is yours. The design canvas it
+was drawn on first is linked from the roadmap.
+
+**Toolkit: `egui`**, drawn with `egui-wgpu` in a `winit` window — the window and GPU stack the
+viewer already uses, on every OS, with no second renderer in the binary. It brought `wgpu` from
+26 to 30 (the viewer's presenter was ported; its offscreen picture tests pass unchanged). The
+alternatives looked at: Slint (its own renderer next to ours, and its own windowing) and iced
+(a different `wgpu` than ours at the time). Fonts are bundled (`assets/fonts`, Open Font
+License): Inter, Space Grotesk, JetBrains Mono, Latin only, with a system font for Chinese,
+Japanese and Korean behind them when the machine has one.
+
+**Two halves, one direction each.**
+- `illum_ui::app` draws [`AppState`] and returns [`Command`]s: what the person asked for. It
+  knows nothing of networking. `illum_ui::app_window` is the window: it redraws on input, when
+  egui asks (an animation), or when woken after the state changed — never on a timer.
+- `illum::app` (`Backend`) keeps the state true and carries the commands out. It is given its
+  window-waker, its listening address and its way of opening a session as values, so the whole
+  of it runs in a test without a window: two desks on loopback go through a first connection
+  with both key questions, a second without, a dead address, a forgotten and then declined
+  desk (`two_desks_connect_through_the_app`).
+
+**This desk** listens inside the app process while "Allow incoming connections" is on: the same
+`open_listener` + `accept_loop` as `illum --service`, with the pairing question shown as the
+*Incoming connection* dialog instead of asked in a console. Accepting pairs the desk, as it
+always has: there is no accept-once and there are no per-connection permissions yet (the
+dialog says in words what accepting allows). Both arrive with the granted-permissions message
+of the backend freeze (D1). When the port is taken — a console `--service` is already running —
+the window says so in plain words. This is the stand-in until the service of M6: the app then
+talks to the service instead of listening itself.
+
+**Connect** dials from the app first. A wrong address, a refusal or a changed key is then said
+in the window, and a first connection gets its key check there (the *First connection* dialog).
+That connection says goodbye at once; the session itself opens in **its own process**
+(`illum view <host>` with the settings as flags). One window per session, and a session that
+crashes takes nothing else with it; AnyDesk and RustDesk do the same. The cost is a second
+handshake (a few round trips). A session that ends with an error in its first seconds is
+reported in the window, pointing at `viewer.log`.
+
+**Settings** are `settings.json` in the home folder (`illum_ui::app::Settings`): the ladder's
+top (bitrate, frame rate, delay limit, scaling), reconnecting, keyboard and pointer mode,
+sound, clipboard, and whether to listen. Unknown fields are ignored and missing ones take
+their defaults, so the file survives versions in both directions; an unreadable file means the
+defaults, never a window that will not open. They apply to the next connection.
+
+**Looking at it without a desktop.** `illum_ui::app_window::snapshot` draws any state to
+pixels with no window; the test `screens_draw` writes each screen to `target/app-pictures`.
+That is how the interface was checked while it was built.
+
+**Not in v0.12.0:** the session window still has its title-bar numbers and no toolbar (the
+display switch, modes, full screen and disconnect of the design: next); the incoming session
+cannot be ended from the app other than by closing it; desks show no online state (nothing
+tells the app); the console window is released only when the app was started by a
+double-click.
