@@ -115,6 +115,7 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title("Illumination workload (Esc closes)")
             .with_fullscreen(Some(Fullscreen::Borderless(monitor)));
+        let attrs = crate::icon::with_icon(attrs);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

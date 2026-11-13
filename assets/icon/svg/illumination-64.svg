@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Illumination</title>
+  <rect x="9" y="9" width="1006" height="1006" rx="221" fill="#DDE6F6" stroke="#1E2A4A" stroke-width="18"/>
+  <g stroke="#1E2A4A" stroke-width="40" stroke-linejoin="round">
+    <rect x="130" y="303" width="478" height="348" rx="24" fill="#FFE012"/>
+    <rect x="417" y="373" width="478" height="348" rx="24" fill="#FFF68D"/>
+  </g>
+  <rect x="40" y="40" width="944" height="944" rx="190" fill="none" stroke="#1E2A4A" stroke-width="8"/>
+</svg>

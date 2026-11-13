@@ -11,6 +11,16 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.11.13] - 2026-11-13
+
+### Added
+
+- **The app has an icon:** two overlapping screens, navy outlines on a soft
+  blue tile. `illum.exe` carries it (Explorer, the taskbar) and the viewer
+  window shows it in its title bar. The drawings are in `assets/icon` (SVG
+  masters, PNGs from 16 to 1024 px, the Windows ICO); its four colours are the
+  base colours of the interface to come.
+
 ## [0.11.12] - 2026-11-12
 
 ### Changed

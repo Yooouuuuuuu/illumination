@@ -8,6 +8,7 @@
 //! frame without queueing. A machine with no usable GPU falls back to `softbuffer` on the CPU.
 
 pub mod gpu;
+pub mod icon;
 pub mod input;
 pub mod measure;
 pub mod workload;
@@ -880,6 +881,7 @@ impl ApplicationHandler<UiEvent> for App {
         let attrs = Window::default_attributes()
             .with_title(&self.options.title)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
+        let attrs = icon::with_icon(attrs);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

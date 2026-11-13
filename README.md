@@ -1,3 +1,5 @@
+<img src="assets/icon/png/illumination-128.png" width="96" alt="Illumination icon" align="right">
+
 # Illumination
 
 Direct, IP-only remote desktop. You connect straight to your own machines by IP address, for
