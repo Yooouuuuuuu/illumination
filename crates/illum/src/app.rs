@@ -630,11 +630,22 @@ mod tests {
         let home = std::env::temp_dir().join(format!("illum-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // The listener takes the same number on TCP and on UDP, so the port must be free on
+        // both. Asking the system for a free one is not enough: Windows keeps blocks of about a
+        // hundred numbers back per protocol (error 10013 on bind) and hands out, for one
+        // protocol, numbers inside a block kept from the other. That failed this test one run
+        // in six (2026-11-13). So: numbers from below the range the system hands out, spread
+        // out, each tried on both.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let port = (0..200)
+            .find_map(|_| {
+                let n = NEXT.fetch_add(1, Ordering::Relaxed) * 7919 + u64::from(std::process::id());
+                let port = 20_000 + (n % 20_000) as u16;
+                std::net::UdpSocket::bind(("127.0.0.1", port)).ok()?;
+                std::net::TcpListener::bind(("127.0.0.1", port)).ok()?;
+                Some(port)
+            })
+            .expect("a port free on TCP and UDP");
         let ep = Endpoint {
             identity: Arc::new(illum_net::Identity::generate().unwrap()),
             store: Arc::new(tokio::sync::Mutex::new(
@@ -697,8 +708,10 @@ mod tests {
         let (host, port, _) = desk("host", &runtime);
         let (viewer, _, launches) = desk("viewer", &runtime);
         host.start();
-        wait("the host listens", &host, |s| {
-            (s.incoming == Incoming::Listening).then_some(())
+        wait("the host listens", &host, |s| match &s.incoming {
+            Incoming::Listening => Some(()),
+            Incoming::Failed(why) => panic!("the host cannot listen: {why}"),
+            Incoming::Off => None,
         });
         let target = format!("127.0.0.1:{port}");
 

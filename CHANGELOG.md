@@ -11,6 +11,17 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-13
+
+### Fixed
+
+- A test of the app (two desks connecting on one machine) failed about one run
+  in six on Windows, and 0.12.2 was released with it failing. The app was not
+  at fault: the test took a port number the system called free, but Windows
+  keeps blocks of numbers back per protocol, and a number free for TCP could
+  be refused for UDP (or the other way round). The test now picks from a
+  different range and tries both. 200 runs in a row pass.
+
 ## [0.12.2] - 2026-11-13
 
 ### Fixed
