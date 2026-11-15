@@ -11,6 +11,25 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.7] - 2026-11-15
+
+### Fixed
+
+- **The keyboard no longer gets stuck after moving to another program.** The
+  session window switched its key grab on and off when it was told it gained or
+  lost the focus, and those reports sometimes came late or never. Missed one
+  way, the grab stayed on after you moved to another program: the keyboard
+  seemed dead there and the keys went to the host. Missed the other way, the
+  window was in front but nothing was grabbed. The grab now asks Windows, for
+  every key, which program is in front.
+
+### Changed
+
+- The session log says more about input, in counts only: for each time the
+  window was in front, how many key events, clicks and moves were sent, how
+  many the host acknowledged and when last, and how many key events reached
+  the window itself. It also records the host's version and what it offers.
+
 ## [0.12.6] - 2026-11-15
 
 ### Added

@@ -784,6 +784,7 @@ fn run_view(
         hello.device_name, conn.peer_address
     );
 
+    tracing::info!(target: "session", "Connected to \"{}\" (Illumination {}) at {}; it offers {:?}.", hello.device_name, hello.app_version, conn.peer_address, hello.capabilities);
     let with_input = !args.view_only && hello.capabilities.iter().any(|c| c == "input");
     if !args.view_only && !with_input {
         println!("The host does not accept input; opening view-only.");
@@ -927,11 +928,16 @@ fn run_view(
     let _hook = match &input {
         Some(input) => {
             let (input, hotkeys, waker) = (input.clone(), hotkeys.clone(), waker.clone());
-            match illum_win::SystemKeyHook::install(move |key, down| match hotkeys.key(key, down) {
+            let front_waker = waker.clone();
+            let forward = move |key, down| match hotkeys.key(key, down) {
                 illum_ui::Grabbed::Host => input.key(key, down),
                 illum_ui::Grabbed::ToggleView => waker.wake(UiEvent::ToggleView),
                 illum_ui::Grabbed::Viewer => {}
-            }) {
+            };
+            // The hook also watches whether this program is in front, and says so: the window
+            // acts on that, not on its own focus events (§6).
+            let front = move |front| front_waker.wake(UiEvent::Front(front));
+            match illum_win::SystemKeyHook::install(forward, front) {
                 Ok(hook) => {
                     // Remote (physical-key) mode grabs every key for the host; local/auto grab
                     // only the system keys and leave typing to this machine's layout/IME (§6).
@@ -971,6 +977,8 @@ fn run_view(
     let ack = live.clone();
     let mode = if with_input { "" } else { " (view only)" };
     let state_for_report = shared.clone();
+    let (focus_input, focus_state) = (input.clone(), shared.clone());
+    let acks_at_focus = std::sync::atomic::AtomicU64::new(0);
     window
         .run(
             shared,
@@ -990,14 +998,31 @@ fn run_view(
                     illum_win::SystemKeyHook::set_grab(grab);
                     grab
                 }),
+                front_watched: hooked,
                 pointer: args.pointer,
                 on_focus: Box::new(move |focused| {
-                    #[cfg(windows)]
-                    illum_win::SystemKeyHook::set_active(focused);
                     if focused {
+                        let acks = focus_state.lock().expect("view state lock").input_acks;
+                        acks_at_focus.store(acks, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(input) = &focus_input {
+                            input.take_tally(); // what was sent without focus is not this period's
+                        }
                         tracing::info!(target: "input", "Focus came.");
                     } else {
                         hotkeys.reset();
+                        // What this focus period sent and what the host acknowledged: enough to
+                        // tell "never left this machine" from "the host took it and nothing
+                        // happened there". Counts only.
+                        if let Some(input) = &focus_input {
+                            let t = input.take_tally();
+                            let (acks, last) = {
+                                let state = focus_state.lock().expect("view state lock");
+                                (state.input_acks, state.last_input_ack)
+                            };
+                            let acked = acks - acks_at_focus.load(std::sync::atomic::Ordering::Relaxed);
+                            let last = last.map_or("never".to_string(), |at| format!("{} ms ago", at.elapsed().as_millis()));
+                            tracing::info!(target: "input", "Focus left: sent {} key events, {} texts, {} clicks, {} wheels, {} moves, {} other; the host acknowledged {acked} (last {last}); the window itself saw {} key presses and {} releases.", t.keys, t.texts, t.buttons, t.wheels, t.moves, t.other, t.window_presses, t.window_releases);
+                        }
                         // How the grab did while the window had focus: counts, never the keys.
                         #[cfg(windows)]
                         {

@@ -358,6 +358,22 @@ struct OutState {
     next_move_at: Instant,
 }
 
+/// Counts of what an [`InputOut`] sent, and of key events the window saw: numbers for the log,
+/// never the keys themselves.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Tally {
+    pub keys: u32,
+    pub texts: u32,
+    pub buttons: u32,
+    pub wheels: u32,
+    /// Moves on either path.
+    pub moves: u32,
+    /// Heartbeats and release-everything.
+    pub other: u32,
+    pub window_presses: u32,
+    pub window_releases: u32,
+}
+
 /// Sends a move on the unreliable path; `false` when that path is not up (TCP carries it then).
 pub type UnreliableSend = Box<dyn Fn(&InputEvent) -> bool + Send + Sync>;
 
@@ -372,6 +388,7 @@ pub struct InputOut {
     /// only and never a key behind it.
     move_seq: AtomicU32,
     state: Mutex<OutState>,
+    tally: Mutex<Tally>,
 }
 
 impl InputOut {
@@ -381,6 +398,7 @@ impl InputOut {
             send: Box::new(send),
             unreliable: Mutex::new(None),
             seq: AtomicU32::new(0),
+            tally: Mutex::new(Tally::default()),
             move_seq: AtomicU32::new(0),
             state: Mutex::new(OutState {
                 held: HashSet::new(),
@@ -448,7 +466,33 @@ impl InputOut {
         }
     }
 
+    /// What was sent since the last call, for the log.
+    pub fn take_tally(&self) -> Tally {
+        std::mem::take(&mut self.tally.lock().expect("input tally"))
+    }
+
+    /// A key event reached the window itself (under a grab only releases should).
+    pub fn note_window_key(&self, down: bool) {
+        let mut tally = self.tally.lock().expect("input tally");
+        if down {
+            tally.window_presses += 1;
+        } else {
+            tally.window_releases += 1;
+        }
+    }
+
     fn send_reliable(&self, msg: InputMsg) {
+        {
+            let mut tally = self.tally.lock().expect("input tally");
+            match &msg {
+                InputMsg::Key { .. } => tally.keys += 1,
+                InputMsg::Text(_) => tally.texts += 1,
+                InputMsg::MouseButton { .. } => tally.buttons += 1,
+                InputMsg::Wheel { .. } => tally.wheels += 1,
+                InputMsg::MouseMove { .. } => tally.moves += 1,
+                InputMsg::Heartbeat | InputMsg::ReleaseAll => tally.other += 1,
+            }
+        }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         (self.send)(InputEvent { seq, msg });
     }
@@ -480,6 +524,7 @@ impl InputOut {
         let unreliable = self.unreliable.lock().expect("unreliable path");
         if let Some(path) = unreliable.as_ref() {
             let seq = self.move_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            self.tally.lock().expect("input tally").moves += 1;
             if path(&InputEvent {
                 seq,
                 msg: msg.clone(),

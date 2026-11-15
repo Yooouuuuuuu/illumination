@@ -842,6 +842,16 @@ whether input delay is the network or the host.
     read raw input, which is why copying its hook alone was not enough. **Do not turn device
     events on in the viewer** (raw mouse motion included) without moving the hook to another
     process.
+  - **The grab asks the system who is in front; it is not told (v0.12.7).** The hook used to be
+    switched on and off by the window's focus events. Those were seen to come late or not at
+    all, both ways (2026-11-15: in two of four runs the window was in front and never told, so
+    nothing was grabbed; in another a key was taken while a different program was in front,
+    which for the person means a keyboard that stops working in the program they moved to and
+    types into the host instead). Now the hook asks Windows, for every key, whether the window
+    in front belongs to this program, and grabs only then. Its thread also looks ten times a
+    second and reports a change (`UiEvent::Front`); the window does its leaving and arriving
+    work (release everything on the host, the counts in the log) from that report and ignores
+    its own focus events while a hook is installed.
 - **Input that cannot arrive is named (v0.12.6).** A host running as an ordinary program cannot
   inject into the lock screen, the sign-in screen or a Windows permission prompt (they are on a
   desktop of their own), nor into a window that runs as administrator; `SendInput` gives no

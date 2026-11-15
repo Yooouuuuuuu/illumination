@@ -248,6 +248,8 @@ pub struct ViewState {
     input_sent: std::collections::VecDeque<(bool, u32, Instant)>,
     /// Acknowledgements received this session.
     pub input_acks: u64,
+    /// When the host last acknowledged an input event.
+    pub last_input_ack: Option<Instant>,
 }
 
 impl Default for ViewState {
@@ -276,6 +278,7 @@ impl Default for ViewState {
             presenter_name: None,
             input_sent: std::collections::VecDeque::new(),
             input_acks: 0,
+            last_input_ack: None,
         }
     }
 }
@@ -292,6 +295,7 @@ impl ViewState {
     /// The host acknowledged an input event: its round trip joins the stats.
     pub fn input_acked(&mut self, unreliable: bool, seq: u32, now: Instant) {
         self.input_acks += 1;
+        self.last_input_ack = Some(now);
         if let Some(i) = self
             .input_sent
             .iter()
@@ -345,6 +349,9 @@ pub enum UiEvent {
     Exit,
     /// The fit / original size hotkey, seen by a keyboard grab instead of the window.
     ToggleView,
+    /// The program came to the front (true) or left it, as the keyboard grab's watch saw it
+    /// (`ViewerOptions::front_watched`).
+    Front(bool),
 }
 
 /// Lets the network side wake or close the window from any thread.
@@ -443,6 +450,10 @@ pub struct ViewerOptions {
     pub on_minimize: Box<dyn Fn(bool)>,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
+    /// Being in front is reported by [`UiEvent::Front`] (the keyboard grab asks the system
+    /// itself), and the window's own focus events are not used for it: they were seen to come
+    /// late or never.
+    pub front_watched: bool,
     /// Draw on the GPU (falling back to the CPU if none is usable); false forces the CPU path.
     pub gpu: bool,
     /// Who the session is with, for the top bar.
@@ -505,6 +516,7 @@ impl ViewerWindow {
             status_line: String::new(),
             last_summary: String::new(),
             bar_notice: None,
+            focused: None,
             fullscreen: false,
             icon_announced: false,
         };
@@ -561,6 +573,8 @@ struct App {
     status_line: String,
     last_summary: String,
     bar_notice: Option<String>,
+    /// Whether the window is in front, once known.
+    focused: Option<bool>,
     fullscreen: bool,
     /// The taskbar was told the icon after the first frame.
     icon_announced: bool,
@@ -866,6 +880,23 @@ impl App {
         }
     }
 
+    /// The window came to the front or left it.
+    fn focus_changed(&mut self, focused: bool) {
+        if self.focused == Some(focused) {
+            return;
+        }
+        self.focused = Some(focused);
+        (self.options.on_focus)(focused);
+        if !focused {
+            // Never leave keys held on the host while we can't see their key-ups.
+            if let Some(input) = &self.options.input {
+                input.release_all();
+            }
+            self.texted.clear();
+            self.composing = false;
+        }
+    }
+
     fn toggle_view(&mut self) {
         self.view_mode = match self.view_mode {
             ViewMode::Fit => ViewMode::Original,
@@ -887,6 +918,7 @@ impl App {
                 let Some(key) = key_from_physical(event.physical_key) else {
                     return;
                 };
+                input.note_window_key(event.state == ElementState::Pressed);
                 let mode = self.effective_mode();
                 self.sync_ime(mode);
                 let press = KeyPress {
@@ -1191,8 +1223,8 @@ impl ApplicationHandler<UiEvent> for App {
             }
         };
         // If the window already has focus, no focus event follows: switch the hook on now.
-        if window.has_focus() {
-            (self.options.on_focus)(true);
+        if !self.options.front_watched && window.has_focus() {
+            self.focus_changed(true);
         }
         self.window = Some(Surface { window, backend });
         self.open_bars();
@@ -1204,6 +1236,8 @@ impl ApplicationHandler<UiEvent> for App {
         match event {
             UiEvent::Redraw => self.request_redraw(),
             UiEvent::ToggleView => self.toggle_view(),
+            UiEvent::Front(front) if self.options.front_watched => self.focus_changed(front),
+            UiEvent::Front(_) => {}
             UiEvent::Exit => event_loop.exit(),
         }
     }
@@ -1222,16 +1256,8 @@ impl ApplicationHandler<UiEvent> for App {
                 }
                 self.request_redraw();
             }
-            WindowEvent::Focused(focused) => {
-                (self.options.on_focus)(*focused);
-                if !*focused {
-                    // Never leave keys held on the host while we can't see their key-ups.
-                    if let Some(input) = &self.options.input {
-                        input.release_all();
-                    }
-                    self.texted.clear();
-                    self.composing = false;
-                }
+            WindowEvent::Focused(focused) if !self.options.front_watched => {
+                self.focus_changed(*focused);
             }
             WindowEvent::CursorEntered { .. } if self.options.input.is_some() => {
                 self.hovering = true;

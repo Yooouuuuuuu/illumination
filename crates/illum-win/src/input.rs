@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -28,10 +28,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowThreadProcessId,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_EXTENDED, MSG, PM_NOREMOVE, PeekMessageW,
-    PostThreadMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT,
-    WM_SYSKEYDOWN,
+    HHOOK, KBDLLHOOKSTRUCT, KillTimer, LLKHF_ALTDOWN, LLKHF_EXTENDED, MSG, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
 };
 
 /// Makes coordinates and metrics physical pixels, matching what Desktop Duplication captures.
@@ -221,7 +221,40 @@ impl InputSink for WinInjector {
 
 type Forward = Box<dyn Fn(Key, bool) + Send>;
 
+/// Tests switch the grab on without a window of their own in front.
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// What the watch last told the program about being in front.
+static WAS_FRONT: AtomicBool = AtomicBool::new(false);
+/// How often the hook's thread looks whether the program is still in front.
+const FRONT_WATCH_MS: u32 = 100;
+
+type FrontChanged = Box<dyn Fn(bool) + Send>;
+
+fn front_slot() -> &'static Mutex<Option<FrontChanged>> {
+    static SLOT: OnceLock<Mutex<Option<FrontChanged>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Is the window in front one of this program's? Asked of Windows itself for every key: the
+/// grab must never depend on the window having been *told* about its focus. Those reports
+/// came late or not at all (seen 2026-11-15, both ways: in front and never told, so nothing was
+/// grabbed; and no longer in front and not told, so the grab took the keyboard away from
+/// whatever program the person had moved to).
+fn in_front() -> bool {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
+    pid != 0 && pid == unsafe { GetCurrentProcessId() }
+}
+
+/// Tells the program when it came to the front or left it (from the hook's thread).
+fn watch_front() {
+    let front = in_front();
+    if WAS_FRONT.swap(front, Ordering::SeqCst) != front
+        && let Some(changed) = front_slot().lock().expect("front lock").as_ref()
+    {
+        changed(front);
+    }
+}
 /// Full keyboard grab: capture every key for the host, not only the system ones (architecture
 /// §6). On, the local Windows and the local IME never see a key press while the viewer is
 /// focused, so there is no local Alt+Tab and no local composition fighting the forwarding.
@@ -274,7 +307,7 @@ fn verdict(wanted: bool, lock_key: bool, down: bool) -> Verdict {
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && HOOK_ACTIVE.load(Ordering::SeqCst) {
+    if code >= 0 && (HOOK_ACTIVE.load(Ordering::SeqCst) || in_front()) {
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         // Our own injection (this machine is also a host) is not typing. Anything else is: a
         // remapper or an on-screen keyboard injects too, and RustDesk tells them apart the same way.
@@ -320,7 +353,12 @@ pub struct SystemKeyHook {
 
 impl SystemKeyHook {
     /// Installs the hook on its own thread. `forward` is called there for each captured key.
-    pub fn install(forward: impl Fn(Key, bool) + Send + 'static) -> Result<SystemKeyHook, String> {
+    pub fn install(
+        forward: impl Fn(Key, bool) + Send + 'static,
+        front_changed: impl Fn(bool) + Send + 'static,
+    ) -> Result<SystemKeyHook, String> {
+        *front_slot().lock().expect("front lock") = Some(Box::new(front_changed));
+        WAS_FRONT.store(false, Ordering::SeqCst);
         *forward_slot().lock().expect("hook lock") = Some(Box::new(forward));
         let (ready, installed) = std::sync::mpsc::channel::<Result<u32, String>>();
         let thread = std::thread::Builder::new()
@@ -352,7 +390,13 @@ impl SystemKeyHook {
                 let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
                 let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
                 // The hook procedure runs inside GetMessageW; WM_QUIT (from Drop) ends the loop.
-                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {}
+                // A timer wakes the loop so it also watches whether the program is in front.
+                let timer = unsafe { SetTimer(None, 0, FRONT_WATCH_MS, None) };
+                watch_front();
+                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+                    watch_front();
+                }
+                let _ = unsafe { KillTimer(None, timer) };
                 let _ = unsafe { UnhookWindowsHookEx(hook) };
             })
             .map_err(|e| format!("hook thread: {e}"))?;
@@ -366,7 +410,8 @@ impl SystemKeyHook {
         }
     }
 
-    /// Forward captured keys only while the viewer window has focus.
+    /// Switches the grab on whatever is in front. For tests: in the program the grab is on
+    /// exactly while one of its windows is in front, and nothing needs to say so.
     pub fn set_active(active: bool) {
         HOOK_ACTIVE.store(active, Ordering::SeqCst);
     }
@@ -395,6 +440,7 @@ impl Drop for SystemKeyHook {
             let _ = thread.join();
         }
         *forward_slot().lock().expect("hook lock") = None;
+        *front_slot().lock().expect("front lock") = None;
     }
 }
 
@@ -441,8 +487,11 @@ mod tests {
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
-        let hook = SystemKeyHook::install(move |key, down| log.lock().unwrap().push((key, down)))
-            .expect("hook installs");
+        let hook = SystemKeyHook::install(
+            move |key, down| log.lock().unwrap().push((key, down)),
+            |_| {},
+        )
+        .expect("hook installs");
         SystemKeyHook::set_active(true);
         let press = |grab: bool, input: fn(u16, KEYBD_EVENT_FLAGS) -> INPUT| {
             SystemKeyHook::set_grab(grab);
@@ -475,7 +524,7 @@ mod tests {
     fn grab_keeps_the_windows_key_from_the_start_menu() {
         use std::time::Duration;
         let _one = REAL_HOOK.lock().unwrap();
-        let hook = SystemKeyHook::install(|_, _| {}).expect("hook installs");
+        let hook = SystemKeyHook::install(|_, _| {}, |_| {}).expect("hook installs");
         SystemKeyHook::set_active(true);
         SystemKeyHook::set_grab(true);
         let before = unsafe { GetForegroundWindow() };
