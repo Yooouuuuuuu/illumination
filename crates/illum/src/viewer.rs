@@ -58,6 +58,9 @@ const KEYFRAME_TIMEOUT: Duration = Duration::from_secs(2);
 /// No media datagram for this long, with the control channel alive, is a path problem: punch
 /// fast again, ask for a keyframe, and say so (9 s of silence went unnoticed in those runs).
 const SILENCE_AFTER: Duration = Duration::from_secs(3);
+/// A host report covers its last second and takes a moment to arrive: one that comes later
+/// than this after a datagram speaks of video sent after that datagram.
+const HOST_REPORT_SPAN_US: u64 = 1_500_000;
 /// A real stall this long — the host says it is sending but no video arrives — is not cured by
 /// asking for a keyframe (the media path is stuck, e.g. a route flip). Rebuild the path.
 const RECONNECT_AFTER: Duration = Duration::from_secs(8);
@@ -278,6 +281,7 @@ fn media_loop(
     // When the last media datagram arrived, and since when a keyframe has been awaited: both
     // become a notice in the title when they go on too long (§5.6), instead of a silent wait.
     let mut last_media = Instant::now();
+    let mut last_media_us = now_us();
     let mut awaiting_since: Option<Instant> = None;
     let mut notice: Option<&'static str> = None;
     let mut last_silence_request = Instant::now();
@@ -305,6 +309,7 @@ fn media_loop(
             Ok(msg) if msg.stream == MediaStream::Video => {
                 got_video = true;
                 last_media = Instant::now();
+                last_media_us = now_us();
                 received += 1;
                 match expected_seq {
                     Some(exp) if msg.seq > exp => lost += (msg.seq - exp) as u32,
@@ -459,9 +464,16 @@ fn media_loop(
         // "Video stalled" only when the host says it *is* sending and we are not receiving it.
         // A static host (nothing changing, so nothing sent) is silent too, but that is not a
         // fault — HostStats shows it sent nothing, so we stay quiet instead of crying wolf.
+        // "Is sending" means: a second in which it sent video ended well after our last
+        // datagram, so something it sent never arrived. A report merely a few seconds old is
+        // not that: a nearly still screen sends a frame every few seconds, each report of one
+        // is followed by silence, and "sent within 5 s, nothing for 3 s" cried wolf about 17
+        // times a minute on such a screen (seen 2026-11-15), asking for a keyframe each time.
         let host_sent_recently = {
             let sent = flags.host_sent_us.load(Ordering::Relaxed);
-            sent != 0 && now_us().saturating_sub(sent) < 5_000_000
+            sent != 0
+                && sent > last_media_us + HOST_REPORT_SPAN_US
+                && now_us().saturating_sub(sent) < 5_000_000
         };
         let wanted = if paused {
             None

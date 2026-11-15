@@ -11,6 +11,22 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-11-15
+
+### Fixed
+
+- **No more false "video stalled; reconnecting…" on a still screen.** A host
+  whose screen hardly changes sends a frame every few seconds. The viewer
+  warned after 3 seconds without video if the host had reported sending
+  anything in the last 5, so every such gap raised the notice and asked the
+  host for a full frame: 368 times in a 22-minute idle session. It now warns
+  only when the host reports video sent after the last video that arrived.
+
+### Changed
+
+- The session log notes when the window gains focus ("Focus came."), next to
+  the existing count of key presses when focus leaves.
+
 ## [0.12.4] - 2026-11-13
 
 ### Fixed

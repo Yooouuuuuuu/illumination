@@ -988,7 +988,9 @@ fn run_view(
                 on_focus: Box::new(move |focused| {
                     #[cfg(windows)]
                     illum_win::SystemKeyHook::set_active(focused);
-                    if !focused {
+                    if focused {
+                        tracing::info!(target: "input", "Focus came.");
+                    } else {
                         hotkeys.reset();
                         // How the grab did while the window had focus: counts, never the keys.
                         #[cfg(windows)]
