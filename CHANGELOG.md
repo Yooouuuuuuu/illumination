@@ -11,6 +11,19 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-11-15
+
+### Added
+
+- **The session says why input is not arriving.** When the host is on its lock
+  screen, sign-in screen or a Windows permission prompt, or the window in front
+  on the host runs as administrator, Windows quietly drops the input a host
+  program sends, and the session just looked stuck. The host now notices,
+  writes the reason to its log, and tells the controller, which shows it in the
+  status strip and writes it to its own log; the same when input arrives again.
+  This names the problem, it does not get past it: that needs the host to run
+  as a system service, which is planned. Both sides need this version.
+
 ## [0.12.5] - 2026-11-15
 
 ### Fixed

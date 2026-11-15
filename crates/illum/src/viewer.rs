@@ -763,6 +763,20 @@ pub async fn run_viewer_session_sharing_media(
                         });
                     }
                 }
+                Ok(ControlMsg::InputBlocked { reason }) => {
+                    let reason = (!reason.is_empty()).then_some(reason);
+                    match &reason {
+                        Some(r) => {
+                            tracing::warn!(target: "input", "The host says input does not arrive: {r}.")
+                        }
+                        None => {
+                            tracing::info!(target: "input", "The host says input arrives again.")
+                        }
+                    }
+                    shared.lock().expect("view state lock").input_notice =
+                        reason.map(|r| format!("input is not arriving: {r}"));
+                    notify();
+                }
                 Ok(ControlMsg::ScreenError { reason }) => {
                     shared.lock().expect("view state lock").status =
                         Some(format!("screen unavailable: {reason}"));

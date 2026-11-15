@@ -11,7 +11,15 @@ pub const PROTOCOL_VERSION: u32 = 15;
 pub const DEFAULT_PORT: u16 = 28326;
 
 /// Capabilities this build offers. A feature is used only if both sides list it.
-pub const CAPABILITIES: &[&str] = &["ping", "screen", "input", "udp-media", "audio", "clipboard"];
+pub const CAPABILITIES: &[&str] = &[
+    "ping",
+    "screen",
+    "input",
+    "udp-media",
+    "audio",
+    "clipboard",
+    "input-notice",
+];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -217,6 +225,12 @@ pub enum ControlMsg {
     /// Sent when the screen starts and whenever it changes; drives the Auto keyboard mode.
     KeyboardLayout {
         id: String,
+    },
+    /// Host → controller: something keeps injected input from arriving (`reason`, in words
+    /// for the person at the controller), or, with an empty `reason`, input arrives again.
+    /// Sent only to a controller that lists the `input-notice` capability (architecture §6).
+    InputBlocked {
+        reason: String,
     },
     /// Orderly end of session.
     Bye,

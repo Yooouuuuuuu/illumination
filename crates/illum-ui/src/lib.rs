@@ -233,6 +233,9 @@ pub struct ViewState {
     pub status: Option<String>,
     /// A passing condition shown next to the stats, e.g. "waiting for a keyframe…".
     pub notice: Option<String>,
+    /// Why the host is not taking input, while it is not (its lock screen, an administrator's
+    /// window): shown where the notice is, when nothing more urgent is.
+    pub input_notice: Option<String>,
     /// Keyboard layouts, for the Auto keyboard mode.
     pub host_layout: Option<String>,
     pub local_layout: Option<String>,
@@ -265,6 +268,7 @@ impl Default for ViewState {
             stats: Stats::default(),
             status: None,
             notice: None,
+            input_notice: None,
             host_layout: None,
             local_layout: None,
             recorder: None,
@@ -770,7 +774,11 @@ impl App {
             }
         }
         let rtt = state.clock.last_rtt;
-        let notice_now = state.status.clone().or_else(|| state.notice.clone());
+        let notice_now = state
+            .status
+            .clone()
+            .or_else(|| state.notice.clone())
+            .or_else(|| state.input_notice.clone());
         if state.stats.summary != self.last_summary {
             self.last_summary = state.stats.summary.clone();
             let codec = state.codec.map_or("", |c| c.name());

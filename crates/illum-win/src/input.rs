@@ -68,8 +68,10 @@ pub fn own_keyboard_layout() -> String {
 
 fn send(inputs: &[INPUT]) {
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    crate::obstacle::injected(sent as usize == inputs.len());
     if sent as usize != inputs.len() {
-        // Blocked by UIPI (e.g. an elevated window has focus) until the SYSTEM backend in M4.
+        // Blocked by UIPI (e.g. an elevated window has focus) until the SYSTEM backend in M4;
+        // `obstacle` names the reason for the log and the controller.
         tracing::debug!(target: "input", "SendInput injected {sent} of {} events", inputs.len());
     }
 }

@@ -12,6 +12,8 @@ mod gdi;
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
+mod obstacle;
+#[cfg(windows)]
 mod power;
 
 #[cfg(windows)]
@@ -25,6 +27,8 @@ pub use input::{
     SystemKeyHook, WinInjector, foreground_keyboard_layout, leave_own_console, make_dpi_aware,
     own_keyboard_layout,
 };
+#[cfg(windows)]
+pub use obstacle::input_obstacle;
 #[cfg(windows)]
 pub use power::KeepAwake;
 

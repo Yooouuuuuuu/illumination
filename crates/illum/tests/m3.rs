@@ -77,6 +77,7 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         screen: Some(screen),
         input: Some(input),
         layout: Some(layout),
+        obstacle: None,
         codecs: Vec::new(),
         audio: None,
         clipboard: false,

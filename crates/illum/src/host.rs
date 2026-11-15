@@ -165,12 +165,17 @@ pub type InputFactory = Arc<dyn Fn(u32) -> Result<Box<dyn InputSink + Send>, Str
 /// Reports the host's active keyboard layout as an opaque id (Windows: HKL as hex).
 pub type LayoutFn = Arc<dyn Fn() -> String + Send + Sync>;
 
+/// Says why injected input does not arrive right now, if it does not (Windows: the lock screen
+/// or an administrator's window, §6).
+pub type ObstacleFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// What this host can do. A `None` capability is refused politely.
 #[derive(Clone, Default)]
 pub struct HostConfig {
     pub screen: Option<SourceFactory>,
     pub input: Option<InputFactory>,
     pub layout: Option<LayoutFn>,
+    pub obstacle: Option<ObstacleFn>,
     /// Lossy codecs this host can encode (from the FFmpeg probe). Empty means tiles only.
     pub codecs: Vec<VideoCodec>,
     /// Where the host's sound comes from; `None` means "send audio: off" (§8).
@@ -219,6 +224,8 @@ fn open_encoder(
 
 const INPUT_TICK: Duration = Duration::from_millis(10);
 const LAYOUT_CHECK: Duration = Duration::from_secs(1);
+/// How often the host asks whether something keeps injected input out (§6).
+const OBSTACLE_CHECK: Duration = Duration::from_millis(500);
 
 /// The input thread. Dropping it releases every held key and button on the host.
 struct InputWorker {
@@ -252,6 +259,8 @@ impl InputWorker {
     fn start(
         sink: Box<dyn InputSink + Send>,
         layout: Option<LayoutFn>,
+        obstacle: Option<ObstacleFn>,
+        tell_viewer: bool,
         sender: Sender,
     ) -> InputWorker {
         let (tx, rx) = mpsc::channel::<Arrived>();
@@ -263,6 +272,8 @@ impl InputWorker {
                 let mut state = InputState::new(sink, Instant::now());
                 let mut last_layout: Option<String> = None;
                 let mut next_layout_check = Instant::now();
+                let mut blocked: Option<String> = None;
+                let mut next_obstacle_check = Instant::now();
                 // Every reliable event is acknowledged once injected (the viewer's "input N ms");
                 // moves on the UDP path arrive 250 times a second, so those at most ten a second.
                 let mut next_move_ack = Instant::now();
@@ -300,6 +311,28 @@ impl InputWorker {
                         if last_layout.as_ref() != Some(&id) {
                             sender.send_control(&ControlMsg::KeyboardLayout { id: id.clone() });
                             last_layout = Some(id);
+                        }
+                    }
+                    // Input that goes nowhere looks, at the controller, like a host that hangs:
+                    // say why, here and there, when it starts and when it is over (§6).
+                    if let Some(obstacle) = &obstacle
+                        && now >= next_obstacle_check
+                    {
+                        next_obstacle_check = now + OBSTACLE_CHECK;
+                        let reason = obstacle();
+                        if reason != blocked {
+                            match &reason {
+                                Some(r) => {
+                                    tracing::warn!(target: "input", "Input does not arrive: {r}.")
+                                }
+                                None => tracing::info!(target: "input", "Input arrives again."),
+                            }
+                            if tell_viewer {
+                                sender.send_control(&ControlMsg::InputBlocked {
+                                    reason: reason.clone().unwrap_or_default(),
+                                });
+                            }
+                            blocked = reason;
                         }
                     }
                 }
@@ -1030,6 +1063,10 @@ pub async fn serve_session(
                             input = Some(InputWorker::start(
                                 sink,
                                 config.layout.clone(),
+                                config.obstacle.clone(),
+                                conn.peer_hello.as_ref().is_some_and(|h| {
+                                    h.capabilities.iter().any(|c| c == "input-notice")
+                                }),
                                 conn.sender(),
                             ))
                         }

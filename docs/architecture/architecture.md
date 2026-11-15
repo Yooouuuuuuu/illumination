@@ -842,6 +842,15 @@ whether input delay is the network or the host.
     read raw input, which is why copying its hook alone was not enough. **Do not turn device
     events on in the viewer** (raw mouse motion included) without moving the hook to another
     process.
+- **Input that cannot arrive is named (v0.12.6).** A host running as an ordinary program cannot
+  inject into the lock screen, the sign-in screen or a Windows permission prompt (they are on a
+  desktop of their own), nor into a window that runs as administrator; `SendInput` gives no
+  useful error and the controller sees a host that stopped listening. Twice a second the host's
+  input thread asks `illum_win::input_obstacle` (which desktop has the input; whether the last
+  injection was refused, and by which program in front). A change is logged on the host and
+  sent to the controller as `InputBlocked { reason }` (empty: over), only when the controller
+  lists the `input-notice` capability; the controller logs it and shows it in the status strip.
+  It only names the problem: getting past it needs the host to run as a system service (M4).
   - **A captured press is swallowed; a captured release still reaches the local system**, so a
     key that was down when the grab began does not stay stuck here. **CapsLock and NumLock**
     always reach the local system too (and the host), so the lock lights stay right.

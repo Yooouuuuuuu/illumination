@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use illum::host::{AudioFactory, HostConfig, SourceFactory, serve_session};
 #[cfg(windows)]
-use illum::host::{InputFactory, LayoutFn};
+use illum::host::{InputFactory, LayoutFn, ObstacleFn};
 use illum::viewer::{MediaSlot, Notify, ViewParams, run_viewer_session_sharing_media};
 use illum_core::Role;
 use illum_core::clipboard::ClipboardMsg;
@@ -503,8 +503,12 @@ fn parse_pointer(s: &str) -> std::result::Result<PointerMode, String> {
 /// With the test pattern there is no real screen, so input isn't injected either.
 fn host_config(test_pattern: bool, no_audio: bool, no_clipboard: bool) -> HostConfig {
     #[cfg(windows)]
-    let (input, layout): (Option<InputFactory>, Option<LayoutFn>) = if test_pattern {
-        (None, None)
+    let (input, layout, obstacle): (
+        Option<InputFactory>,
+        Option<LayoutFn>,
+        Option<ObstacleFn>,
+    ) = if test_pattern {
+        (None, None, None)
     } else {
         let input: InputFactory = Arc::new(|display| {
             let displays = illum_win::list_displays().map_err(|e| e.to_string())?;
@@ -515,10 +519,11 @@ fn host_config(test_pattern: bool, no_audio: bool, no_clipboard: bool) -> HostCo
             Ok(Box::new(illum_win::WinInjector::new(&info)) as Box<dyn InputSink + Send>)
         });
         let layout: LayoutFn = Arc::new(illum_win::foreground_keyboard_layout);
-        (Some(input), Some(layout))
+        let obstacle: ObstacleFn = Arc::new(illum_win::input_obstacle);
+        (Some(input), Some(layout), Some(obstacle))
     };
     #[cfg(not(windows))]
-    let (input, layout) = (None, None);
+    let (input, layout, obstacle) = (None, None, None);
     let mut codecs: Vec<_> = illum_ffmpeg::probe()
         .encoders
         .iter()
@@ -548,6 +553,7 @@ fn host_config(test_pattern: bool, no_audio: bool, no_clipboard: bool) -> HostCo
         screen: Some(source_factory(test_pattern)),
         input,
         layout,
+        obstacle,
         codecs,
         audio,
         // The test pattern is a non-interactive stream; the real host syncs the clipboard (§8).
