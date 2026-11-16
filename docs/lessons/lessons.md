@@ -318,3 +318,20 @@ go (the hub wakes them as it goes); and binding the media port again while sessi
 listening before still run gives back the hub they hold, since the port is one and in use.
 
 The lesson: a thing that is started must have a test that stops it and starts it again.
+
+## A goodbye that was reset away (found 2026-11-16, fixed in v0.13.4)
+
+Closing a TCP socket that still has unread data makes Windows reset the connection instead
+of closing it, and a reset discards what the other side has not read yet. A controller in a
+session sends all the time (clock probes four times a second, input), so a host that said
+goodbye and closed at once could have its goodbye thrown away: the controller saw
+"connection aborted", took a deliberate end for a dropped link, and would have reconnected.
+That is exactly what "Disconnect" on the host (v0.13.2) must not do. It showed as one test
+failing about one run in ten; v0.13.3 was committed on such a run by a command that did not
+stop on the failure.
+
+What it is now: `Connection::close` sends the goodbye, flushes, and then reads and throws
+away what the peer still sends until the peer closes its side, for half a second at most.
+
+Two lessons: the side that ends a conversation waits for the other to hang up; and the
+commit goes in the same command as the tests, joined so that a failure stops it.

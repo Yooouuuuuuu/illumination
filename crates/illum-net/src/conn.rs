@@ -152,13 +152,28 @@ impl Connection {
         }
     }
 
-    /// Sends `bye`, flushes what is queued (bounded by `timeout`) and closes.
+    /// Sends `bye`, flushes what is queued (bounded by `timeout`), waits a moment for the peer
+    /// to hang up, and closes.
+    ///
+    /// The wait is what lets the goodbye arrive. A peer in a session sends all the time (clock
+    /// probes, input); closing a socket that still has such data unread makes the system
+    /// reset the connection, and a reset throws away what the peer has not read yet, the
+    /// goodbye included. The peer would then take a deliberate end for a dropped link and
+    /// come back. So what it still sends is read and thrown away until it closes its side.
     pub async fn close(mut self, timeout: Duration) {
+        use tokio::io::AsyncReadExt;
+        /// How long the peer has to hang up after the goodbye.
+        const LINGER: Duration = Duration::from_millis(500);
         self.send_control(&ControlMsg::Bye);
         self.outbox.close();
         if let Some(writer) = self.writer.take() {
             let _ = tokio::time::timeout(timeout, writer).await;
         }
+        let hung_up = async {
+            let mut rest = [0u8; 4096];
+            while matches!(self.reader.read(&mut rest).await, Ok(n) if n > 0) {}
+        };
+        let _ = tokio::time::timeout(LINGER.min(timeout), hung_up).await;
     }
 }
 

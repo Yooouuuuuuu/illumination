@@ -11,6 +11,22 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-11-16
+
+Not released.
+
+### Fixed
+
+- **A desk disconnected from the host stays disconnected.** The host closed
+  the connection right after its goodbye; while the controller was sending
+  (it always is), Windows turned that into a reset that could swallow the
+  goodbye, and the controller would have reconnected as after a dropped link.
+  The host now waits for the controller to hang up first.
+
+Verified with cargo fmt, cargo clippy and cargo test (the whole suite three
+times; the session-end test 25 times, where it failed about one run in ten
+before).
+
 ## [0.13.3] - 2026-11-16
 
 Not released.

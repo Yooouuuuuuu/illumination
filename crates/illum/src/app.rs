@@ -1032,6 +1032,18 @@ mod tests {
         assert!(host.state.lock().unwrap().trusted.is_empty());
 
         // Sent away: it is told goodbye, so it does not come back by itself.
+        // As in a real session, it is in the middle of sending when that happens: the
+        // goodbye must reach it all the same.
+        let chatter = conn.sender();
+        let chatting = runtime.spawn(async move {
+            for seq in 0.. {
+                if chatter.is_closed() {
+                    break;
+                }
+                chatter.send_control(&ControlMsg::Ping { seq });
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
         host.command(Command::EndSession("guest".into()));
         let said = runtime.block_on(async {
             loop {
@@ -1043,6 +1055,7 @@ mod tests {
             }
         });
         assert!(said.is_ok(), "{said:?}");
+        chatting.abort();
         drop(conn);
         gone(&host);
 
