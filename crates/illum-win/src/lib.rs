@@ -18,6 +18,8 @@ mod obstacle;
 #[cfg(windows)]
 mod pipe;
 #[cfg(windows)]
+mod pointer_kind;
+#[cfg(windows)]
 mod power;
 #[cfg(windows)]
 mod sas;

@@ -349,7 +349,7 @@ impl DdaSource {
         let (w, h, pitch) = (shape.Width, shape.Height, shape.Pitch as usize);
         let hot = (shape.HotSpot.x.max(0) as u32, shape.HotSpot.y.max(0) as u32);
         let data = &self.pointer_buf[..required as usize];
-        Some(match shape.Type as i32 {
+        let mut converted = match shape.Type as i32 {
             t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 => {
                 CursorShape::from_color(w, h, pitch, data, hot)
             }
@@ -360,7 +360,10 @@ impl DdaSource {
                 CursorShape::from_monochrome(w, h, pitch, data, hot)
             }
             _ => return None,
-        })
+        };
+        // The duplication hands over the picture only; which pointer it is, Windows says.
+        converted.kind = crate::pointer_kind::current_kind();
+        Some(converted)
     }
 }
 

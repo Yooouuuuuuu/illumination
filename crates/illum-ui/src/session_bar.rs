@@ -172,10 +172,7 @@ pub fn draw(ui: &mut Ui, state: &BarState) -> (Vec<BarAction>, BarSpace) {
                     if let Some(mode) = segments(
                         ui,
                         state.pointer,
-                        &[
-                            (PointerMode::Native, "Native"),
-                            (PointerMode::Embedded, "Embedded"),
-                        ],
+                        &[(PointerMode::Desk, "Mine"), (PointerMode::Host, "Host's")],
                     ) {
                         out.push(BarAction::Pointer(mode));
                     }
@@ -268,7 +265,7 @@ pub fn sample() -> BarState {
         view: ViewMode::Fit,
         keyboard: KeyboardMode::Remote,
         keyboard_grabbed: true,
-        pointer: PointerMode::Native,
+        pointer: PointerMode::Desk,
         fullscreen: false,
         status: "AV1 · rung 1/12: 20.0 Mb/s 30 fps, parity 5 % · 30 fps · 18 ms · input 14 ms"
             .into(),

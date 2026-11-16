@@ -79,3 +79,37 @@ fn system_key_hook_installs() {
     let hook = illum_win::SystemKeyHook::install(|_, _| {}, |_| {}).expect("hook installs");
     drop(hook);
 }
+
+/// Both ways of capturing say what the pointer on screen is. Prints it: over a text field it
+/// should read `Some(Text)`, over the desktop `Some(Arrow)`, over a program's own pointer
+/// `None`.
+#[test]
+#[ignore = "needs an interactive desktop"]
+fn the_pointer_on_screen_is_named() {
+    use illum_media::source::SourceEvent;
+    let sources: [(&str, Box<dyn ScreenSource>); 2] = [
+        (
+            "duplication",
+            Box::new(illum_win::DdaSource::new(0).unwrap()),
+        ),
+        ("GDI", Box::new(illum_win::GdiSource::new(0).unwrap())),
+    ];
+    for (name, mut source) in sources {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut shape = None;
+        while shape.is_none() && std::time::Instant::now() < until {
+            for event in source.poll(std::time::Duration::from_millis(100)).unwrap() {
+                if let SourceEvent::CursorShape(s) = event {
+                    shape = Some(s);
+                }
+            }
+        }
+        match shape {
+            Some(s) => println!(
+                "{name}: {}x{} pointer, kind {:?}",
+                s.width, s.height, s.kind
+            ),
+            None => println!("{name}: no pointer shape in three seconds (it did not change)"),
+        }
+    }
+}

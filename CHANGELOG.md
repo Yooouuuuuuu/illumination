@@ -11,6 +11,32 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-11-17
+
+Not released.
+
+### Changed
+
+- **The pointer you see is this desk's own.** The host now says which pointer it
+  is showing (arrow, text, hand, resize, wait, ...) and your own pointer of that
+  kind is shown, in your size and scheme. A program's own pointer, such as a
+  brush, still comes as the host's picture. Settings and the session window
+  offer the other way too: "The host's pointers", the host's pictures for all of
+  them. Both desks need this version; against an older host you get the host's
+  pictures.
+- The "Embedded" pointer is no longer a choice. A setting or a command line that
+  still says `native` or `embedded` reads as `desk` or `host`.
+
+### Fixed
+
+- **The text pointer no longer disappears over a dark window.** Windows draws it
+  as the opposite of what is under it, which cannot be copied; it was drawn
+  black, and was invisible over a dark terminal. Where the host's picture is
+  used it is now light with a dark edge.
+
+Verified with cargo fmt, cargo clippy and cargo test, and on this desktop's real
+screen: both ways of capturing name the pointer on screen (the arrow).
+
 ## [0.13.6] - 2026-11-16
 
 Not released.

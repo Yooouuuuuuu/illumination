@@ -165,7 +165,8 @@ impl GdiSource {
         }
         let handle = ci.hCursor.0 as isize;
         if handle != 0 && handle != self.last_cursor_handle {
-            if let Some(shape) = cursor_shape(HICON(ci.hCursor.0)) {
+            if let Some(mut shape) = cursor_shape(HICON(ci.hCursor.0)) {
+                shape.kind = crate::pointer_kind::kind_of(ci.hCursor);
                 self.last_cursor_handle = handle;
                 events.push(SourceEvent::CursorShape(shape));
             }

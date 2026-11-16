@@ -309,6 +309,7 @@ mod tests {
     fn cursor_alpha_blends() {
         let mut dst = vec![0u32; 4];
         let shape = CursorShape {
+            kind: None,
             width: 1,
             height: 1,
             hot_x: 0,

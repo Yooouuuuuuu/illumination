@@ -21,6 +21,7 @@ pub const CAPABILITIES: &[&str] = &[
     "input-notice",
     "displays",
     "sas",
+    "cursor-kind",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).

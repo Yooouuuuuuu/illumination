@@ -411,13 +411,16 @@ impl Capture {
         display: u32,
         latest: Arc<LatestFrame>,
         sender: Sender,
+        cursor_kinds: bool,
     ) -> Capture {
         let stop = Arc::new(AtomicBool::new(false));
         let s = stop.clone();
         let thread = std::thread::Builder::new()
             .name("capture".into())
             .spawn(move || {
-                if let Err(err) = capture_loop(&factory, display, &latest, &sender, &s) {
+                if let Err(err) =
+                    capture_loop(&factory, display, &latest, &sender, &s, cursor_kinds)
+                {
                     tracing::warn!(target: "capture", "Screen capture stopped: {err}");
                     sender.send_control(&ControlMsg::ScreenError {
                         reason: err.to_string(),
@@ -447,6 +450,7 @@ fn capture_loop(
     latest: &LatestFrame,
     sender: &Sender,
     stop: &AtomicBool,
+    cursor_kinds: bool,
 ) -> Result<(), MediaError> {
     let mut source = factory(display)?;
     while !stop.load(Ordering::SeqCst) && !sender.is_closed() {
@@ -456,7 +460,11 @@ fn capture_loop(
                 SourceEvent::CursorPosition(p) => {
                     sender.send(Channel::Cursor, CursorMsg::Position(p).to_bytes())
                 }
-                SourceEvent::CursorShape(s) => {
+                SourceEvent::CursorShape(mut s) => {
+                    // An older viewer does not know the message that carries the kind.
+                    if !cursor_kinds {
+                        s.kind = None;
+                    }
                     sender.send(Channel::Cursor, CursorMsg::Shape(s).to_bytes())
                 }
             }
@@ -1119,6 +1127,7 @@ pub async fn serve_session(
                             index,
                             latest.clone(),
                             conn.sender(),
+                            viewer_caps.iter().any(|c| c == "cursor-kind"),
                         ));
                         let socket = media.socket_for(conn.local_address.ip());
                         let l = MediaLink::start(

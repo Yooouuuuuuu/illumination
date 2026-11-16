@@ -370,26 +370,30 @@ impl Waker {
     }
 }
 
-/// Where the pointer lives while controlling (architecture §5.4).
+/// Which pointer you see while controlling (architecture §5.4). Either way it is your own
+/// system's pointer, moved by your system, so it never lags behind the picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PointerMode {
-    /// Your own pointer, wearing the host's cursor shape. The OS moves it, so it never lags
-    /// behind the picture and never disappears.
+    /// This desk's own pointers: the host says which kind it shows (arrow, text, hand, ...)
+    /// and yours of that kind is shown. A program's own pointer, which has no kind, still
+    /// comes as the host's picture.
     #[default]
-    Native,
-    /// The host's cursor drawn inside the picture, at the host's size and scaled with it, as a
-    /// screenshot of the host would show it.
-    Embedded,
+    #[serde(alias = "native")]
+    Desk,
+    /// The host's pointer pictures, exactly as it has them.
+    #[serde(alias = "embedded")]
+    Host,
 }
 
 impl std::str::FromStr for PointerMode {
     type Err = String;
     fn from_str(s: &str) -> Result<PointerMode, String> {
         match s.to_ascii_lowercase().as_str() {
-            "native" => Ok(PointerMode::Native),
-            "embedded" => Ok(PointerMode::Embedded),
-            other => Err(format!("pointer mode {other:?} is not native or embedded")),
+            // "native" and "embedded" are what the two were called up to 0.13.6.
+            "desk" | "native" => Ok(PointerMode::Desk),
+            "host" | "embedded" => Ok(PointerMode::Host),
+            other => Err(format!("pointer {other:?} is not desk or host")),
         }
     }
 }
@@ -397,8 +401,8 @@ impl std::str::FromStr for PointerMode {
 impl std::fmt::Display for PointerMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            PointerMode::Native => "native",
-            PointerMode::Embedded => "embedded",
+            PointerMode::Desk => "desk",
+            PointerMode::Host => "host",
         })
     }
 }
@@ -424,6 +428,26 @@ pub fn cursor_rgba(shape: &CursorShape) -> Option<(Vec<u8>, u16, u16, u16, u16)>
     let hot_x = shape.hot_x.min(shape.width - 1) as u16;
     let hot_y = shape.hot_y.min(shape.height - 1) as u16;
     Some((rgba, w, h, hot_x, hot_y))
+}
+
+/// This system's own pointer of a kind.
+fn desk_pointer(kind: illum_media::cursor::CursorKind) -> CursorIcon {
+    use illum_media::cursor::CursorKind;
+    match kind {
+        CursorKind::Arrow => CursorIcon::Default,
+        CursorKind::Text => CursorIcon::Text,
+        CursorKind::Hand => CursorIcon::Pointer,
+        CursorKind::Wait => CursorIcon::Wait,
+        CursorKind::Progress => CursorIcon::Progress,
+        CursorKind::Crosshair => CursorIcon::Crosshair,
+        CursorKind::ResizeVertical => CursorIcon::NsResize,
+        CursorKind::ResizeHorizontal => CursorIcon::EwResize,
+        CursorKind::ResizeDiagonalDown => CursorIcon::NwseResize,
+        CursorKind::ResizeDiagonalUp => CursorIcon::NeswResize,
+        CursorKind::Move => CursorIcon::Move,
+        CursorKind::NotAllowed => CursorIcon::NotAllowed,
+        CursorKind::Help => CursorIcon::Help,
+    }
 }
 
 fn cursor_source(shape: &CursorShape) -> Option<CustomCursorSource> {
@@ -627,6 +651,14 @@ impl App {
         if self.worn.as_ref() == Some(shape) {
             return;
         }
+        // A standard pointer, and this desk's own are wanted: no picture needed.
+        if self.options.pointer == PointerMode::Desk
+            && let Some(kind) = shape.kind
+        {
+            window.set_cursor(desk_pointer(kind));
+            self.worn = Some(shape.clone());
+            return;
+        }
         let key = shape_key(shape);
         let cursor = match self.cursors.get(&key) {
             Some(c) => Some(c.clone()),
@@ -705,35 +737,23 @@ impl App {
         if place.is_some() {
             self.placement = place;
         }
-        // The pointer while we control the host (§5.4). Native: our own OS pointer wears the
-        // host's shape and nothing is drawn in the picture. Embedded: the host's shape is drawn
-        // at *our* mouse position, never waiting for the host to report where it moved. Outside
-        // the window, and in view-only, the picture shows the host's pointer where the host has
-        // it.
+        // The pointer while we control the host (§5.4) is our own system's, dressed as the
+        // host's (`wear`), and nothing is drawn in the picture. Outside the window, and in
+        // view-only, the picture shows the host's pointer where the host has it.
         let controlling = self.options.input.is_some() && self.hovering && !self.over_bar;
-        let native = self.options.pointer == PointerMode::Native;
-        let cursor = match (controlling, native, self.local_mouse) {
-            (true, true, _) => CursorPosition::default(),
-            (true, false, Some((x, y))) => CursorPosition {
-                visible: true,
-                x,
-                y,
-            },
-            _ => host_cursor,
+        let cursor = if controlling {
+            CursorPosition::default()
+        } else {
+            host_cursor
         };
         if self.options.input.is_some() {
-            if native {
-                self.hide_os_cursor(false);
-                let shape = host_cursor
-                    .visible
-                    .then_some(cursor_shape.as_ref())
-                    .flatten();
-                // Over a bar the pointer is this window's own: the plain arrow.
-                let shape = shape.filter(|_| !self.over_bar);
-                self.wear(event_loop, shape);
-            } else {
-                self.hide_os_cursor(self.hovering && cursor_shape.is_some());
-            }
+            let shape = host_cursor
+                .visible
+                .then_some(cursor_shape.as_ref())
+                .flatten();
+            // Over a bar the pointer is this window's own: the plain arrow.
+            let shape = shape.filter(|_| !self.over_bar);
+            self.wear(event_loop, shape);
         }
         let Some(s) = self.window.as_mut() else {
             return;
@@ -1354,22 +1374,35 @@ mod pointer_tests {
 
     #[test]
     fn pointer_modes_parse_and_print() {
-        assert_eq!(
-            "native".parse::<PointerMode>().unwrap(),
-            PointerMode::Native
-        );
-        assert_eq!(
-            "Embedded".parse::<PointerMode>().unwrap(),
-            PointerMode::Embedded
-        );
+        assert_eq!("desk".parse::<PointerMode>().unwrap(), PointerMode::Desk);
+        assert_eq!("Host".parse::<PointerMode>().unwrap(), PointerMode::Host);
         assert!("accurate".parse::<PointerMode>().is_err());
-        assert_eq!(PointerMode::default(), PointerMode::Native);
-        assert_eq!(PointerMode::Embedded.to_string(), "embedded");
+        assert_eq!(PointerMode::default(), PointerMode::Desk);
+        assert_eq!(PointerMode::Host.to_string(), "host");
+        // What 0.13.6 and before saved and passed on the command line still reads.
+        assert_eq!("native".parse::<PointerMode>().unwrap(), PointerMode::Desk);
+        assert_eq!(
+            "embedded".parse::<PointerMode>().unwrap(),
+            PointerMode::Host
+        );
+        assert_eq!(
+            serde_json::from_str::<PointerMode>("\"native\"").unwrap(),
+            PointerMode::Desk
+        );
+        assert_eq!(
+            serde_json::from_str::<PointerMode>("\"embedded\"").unwrap(),
+            PointerMode::Host
+        );
+        assert_eq!(
+            serde_json::to_string(&PointerMode::Desk).unwrap(),
+            "\"desk\""
+        );
     }
 
     #[test]
     fn host_shapes_become_rgba_cursors_with_the_hotspot_inside() {
         let shape = CursorShape {
+            kind: None,
             width: 2,
             height: 1,
             hot_x: 5, // beyond the image: clamped, not refused
@@ -1393,6 +1426,7 @@ mod pointer_tests {
         );
         assert!(
             cursor_rgba(&CursorShape {
+                kind: None,
                 width: 0,
                 height: 0,
                 hot_x: 0,

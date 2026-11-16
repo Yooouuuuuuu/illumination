@@ -78,7 +78,7 @@ impl Default for Settings {
             allow_scale: false,
             reconnect: true,
             keyboard: KeyboardMode::Remote,
-            pointer: PointerMode::Native,
+            pointer: PointerMode::Desk,
             sound: true,
             clipboard: true,
             allow_incoming: true,
@@ -1049,14 +1049,14 @@ fn settings(ui: &mut Ui, state: &AppState, out: &mut Vec<Command>) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Pointer").font(semibold(14.0)));
             let name = |p: PointerMode| match p {
-                PointerMode::Native => "Native: my pointer, in the host's shape",
-                PointerMode::Embedded => "Embedded: the host's cursor drawn in the picture",
+                PointerMode::Desk => "This desk's pointers",
+                PointerMode::Host => "The host's pointers",
             };
             egui::ComboBox::from_id_salt("pointer")
                 .width(340.0)
                 .selected_text(name(s.pointer))
                 .show_ui(ui, |ui| {
-                    for p in [PointerMode::Native, PointerMode::Embedded] {
+                    for p in [PointerMode::Desk, PointerMode::Host] {
                         ui.selectable_value(&mut s.pointer, p, name(p));
                     }
                 });

@@ -358,6 +358,33 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
 ### 5.4 Presentation and the cursor
 - The cursor shape and position are sent **separately** from the video, so the cursor never
   waits for a video frame. AnyDesk: `desk_rt.system_event_source - Enabled mouse cursor`.
+- **Since v0.13.7 the choice is another one** (decided with the user, 2026-11-17); what
+  follows under "Two pointer modes" is how it was until then and why Native won.
+  - The pointer while controlling is always the controller's own OS pointer (what Native
+    was). Embedded is gone as a choice: it had no case left that the two below do not serve
+    better. Its drawing stays for what it was always used for in both modes: the host's
+    pointer in a view-only session, and while the controller's mouse is outside the window.
+  - **This desk's pointers** (`--pointer desk`, the default). The host says which standard
+    pointer it shows (`CursorKind`: arrow, text, hand, wait, progress, crosshair, the four
+    resizes, move, not allowed, help) and the viewer shows its own system's pointer of that
+    kind (the window library's named cursors, the same on every OS). No picture is converted,
+    so nothing can go wrong in converting it, and the pointer has this desk's size, scheme
+    and sharpness. On Windows the host knows the kind from the handle: a program that wants
+    a standard pointer gets the system's own, one handle for the whole session, so the
+    pointer on screen (`GetCursorInfo`) is standard exactly when its handle is one of those
+    (`illum_win::pointer_kind`). A program's own pointer (a brush, a crosshair in a game)
+    has no kind and comes as the host's picture.
+  - **The host's pointers** (`--pointer host`): the picture for every pointer, as Native
+    did.
+  - The kind travels with the picture in one message (cursor message 3), sent only to a
+    viewer that lists `cursor-kind`; an older viewer gets message 2 as before. `native` and
+    `embedded`, in a saved setting or on a command line, read as `desk` and `host`.
+  - **Inverting pixels.** The text pointer is drawn by Windows as the opposite of what is
+    under it. A viewer cannot do that: it hands the picture to its system as a pointer,
+    which only blends. Until v0.13.6 such pixels were drawn black, and the text pointer was
+    invisible over a dark terminal (reported 2026-11-17). They are now light with a dark
+    edge (`edge_inverting`), which is seen on anything. With this desk's pointers the case
+    does not arise for standard pointers at all.
 - **Two pointer modes** while controlling (decided 2026-11-03, v0.11.0; `--pointer`):
   - **Native** (default): the controller's **own OS pointer** stays visible and **wears the
     host's cursor shape** (a custom cursor made from the host's bitmap and hotspot, through the
@@ -766,7 +793,7 @@ The viewer's own, switchable at any time (nothing travels to the host):
 
 | Setting | Default | Choices |
 |---|---|---|
-| **Pointer** (§5.4) | Native: your own pointer, wearing the host's cursor shape; it never lags behind the picture and never disappears | Embedded: the host's cursor drawn inside the picture, at the host's size, as a screenshot of the host would show it |
+| **Pointer** (§5.4) | This desk's: your own pointers, following the kind the host shows | The host's: its pointer pictures, exactly as it has them |
 | **Reconnect** (§5.5, v0.11.9) | On: an unexpected drop keeps the window and re-dials the host until it answers, then resumes | Off (`--no-reconnect`): a drop ends the session |
 
 The setting's help text says exactly that; the choice is about feel, and the words have to let
@@ -779,7 +806,7 @@ of reach.
 host clamps: bitrate to its own ceiling, frame rate to 15–120): `--latency-limit 50`,
 `--max-bitrate 20`, `--max-fps 30`, `--allow-scale` (v0.10.0), `--mute` (v0.7.0),
 `--software-decode` (v0.7.2; the host side has `--no-audio`), `--software-render` (v0.8.0, a
-debugging switch rather than a setting: draw on the CPU), `--pointer native|embedded`
+debugging switch rather than a setting: draw on the CPU), `--pointer desk|host`
 (v0.11.0, viewer-side only). `--fec-min/--fec-max` remain for measurement runs only. The GPU and encoder choices are the UI milestone's; the "best possible
 on this link" message is still to do.
 

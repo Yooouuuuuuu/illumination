@@ -526,3 +526,70 @@ async fn the_other_display_is_shown_when_asked_for() {
     .await;
     session.abort();
 }
+
+/// The test pattern with a text pointer over it, as a host showing an editor would have.
+struct WithTextPointer {
+    screen: PatternSource,
+    told: bool,
+}
+
+impl ScreenSource for WithTextPointer {
+    fn poll(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<illum_media::source::SourceEvent>, illum_media::MediaError> {
+        let mut events = self.screen.poll(timeout)?;
+        if !self.told {
+            self.told = true;
+            events.push(illum_media::source::SourceEvent::CursorShape(
+                illum_media::cursor::CursorShape {
+                    width: 1,
+                    height: 1,
+                    hot_x: 0,
+                    hot_y: 0,
+                    bgra: vec![255, 255, 255, 255],
+                    kind: Some(illum_media::cursor::CursorKind::Text),
+                },
+            ));
+        }
+        Ok(events)
+    }
+}
+
+/// The host says which standard pointer it shows, so the viewer can show its own of that
+/// kind; a viewer from before that gets the picture alone, in the form it knows.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pointers_kind_reaches_a_viewer_that_knows_kinds() {
+    use illum_media::cursor::CursorKind;
+    let factory: SourceFactory = Arc::new(|_| {
+        Ok(Box::new(WithTextPointer {
+            screen: PatternSource::new(W, H, 120),
+            told: false,
+        }) as Box<dyn ScreenSource>)
+    });
+    let addr = start_host("host-pointer", Some(factory)).await;
+    let mut older = endpoint("ctl-older");
+    older.capabilities.retain(|c| c != "cursor-kind");
+    for (viewer, expected) in [
+        (endpoint("ctl-newer"), Some(CursorKind::Text)),
+        (older, None),
+    ] {
+        let conn = connect(&viewer, &addr.to_string()).await.unwrap();
+        let shared: Shared = Arc::default();
+        let session = tokio::spawn(run_viewer_session(
+            conn,
+            params(None),
+            shared.clone(),
+            Arc::new(|| {}),
+        ));
+        wait_for(&shared, "the pointer's shape", |s| s.cursor_shape.is_some()).await;
+        let shape = shared.lock().unwrap().cursor_shape.clone().unwrap();
+        assert_eq!(shape.kind, expected);
+        assert_eq!(
+            shape.bgra,
+            [255, 255, 255, 255],
+            "the picture comes either way"
+        );
+        session.abort();
+    }
+}

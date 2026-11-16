@@ -730,7 +730,7 @@ mod tests {
         let flags = view_flags(&Settings::default(), false, false);
         assert_eq!(
             flags.join(" "),
-            "--max-bitrate 20 --max-fps 30 --latency-limit 50 --keyboard remote --pointer native"
+            "--max-bitrate 20 --max-fps 30 --latency-limit 50 --keyboard remote --pointer desk"
         );
         let all = Settings {
             max_bitrate_mbps: 7.5,
@@ -739,14 +739,14 @@ mod tests {
             sound: false,
             clipboard: false,
             keyboard: illum_ui::KeyboardMode::Local,
-            pointer: illum_ui::PointerMode::Embedded,
+            pointer: illum_ui::PointerMode::Host,
             ..Settings::default()
         };
         let flags = view_flags(&all, true, false).join(" ");
         for expected in [
             "--max-bitrate 7.5",
             "--keyboard local",
-            "--pointer embedded",
+            "--pointer host",
             "--allow-scale",
             "--no-reconnect",
             "--mute",
@@ -792,7 +792,7 @@ mod tests {
             sound: false,
             clipboard: false,
             keyboard: illum_ui::KeyboardMode::Auto,
-            pointer: illum_ui::PointerMode::Embedded,
+            pointer: illum_ui::PointerMode::Host,
             allow_incoming: true,
             let_control: false,
             let_sound: false,

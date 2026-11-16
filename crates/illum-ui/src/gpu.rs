@@ -954,6 +954,7 @@ mod tests {
             }
         }
         let shape = CursorShape {
+            kind: None,
             width: 4,
             height: 4,
             hot_x: 1,

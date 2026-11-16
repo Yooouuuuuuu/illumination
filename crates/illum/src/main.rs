@@ -117,11 +117,10 @@ enum Command {
         /// remote when both layouts match.
         #[arg(long, default_value = "remote", value_parser = parse_keyboard)]
         keyboard: KeyboardMode,
-        /// Where the pointer lives while you control the host. native: your own pointer,
-        /// wearing the host's cursor shape; the OS moves it, so it never lags behind the picture
-        /// and never disappears. embedded: the host's cursor drawn inside the picture at the
-        /// host's size, scaled with it, as a screenshot of the host would show it.
-        #[arg(long, default_value = "native", value_parser = parse_pointer)]
+        /// Which pointer you see while you control the host. desk: this desk's own pointers,
+        /// following the kind the host shows (arrow, text, hand, ...). host: the host's
+        /// pointer pictures. Either way your own system moves it, so it never lags.
+        #[arg(long, default_value = "desk", value_parser = parse_pointer)]
         pointer: PointerMode,
         /// Only watch: send no keyboard or mouse input.
         #[arg(long)]
