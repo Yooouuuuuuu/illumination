@@ -1004,6 +1004,20 @@ not arrive (§6). Not yet seen working on a lock screen: it was written on a des
 could not be locked for the test, and the test from the laptop is put off until the rest is
 confirmed (user, 2026-11-16: a failure there could cost the session the other tests need).
 
+*First try on a lock screen (2026-11-17, the laptop as host, v0.13.7), and v0.13.8.* A
+session that began on either desktop worked: the lock screen was seen and typed on. A
+session that was open while the host was locked froze until the controller reconnected,
+and froze again on signing in. The host's log gave the order of things: the capture was
+refused first (`BitBlt`: access denied, the old desktop may not be read any more), and
+that refusal ended the capture thread; the line "the screen is on the Winlogon desktop
+now; following" came five seconds later, from the input thread, which did follow. So the
+following was right and never got its turn on the thread that needed it. Since v0.13.8 a
+refused capture is taken for what it most often is: the thread looks at once where the
+screen went, goes there and captures anew, sending nothing meanwhile, and only a capture
+that keeps failing for fifteen seconds is reported as an error (`ScreenCapture::ride_out`).
+Seen with the GDI capture (the laptop cannot duplicate its display); the same is done
+for Desktop Duplication, not yet seen there.
+
 *Ctrl+Alt+Del (v0.13.6, written, not tried: it belongs to the same test).* Windows takes
 that combination from the real keyboard only, so the controller cannot type it. Its session
 window has a "Ctrl+Alt+Del" button instead, shown when the host lists the `sas` capability

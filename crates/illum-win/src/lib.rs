@@ -66,8 +66,16 @@ use std::time::Duration;
 #[cfg(windows)]
 pub struct ScreenCapture {
     method: Method,
+    /// Since when capturing has done nothing but fail (§7).
+    failing_since: Option<std::time::Instant>,
     _awake: KeepAwake,
 }
+
+/// How long capturing may fail before the session is told the screen is gone. Windows
+/// refuses a capture while it changes desktops (locking, unlocking, a permission prompt),
+/// and a moment later the screen is there again on the other desktop.
+#[cfg(windows)]
+const CAPTURE_PATIENCE: Duration = Duration::from_secs(15);
 
 #[cfg(windows)]
 enum Method {
@@ -87,6 +95,7 @@ impl ScreenCapture {
         };
         Ok(ScreenCapture {
             method,
+            failing_since: None,
             _awake: KeepAwake::new(),
         })
     }
@@ -116,13 +125,59 @@ impl ScreenSource for ScreenCapture {
                     tracing::warn!(target: "capture", "{e}; capturing with GDI instead (slower). On a two-GPU laptop, Desktop Duplication works when Windows runs illum on the GPU that drives the display.");
                     self.method = Method::Gdi(GdiSource::new(dda.display_index())?);
                 }
-                other => return other,
+                other => return self.ride_out(other, timeout),
             }
         }
-        match &mut self.method {
+        let polled = match &mut self.method {
             Method::Gdi(gdi) => gdi.poll(timeout),
             Method::Dda(_) => unreachable!("handled above"),
+        };
+        self.ride_out(polled, timeout)
+    }
+}
+
+#[cfg(windows)]
+impl ScreenCapture {
+    /// A failed capture is, first of all, Windows changing desktops: the screen of the old
+    /// one may not be read any more ("access denied"), and this thread has not looked yet
+    /// where the screen went. So a failure is answered by going there and capturing anew,
+    /// and nothing is sent meanwhile. Only a capture that keeps failing is an error.
+    ///
+    /// Until v0.13.7 the first refusal ended the capture, a moment before the thread would
+    /// have followed: locking the host froze the picture until the controller reconnected.
+    fn ride_out(
+        &mut self,
+        polled: Result<Vec<SourceEvent>, MediaError>,
+        timeout: Duration,
+    ) -> Result<Vec<SourceEvent>, MediaError> {
+        let why = match polled {
+            Ok(events) => {
+                if self.failing_since.take().is_some() {
+                    tracing::info!(target: "capture", "Capturing again.");
+                }
+                return Ok(events);
+            }
+            Err(why) => why,
+        };
+        let since = *self.failing_since.get_or_insert_with(|| {
+            tracing::info!(target: "capture", "Capture refused ({why}); looking where the screen went.");
+            std::time::Instant::now()
+        });
+        if since.elapsed() > CAPTURE_PATIENCE {
+            return Err(why);
         }
+        std::thread::sleep(timeout.min(Duration::from_millis(100)));
+        desktop::follow_input_desktop_now();
+        match &mut self.method {
+            Method::Dda(dda) => dda.lost(),
+            Method::Gdi(gdi) => {
+                // Not yet possible in the middle of the switch: tried again next time.
+                if let Ok(fresh) = GdiSource::new(gdi.display_index()) {
+                    *gdi = fresh;
+                }
+            }
+        }
+        Ok(Vec::new())
     }
 }
 

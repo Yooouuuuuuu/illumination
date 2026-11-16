@@ -11,6 +11,22 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-11-17
+
+Not released.
+
+### Fixed
+
+- **Locking the host no longer freezes the session.** With a session open,
+  locking the host (or signing back in) stopped the picture until the
+  controller reconnected. Windows refuses a screen capture at the moment it
+  changes screens, and that one refusal ended the capture just before it would
+  have followed to the lock screen. A refused capture now looks where the
+  screen went and carries on there.
+
+Verified with cargo fmt, cargo clippy and cargo test. The fix follows from the
+host's log of the failed try; it has not been tried on a lock screen yet.
+
 ## [0.13.7] - 2026-11-17
 
 Not released.

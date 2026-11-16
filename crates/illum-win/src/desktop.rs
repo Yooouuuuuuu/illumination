@@ -56,11 +56,22 @@ pub(crate) fn name_of(desktop: HDESK) -> Option<String> {
 /// old desktop is then stale and has to be opened again. Asks Windows at most a few times a
 /// second, so it can be called before every frame and every key.
 pub(crate) fn follow_input_desktop() -> bool {
+    follow(false)
+}
+
+/// [`follow_input_desktop`] without the pause between looks: for a thread whose capture has
+/// just been refused, which is how a switch of desktop shows before anything else does.
+pub(crate) fn follow_input_desktop_now() -> bool {
+    follow(true)
+}
+
+fn follow(at_once: bool) -> bool {
     FOLLOWED.with_borrow_mut(|followed| {
         let now = Instant::now();
-        if followed
-            .looked
-            .is_some_and(|at| now.duration_since(at) < LOOK_EVERY)
+        if !at_once
+            && followed
+                .looked
+                .is_some_and(|at| now.duration_since(at) < LOOK_EVERY)
         {
             return false;
         }
