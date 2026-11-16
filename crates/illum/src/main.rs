@@ -658,7 +658,19 @@ fn host_config_with(
         // The test pattern is a non-interactive stream; the real host syncs the clipboard (§8).
         clipboard: !test_pattern && !no_clipboard,
         displays: display_names(test_pattern),
+        sas: secure_attention(test_pattern || no_input),
     }
+}
+
+/// Ctrl+Alt+Del for a controller: only the host an installed service started can ask for it
+/// (it asks that service, which is allowed to; architecture §7).
+fn secure_attention(off: bool) -> Option<illum::host::SasFn> {
+    #[cfg(windows)]
+    if !off && illum_win::runs_as_system() {
+        return Some(Arc::new(illum_win::request_sas));
+    }
+    let _ = off;
+    None
 }
 
 /// The displays a controller can choose between, each as its size ("2560 × 1440, main").
@@ -875,6 +887,7 @@ async fn open_listener(
         "input" => config.input.is_some(),
         "audio" => config.audio.is_some(),
         "clipboard" => config.clipboard,
+        "sas" => config.sas.is_some(),
         _ => true,
     });
     // "enc:av1" etc.: the viewer's hello says what it decodes, ours what we encode (§5.3).
@@ -1285,6 +1298,11 @@ fn run_view(
                         live.send_control(&ControlMsg::ScreenPause { paused: minimized });
                     })
                 },
+                on_sas: {
+                    let live = live.clone();
+                    Box::new(move || live.send_control(&ControlMsg::SecureAttention))
+                },
+                can_sas: with_input && hello.capabilities.iter().any(|c| c == "sas"),
                 // Another of the host's displays: the screen is started anew for it, as it is
                 // for a stuck media path, and the choice outlives a reconnection.
                 on_display: {

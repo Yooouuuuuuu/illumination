@@ -11,6 +11,24 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-11-16
+
+Not released.
+
+### Added
+
+- **Ctrl+Alt+Del on an installed host.** The session window shows a
+  "Ctrl+Alt+Del" button when the host is installed and you control it; it
+  brings up the host's Ctrl+Alt+Del screen. Written and unit-tested, not yet
+  tried on a real session: it waits with the lock-screen test.
+
+### Fixed
+
+- The session window's "Disconnect" button no longer covers its neighbour when
+  the top bar is full; it moves to a second row.
+
+Verified with cargo fmt, cargo clippy and cargo test.
+
 ## [0.13.5] - 2026-11-16
 
 Not released.

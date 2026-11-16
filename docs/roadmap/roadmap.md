@@ -200,7 +200,7 @@ outages every 4 s: survived. Not yet measured live.
 - backend started per session as SYSTEM in the console session *(v0.13.0: the host itself runs there and listens; a backend separate from the listener is not built)*
 - `--control` per user *(not built; a new desk's question is a window started as the person, `illum ask`)*
 - desktop switcher (suspend, switch, restart) *(v0.13.0: written, `illum_win::desktop`; not yet seen working on a lock screen)*
-- Ctrl+Alt+Del via `SendSAS`, hotkey Ctrl+Alt+Shift+Del
+- Ctrl+Alt+Del via `SendSAS`, hotkey Ctrl+Alt+Shift+Del *(v0.13.6: a button in the session window; the hotkey is not built; not tried yet, with the lock screen)*
 - wake lock *(done early in v0.7.3: the host holds system and display awake while a session streams)*
 - restart on session change *(v0.13.0)*
 - install/uninstall commands (service registration, firewall rule, `SoftwareSASGeneration`) *(v0.13.0: `illum service install` / `uninstall` and the installer; `SoftwareSASGeneration` comes with Ctrl+Alt+Del)*

@@ -977,6 +977,20 @@ not arrive (§6). Not yet seen working on a lock screen: it was written on a des
 could not be locked for the test, and the test from the laptop is put off until the rest is
 confirmed (user, 2026-11-16: a failure there could cost the session the other tests need).
 
+*Ctrl+Alt+Del (v0.13.6, written, not tried: it belongs to the same test).* Windows takes
+that combination from the real keyboard only, so the controller cannot type it. Its session
+window has a "Ctrl+Alt+Del" button instead, shown when the host lists the `sas` capability
+and the controller has the keyboard there. It sends `ControlMsg::SecureAttention`. Only a
+service running as the system may ask Windows for that screen (`SendSAS`), and the host
+that serves the session is not the service, it only runs with its rights in the person's
+session. So the host raises a flag (`Global\Illumination-SAS`, an event the service made
+and only the system can open) and the service, waiting on it in its loop, makes the call
+(`illum_win::sas`). The machine's policy must let services do this
+(`SoftwareSASGeneration`, bit 1). Installing sets that bit if it is not set; other
+remote-desktop programs use the same policy, so it is only ever widened and is left as it
+is when uninstalling. A host that is merely run does not list `sas` and the button is not
+shown. The reserved hotkey (Ctrl+Alt+Shift+Del) is not built.
+
 ## 8. Clipboard, audio, files
 
 - **Clipboard** (§8; eventually `--control`):

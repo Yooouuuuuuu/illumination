@@ -184,7 +184,12 @@ pub struct HostConfig {
     pub clipboard: bool,
     /// The host's displays, each in a few words, in the order `screen` counts them.
     pub displays: Option<DisplaysFn>,
+    /// Shows the Ctrl+Alt+Del screen; only an installed host can (§7).
+    pub sas: Option<SasFn>,
 }
+
+/// Asks the system for the Ctrl+Alt+Del screen.
+pub type SasFn = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// Lists the displays now (one may have been plugged in since the session began).
 pub type DisplaysFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
@@ -1151,6 +1156,22 @@ pub async fn serve_session(
                 capture = None;
                 link = None;
                 input = None;
+            }
+            ControlMsg::SecureAttention => {
+                // Only for a controller that has the keyboard here at all.
+                match (&config.sas, &input) {
+                    (Some(sas), Some(_)) => match sas() {
+                        Ok(()) => {
+                            tracing::info!(target: "input", "Ctrl+Alt+Del asked for by the controller.")
+                        }
+                        Err(why) => {
+                            tracing::warn!(target: "input", "Ctrl+Alt+Del not sent: {why}")
+                        }
+                    },
+                    _ => {
+                        tracing::debug!(target: "input", "Ctrl+Alt+Del asked for; not offered here.")
+                    }
+                }
             }
             ControlMsg::ScreenPause { paused } => {
                 // The viewer minimized (or restored): stop or resume the screen only.

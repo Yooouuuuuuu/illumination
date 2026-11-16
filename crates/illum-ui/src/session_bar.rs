@@ -31,6 +31,8 @@ pub struct BarState {
     pub displays: Vec<String>,
     /// The one being shown.
     pub display: u32,
+    /// The host can show its Ctrl+Alt+Del screen when asked.
+    pub can_sas: bool,
 }
 
 /// What the person asked for.
@@ -42,6 +44,8 @@ pub enum BarAction {
     Fullscreen(bool),
     /// Show another of the host's displays.
     Display(u32),
+    /// Ctrl+Alt+Del on the host.
+    SecureAttention,
     Disconnect,
 }
 
@@ -178,6 +182,9 @@ pub fn draw(ui: &mut Ui, state: &BarState) -> (Vec<BarAction>, BarSpace) {
                 } else {
                     ui.label(RichText::new("View only").font(semibold(13.0)));
                 }
+                if state.can_sas && ui.add(plain("Ctrl+Alt+Del", WHITE, NAVY)).clicked() {
+                    out.push(BarAction::SecureAttention);
+                }
                 let label = if state.fullscreen {
                     "Leave full screen"
                 } else {
@@ -186,11 +193,17 @@ pub fn draw(ui: &mut Ui, state: &BarState) -> (Vec<BarAction>, BarSpace) {
                 if ui.add(plain(label, WHITE, NAVY)).clicked() {
                     out.push(BarAction::Fullscreen(!state.fullscreen));
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(plain("Disconnect", NAVY, WHITE)).clicked() {
-                        out.push(BarAction::Disconnect);
-                    }
-                });
+                // At the right end of the row while there is room for it there; else it
+                // takes its turn and wraps like the rest, instead of covering a neighbour.
+                if ui.available_width() >= 120.0 {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(plain("Disconnect", NAVY, WHITE)).clicked() {
+                            out.push(BarAction::Disconnect);
+                        }
+                    });
+                } else if ui.add(plain("Disconnect", NAVY, WHITE)).clicked() {
+                    out.push(BarAction::Disconnect);
+                }
             });
         });
     let rect = top.response.rect;
@@ -262,5 +275,6 @@ pub fn sample() -> BarState {
         notice: None,
         displays: vec!["2560 × 1440, main".into(), "1920 × 1080".into()],
         display: 0,
+        can_sas: true,
     }
 }

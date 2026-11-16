@@ -456,6 +456,9 @@ pub struct ViewerOptions {
     pub on_minimize: Box<dyn Fn(bool)>,
     /// Called when another of the host's displays is chosen in the window.
     pub on_display: Box<dyn Fn(u32)>,
+    /// Whether the host can show its Ctrl+Alt+Del screen for us, and the call that asks.
+    pub can_sas: bool,
+    pub on_sas: Box<dyn Fn()>,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Being in front is reported by [`UiEvent::Front`] (the keyboard grab asks the system
@@ -1126,6 +1129,7 @@ impl App {
             notice: self.bar_notice.clone(),
             displays: self.displays.clone(),
             display: self.display,
+            can_sas: self.options.can_sas && self.options.input.is_some(),
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1205,6 +1209,7 @@ impl App {
                 }
                 (self.options.on_display)(display);
             }
+            BarAction::SecureAttention => (self.options.on_sas)(),
             BarAction::Disconnect => event_loop.exit(),
         }
     }

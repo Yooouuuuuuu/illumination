@@ -73,6 +73,9 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         })
     };
     let layout: LayoutFn = Arc::new(|| "04040404".to_string());
+    // Stands in for the installed service's Ctrl+Alt+Del.
+    let attention = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let asked = attention.clone();
     let config = HostConfig {
         screen: Some(screen),
         input: Some(input),
@@ -82,6 +85,10 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         audio: None,
         clipboard: false,
         displays: None,
+        sas: Some(Arc::new(move || {
+            asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
     };
 
     let host = endpoint("host");
@@ -117,6 +124,13 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
 
     wait_until("the host keyboard layout", || {
         shared.lock().unwrap().host_layout.as_deref() == Some("04040404")
+    })
+    .await;
+
+    // Ctrl+Alt+Del cannot be typed; the controller asks for it and the host makes the call.
+    sender.send_control(&illum_core::protocol::ControlMsg::SecureAttention);
+    wait_until("the host is asked for Ctrl+Alt+Del", || {
+        attention.load(std::sync::atomic::Ordering::SeqCst) == 1
     })
     .await;
 

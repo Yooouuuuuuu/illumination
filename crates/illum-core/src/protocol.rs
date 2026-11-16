@@ -20,6 +20,7 @@ pub const CAPABILITIES: &[&str] = &[
     "clipboard",
     "input-notice",
     "displays",
+    "sas",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
@@ -241,6 +242,10 @@ pub enum ControlMsg {
         names: Vec<String>,
         current: u32,
     },
+    /// Controller → host: show the Ctrl+Alt+Del screen. Windows takes those keys from the
+    /// real keyboard only, so they cannot be typed like the others. Sent only to a host
+    /// that lists the `sas` capability: an installed one (architecture §7).
+    SecureAttention,
     /// Orderly end of session.
     Bye,
 }

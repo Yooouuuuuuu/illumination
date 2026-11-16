@@ -373,6 +373,15 @@ pub fn run_service() -> Result<()> {
         tracing::info!(target: "service", "Illumination {} service started.", env!("CARGO_PKG_VERSION"));
         let mut host: Option<illum_win::SessionProcess> = None;
         let mut last_start: Option<std::time::Instant> = None;
+        // Ctrl+Alt+Del for a controller: the host raises a flag, this service makes the
+        // call that only a service may make.
+        let sas = match illum_win::SasGate::open() {
+            Ok(gate) => Some(gate),
+            Err(why) => {
+                tracing::warn!(target: "service", "No Ctrl+Alt+Del for controllers: {why}");
+                None
+            }
+        };
         while !stop.load(Ordering::SeqCst) {
             let screen = illum_win::console_session();
             if let Some(running) = &host {
@@ -401,7 +410,21 @@ pub fn run_service() -> Result<()> {
                     Err(why) => tracing::warn!(target: "service", "Host not started: {why}."),
                 }
             }
-            std::thread::sleep(Duration::from_millis(500));
+            match &sas {
+                Some(gate) => {
+                    if gate.asked(Duration::from_millis(500)) {
+                        match illum_win::send_sas() {
+                            Ok(()) => {
+                                tracing::info!(target: "service", "Ctrl+Alt+Del sent for a controller.")
+                            }
+                            Err(why) => {
+                                tracing::warn!(target: "service", "Ctrl+Alt+Del not sent: {why}")
+                            }
+                        }
+                    }
+                }
+                None => std::thread::sleep(Duration::from_millis(500)),
+            }
         }
         if let Some(running) = host {
             running.kill();
@@ -446,6 +469,10 @@ fn must(what: &str, program: &str, args: &[&str]) -> Result<()> {
 const ACCESS_DENIED: i32 = 5;
 #[cfg(windows)]
 const FIREWALL_RULE: &str = "name=Illumination";
+#[cfg(windows)]
+const SAS_POLICY_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+#[cfg(windows)]
+const SAS_POLICY: &str = "SoftwareSASGeneration";
 
 /// Registers this program as the service, opens the firewall for it and starts it. Run again
 /// after the program moved or was replaced, it points the service at where it is now.
@@ -543,6 +570,10 @@ pub fn install(home: &Path) -> Result<()> {
         ],
     )?;
     close_home(home)?;
+    if let Err(why) = allow_sas() {
+        // Not fatal: everything else works without.
+        println!("Ctrl+Alt+Del from a controller will not work: {why:#}");
+    }
     must("starting the service", "sc.exe", &["start", SERVICE_NAME])?;
     wait_until(|| service_state() == ServiceState::Running);
     println!(
@@ -553,6 +584,49 @@ pub fn install(home: &Path) -> Result<()> {
         }
     );
     Ok(())
+}
+
+/// What the policy has to become so that services may ask for the Ctrl+Alt+Del screen,
+/// given what it is (`None`: not set). The value is two switches: 1 for services, 2 for
+/// accessibility programs. `None`: it is right already.
+#[cfg(windows)]
+fn sas_policy_wanted(now: Option<u32>) -> Option<u32> {
+    match now {
+        Some(value) if value & 1 == 1 => None,
+        Some(value) => Some(value | 1),
+        None => Some(1),
+    }
+}
+
+/// Lets services ask Windows for the Ctrl+Alt+Del screen, which is how a controller gets
+/// it (architecture §7). Other remote-desktop programs set the same policy, so it is only
+/// ever widened here and left alone when uninstalling.
+#[cfg(windows)]
+fn allow_sas() -> Result<()> {
+    let (code, said) = tool("reg.exe", &["query", SAS_POLICY_KEY, "/v", SAS_POLICY])?;
+    // "    SoftwareSASGeneration    REG_DWORD    0x1"
+    let now = (code == 0)
+        .then(|| said.rsplit("0x").next().map(str::trim).map(str::to_string))
+        .flatten()
+        .and_then(|hex| u32::from_str_radix(&hex, 16).ok());
+    let Some(wanted) = sas_policy_wanted(now) else {
+        return Ok(());
+    };
+    must(
+        "allowing Ctrl+Alt+Del for services",
+        "reg.exe",
+        &[
+            "add",
+            SAS_POLICY_KEY,
+            "/v",
+            SAS_POLICY,
+            "/t",
+            "REG_DWORD",
+            "/d",
+            &wanted.to_string(),
+            "/f",
+        ],
+    )
 }
 
 /// Makes the home folder the system's: the system and administrators write it, the PC's
@@ -746,6 +820,20 @@ mod tests {
         for other in [None, Some(-1), Some(3), Some(0xC000_0005)] {
             assert_eq!(answer_of(other), Answer::No);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_sas_policy_is_only_widened() {
+        assert_eq!(sas_policy_wanted(None), Some(1));
+        assert_eq!(sas_policy_wanted(Some(0)), Some(1));
+        assert_eq!(
+            sas_policy_wanted(Some(2)),
+            Some(3),
+            "another program's switch stays"
+        );
+        assert_eq!(sas_policy_wanted(Some(1)), None);
+        assert_eq!(sas_policy_wanted(Some(3)), None);
     }
 
     #[test]

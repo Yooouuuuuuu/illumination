@@ -19,6 +19,9 @@ mod obstacle;
 mod pipe;
 #[cfg(windows)]
 mod power;
+#[cfg(windows)]
+mod sas;
+#[cfg(windows)]
 mod service;
 
 #[cfg(windows)]
@@ -38,6 +41,9 @@ pub use obstacle::input_obstacle;
 pub use pipe::{PipeSecurity, own_user_sid, pipe_client_session, session_user_sid};
 #[cfg(windows)]
 pub use power::KeepAwake;
+#[cfg(windows)]
+pub use sas::{SasGate, request as request_sas, send as send_sas};
+#[cfg(windows)]
 pub use service::{
     SERVICE_NAME, ServiceState, SessionProcess, console_session, own_session, run_as_service,
     runs_as_system, service_state, start_as_session_user, start_in_session,
