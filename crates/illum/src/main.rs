@@ -589,6 +589,17 @@ fn parse_pointer(s: &str) -> std::result::Result<PointerMode, String> {
 /// What the host offers: its screen (or the test pattern), input injection and layout reports.
 /// With the test pattern there is no real screen, so input isn't injected either.
 fn host_config(test_pattern: bool, no_audio: bool, no_clipboard: bool) -> HostConfig {
+    host_config_with(test_pattern, no_audio, no_clipboard, false)
+}
+
+/// What this machine can offer a controller, less what was switched off. `no_input`: the
+/// controller sees the screen and cannot use the keyboard or the mouse.
+fn host_config_with(
+    test_pattern: bool,
+    no_audio: bool,
+    no_clipboard: bool,
+    no_input: bool,
+) -> HostConfig {
     #[cfg(windows)]
     let (input, layout, obstacle): (
         Option<InputFactory>,
@@ -636,6 +647,7 @@ fn host_config(test_pattern: bool, no_audio: bool, no_clipboard: bool) -> HostCo
             None
         }
     };
+    let input = if no_input { None } else { input };
     HostConfig {
         screen: Some(source_factory(test_pattern)),
         input,
@@ -730,15 +742,96 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
     for addr in listener.local_addrs() {
         println!("Listening on {addr}");
     }
-    accept_loop(ep, listener, config, Arc::new(|_| {})).await;
+    accept_loop(ep, listener, config, Sessions::new(|_| {})).await;
     Ok(())
 }
 
-/// A desk connected to this one, or left. For whoever shows it (the app's status pill).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SessionEvent {
-    Started(String),
-    Ended(String),
+/// The desks connected to this one now: shown by the app, and where the person at this
+/// desk ends one.
+#[derive(Clone)]
+struct Sessions {
+    live: Arc<std::sync::Mutex<Vec<Live>>>,
+    /// Told the names, in the order they connected, whenever one comes or goes.
+    changed: Arc<dyn Fn(Vec<String>) + Send + Sync>,
+}
+
+struct Live {
+    id: u64,
+    name: String,
+    end: Arc<tokio::sync::Notify>,
+    /// Ended by the person at this desk, not by the controller or the link.
+    dismissed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// One session's place among [`Sessions`]; leaving it is the session's end.
+struct Entered {
+    sessions: Sessions,
+    id: u64,
+    end: Arc<tokio::sync::Notify>,
+    dismissed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Sessions {
+    fn new(changed: impl Fn(Vec<String>) + Send + Sync + 'static) -> Sessions {
+        Sessions {
+            live: Arc::default(),
+            changed: Arc::new(changed),
+        }
+    }
+
+    fn names(&self) -> Vec<String> {
+        let live = self.live.lock().expect("sessions");
+        live.iter().map(|s| s.name.clone()).collect()
+    }
+
+    fn enter(&self, name: &str) -> Entered {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let entered = Entered {
+            sessions: self.clone(),
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            end: Arc::default(),
+            dismissed: Arc::default(),
+        };
+        self.live.lock().expect("sessions").push(Live {
+            id: entered.id,
+            name: name.to_string(),
+            end: entered.end.clone(),
+            dismissed: entered.dismissed.clone(),
+        });
+        (self.changed)(self.names());
+        entered
+    }
+
+    /// Ends every session of the desk called `name`. Returns how many there were.
+    fn end(&self, name: &str) -> usize {
+        let live = self.live.lock().expect("sessions");
+        let theirs: Vec<&Live> = live.iter().filter(|s| s.name == name).collect();
+        for session in &theirs {
+            session
+                .dismissed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Kept until the session looks, should it be busy right now.
+            session.end.notify_one();
+        }
+        theirs.len()
+    }
+}
+
+impl Entered {
+    fn dismissed(&self) -> bool {
+        self.dismissed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        self.sessions
+            .live
+            .lock()
+            .expect("sessions")
+            .retain(|s| s.id != self.id);
+        (self.sessions.changed)(self.sessions.names());
+    }
 }
 
 /// Opens the listening port for a host that offers what `config` has. Narrows `ep`'s
@@ -775,18 +868,13 @@ async fn open_listener(
 
 /// Accepts connections and serves each as a session, until the listener closes or this future
 /// is dropped (sessions already running carry on).
-async fn accept_loop(
-    ep: Endpoint,
-    mut listener: Listener,
-    config: HostConfig,
-    on_session: Arc<dyn Fn(SessionEvent) + Send + Sync>,
-) {
+async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, sessions: Sessions) {
     while let Some((tcp, peer)) = listener.next().await {
         let ep = ep.clone();
         let acceptor = listener.acceptor();
         let config = config.clone();
         let media = listener.media();
-        let on_session = on_session.clone();
+        let sessions = sessions.clone();
         tokio::spawn(async move {
             tracing::info!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
@@ -797,14 +885,32 @@ async fn accept_loop(
                         .map(|h| (h.device_name.clone(), h.app_version.clone()))
                         .unwrap_or_default();
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" (Illumination {version}) started.");
-                    on_session(SessionEvent::Started(name.clone()));
-                    match serve_session(conn, config, ep.timeouts.idle, media).await {
+                    let guest = conn.peer_fingerprint.as_str().to_string();
+                    ep.store.lock().await.guest_entered(&guest);
+                    let entered = sessions.enter(&name);
+                    let ended =
+                        serve_session(conn, config, ep.timeouts.idle, media, entered.end.clone())
+                            .await;
+                    {
+                        // A desk accepted for this time may come back for a while, unless the
+                        // person here sent it away.
+                        let mut store = ep.store.lock().await;
+                        if entered.dismissed() {
+                            store.dismiss_guest(&guest);
+                        } else {
+                            store.guest_left(&guest);
+                        }
+                    }
+                    match ended {
+                        Ok(()) if entered.dismissed() => {
+                            tracing::info!(target: "service", "[{peer}] Session ended by the person at this desk.")
+                        }
                         Ok(()) => tracing::info!(target: "service", "[{peer}] Session ended."),
                         Err(err) => {
                             tracing::warn!(target: "service", "[{peer}] Session ended: {}", describe(&err))
                         }
                     }
-                    on_session(SessionEvent::Ended(name));
+                    drop(entered);
                 }
                 Err(err) => {
                     tracing::warn!(target: "service", "[{peer}] Not connected: {}", describe(&err))

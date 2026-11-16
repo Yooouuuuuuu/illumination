@@ -14,7 +14,7 @@ pub mod tls;
 pub use conn::{Connection, Sender};
 pub use identity::{Fingerprint, Identity};
 pub use media::{Inbound, MediaClient, MediaHub, MediaKeys, MediaStream};
-pub use session::{Endpoint, Listener, Prompt, PromptKind, PromptRequest, Timeouts};
+pub use session::{Answer, Endpoint, Listener, Prompt, PromptKind, PromptRequest, Timeouts};
 
 use illum_core::store::StoreError;
 

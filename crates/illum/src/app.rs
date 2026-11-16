@@ -11,11 +11,11 @@
 //! - **Settings** live in `settings.json` in the home folder and become the flags of the next
 //!   `illum view`.
 
-use crate::{SessionEvent, accept_loop, describe, endpoint, host_config, open_listener};
+use crate::{Sessions, accept_loop, describe, endpoint, host_config_with, open_listener};
 use anyhow::{Context, Result};
 use illum_core::protocol::{ControlMsg, DEFAULT_PORT};
 use illum_net::session::{connect, normalize_target};
-use illum_net::{Endpoint, Prompt, PromptKind, PromptRequest, bind};
+use illum_net::{Answer, Endpoint, Prompt, PromptKind, PromptRequest, bind};
 use illum_ui::app::{
     AppState, Command, Desk, Dial, Incoming, Question, QuestionKind, Settings, TrustedDesk,
 };
@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 
 type Shared = Arc<Mutex<AppState>>;
 /// Who is waiting for the answer to each question on screen.
-type Answers = Arc<Mutex<HashMap<u64, oneshot::Sender<bool>>>>;
+type Answers = Arc<Mutex<HashMap<u64, oneshot::Sender<Answer>>>>;
 
 fn settings_path(home: &Path) -> PathBuf {
     home.join("settings.json")
@@ -148,7 +148,7 @@ fn window_prompt(state: Shared, answers: Answers, waker: Wake) -> Prompt {
                 answers,
                 waker,
             };
-            asked.await.unwrap_or(false)
+            asked.await.unwrap_or(Answer::No)
         })
     })
 }
@@ -183,6 +183,8 @@ struct Backend {
     launch: Launch,
     /// The task that listens for other desks, while "Allow incoming connections" is on.
     listening: Mutex<Option<JoinHandle<()>>>,
+    /// The desks connected to this one, while this app does the listening itself.
+    sessions: Sessions,
 }
 
 /// The command line of a session: `view <target> <flags>`, then `--home` when this app was
@@ -247,16 +249,30 @@ impl Backend {
         }));
         let answers = Answers::default();
         ep.prompt = window_prompt(state.clone(), answers.clone(), waker.clone());
-        Arc::new(Backend {
-            home: home.to_path_buf(),
-            ep,
-            state,
-            answers,
-            waker,
-            runtime,
-            hosting,
-            launch,
-            listening: Mutex::new(None),
+        Arc::new_cyclic(|this: &std::sync::Weak<Backend>| {
+            let this = this.clone();
+            let sessions = Sessions::new(move |names| {
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                // A desk may have been accepted a moment ago: show it as trusted.
+                let lists = this.clone();
+                this.runtime
+                    .spawn(async move { lists.refresh_desks().await });
+                this.update(|s| s.sessions = names);
+            });
+            Backend {
+                home: home.to_path_buf(),
+                ep,
+                state,
+                answers,
+                waker,
+                runtime,
+                hosting,
+                launch,
+                listening: Mutex::new(None),
+                sessions,
+            }
         })
     }
 
@@ -323,9 +339,13 @@ impl Backend {
                     .spawn(async move { this.dial(target, view_only, mute).await });
             }
             Command::DismissDial => self.update(|s| s.dial = Dial::Idle),
-            Command::Answer { id, accept } => {
+            Command::Answer { id, accept, once } => {
                 if let Some(answer) = self.answers.lock().expect("answers").remove(&id) {
-                    let _ = answer.send(accept);
+                    let _ = answer.send(match (accept, once) {
+                        (false, _) => Answer::No,
+                        (true, true) => Answer::Once,
+                        (true, false) => Answer::Always,
+                    });
                 }
             }
             Command::ForgetDesk(address) => {
@@ -361,18 +381,42 @@ impl Backend {
                     tracing::warn!(target: "app", "Settings not saved: {e:#}");
                 }
                 let incoming = settings.allow_incoming;
+                // What a connected desk may do is part of what is listened with.
+                let offer_changed = (
+                    settings.let_control,
+                    settings.let_sound,
+                    settings.let_clipboard,
+                ) != (was.let_control, was.let_sound, was.let_clipboard);
                 self.update(|s| s.settings = settings);
-                if incoming != was.allow_incoming {
+                if incoming != was.allow_incoming || (incoming && offer_changed) {
                     self.set_incoming(incoming);
                 }
             }
+            Command::EndSession(name) => match &self.hosting.control {
+                Some(pipe) => {
+                    let pipe = pipe.clone();
+                    self.runtime.spawn_blocking(move || {
+                        let asked = crate::control::ask(
+                            &pipe,
+                            &crate::control::Request::EndSession { name: name.clone() },
+                        );
+                        if let Err(e) = asked {
+                            tracing::warn!(target: "app", "\"{name}\" not disconnected: {e}");
+                        }
+                    });
+                }
+                None => {
+                    self.sessions.end(&name);
+                }
+            },
         }
     }
 
     /// Starts or stops listening for other desks.
     fn set_incoming(self: &Arc<Self>, on: bool) {
         let mut listening = self.listening.lock().expect("listening task");
-        if let Some(task) = listening.take() {
+        let before = listening.take();
+        if let Some(task) = &before {
             task.abort();
         }
         if !on {
@@ -389,43 +433,38 @@ impl Backend {
         }
         let this = self.clone();
         let test_pattern = self.hosting.test_pattern;
+        let (control, sound, clipboard) = {
+            let state = self.state.lock().expect("app state");
+            (
+                state.settings.let_control,
+                state.settings.let_sound,
+                state.settings.let_clipboard,
+            )
+        };
         *listening = Some(self.runtime.spawn(async move {
+            // The port is free once the listening before this is gone.
+            if let Some(before) = before {
+                let _ = before.await;
+            }
             // Probing the encoders can take a moment; not on the async threads.
-            let config =
-                match tokio::task::spawn_blocking(move || host_config(test_pattern, false, false))
-                    .await
-                {
-                    Ok(config) => config,
-                    Err(e) => {
-                        this.update(|s| s.incoming = Incoming::Failed(e.to_string()));
-                        return;
-                    }
-                };
+            let config = match tokio::task::spawn_blocking(move || {
+                host_config_with(test_pattern, !sound, !clipboard, !control)
+            })
+            .await
+            {
+                Ok(config) => config,
+                Err(e) => {
+                    this.update(|s| s.incoming = Incoming::Failed(e.to_string()));
+                    return;
+                }
+            };
             let mut ep = this.ep.clone();
             match open_listener(&mut ep, &config, &this.hosting.listen_on, this.hosting.port).await
             {
                 Ok(listener) => {
                     tracing::info!(target: "app", "Listening on {:?}.", listener.local_addrs());
                     this.update(|s| s.incoming = Incoming::Listening);
-                    let shown = this.clone();
-                    let on_session = Arc::new(move |event: SessionEvent| {
-                        if matches!(event, SessionEvent::Started(_)) {
-                            // It may have been accepted a moment ago: show it as trusted.
-                            let lists = shown.clone();
-                            shown
-                                .runtime
-                                .spawn(async move { lists.refresh_desks().await });
-                        }
-                        shown.update(|s| match event {
-                            SessionEvent::Started(name) => s.sessions.push(name),
-                            SessionEvent::Ended(name) => {
-                                if let Some(i) = s.sessions.iter().position(|n| *n == name) {
-                                    s.sessions.remove(i);
-                                }
-                            }
-                        });
-                    });
-                    accept_loop(ep, listener, config, on_session).await;
+                    accept_loop(ep, listener, config, this.sessions.clone()).await;
                 }
                 Err(e) => {
                     tracing::warn!(target: "app", "Not listening: {e:#}");
@@ -603,7 +642,7 @@ pub fn run_app(
 /// The window of `illum ask`: one question about a new desk, for the person at this desk. The
 /// installed host starts it and reads the answer from how it ends.
 pub fn run_ask(name: &str, address: &str, fingerprint: &str) -> std::process::ExitCode {
-    use crate::installed::{ASK_ACCEPTED, ASK_DECLINED};
+    use crate::installed::{ASK_ACCEPTED, ASK_DECLINED, ASK_ONCE};
     #[cfg(windows)]
     illum_win::leave_own_console();
     let declined = std::process::ExitCode::from(ASK_DECLINED);
@@ -619,9 +658,13 @@ pub fn run_ask(name: &str, address: &str, fingerprint: &str) -> std::process::Ex
         fingerprint: fingerprint.to_string(),
     });
     let answered = window.run_question(Arc::new(Mutex::new(state)), |command| {
-        if let Command::Answer { accept, .. } = command {
+        if let Command::Answer { accept, once, .. } = command {
             // The answer is the exit code; nothing else is left to do here.
-            std::process::exit(i32::from(if accept { ASK_ACCEPTED } else { ASK_DECLINED }));
+            std::process::exit(i32::from(match (accept, once) {
+                (false, _) => ASK_DECLINED,
+                (true, true) => ASK_ONCE,
+                (true, false) => ASK_ACCEPTED,
+            }));
         }
     });
     if let Err(why) = answered {
@@ -704,6 +747,9 @@ mod tests {
             keyboard: illum_ui::KeyboardMode::Auto,
             pointer: illum_ui::PointerMode::Embedded,
             allow_incoming: true,
+            let_control: false,
+            let_sound: false,
+            let_clipboard: false,
         };
         let home = Path::new("C:\\Program Data\\Illumination");
         for (settings, home) in [(Settings::default(), None), (all, Some(home))] {
@@ -752,7 +798,7 @@ mod tests {
             )),
             device_name: name.into(),
             timeouts: illum_net::Timeouts::default(),
-            prompt: Arc::new(|_| Box::pin(async { false })), // replaced by the window's
+            prompt: Arc::new(|_| Box::pin(async { Answer::No })), // replaced by the window's
             capabilities: illum_net::session::all_capabilities(),
         };
         let launches = Launches::default();
@@ -830,6 +876,7 @@ mod tests {
         viewer.command(Command::Answer {
             id: asked.id,
             accept: true,
+            once: false,
         });
         let asked = wait("the host is asked to accept the viewer", &host, |s| {
             s.questions.front().cloned()
@@ -840,6 +887,7 @@ mod tests {
         host.command(Command::Answer {
             id: asked.id,
             accept: true,
+            once: false,
         });
         wait("the session is opened", &viewer, |s| {
             (s.dial == Dial::Idle && !launches.lock().unwrap().is_empty()).then_some(())
@@ -904,6 +952,7 @@ mod tests {
         host.command(Command::Answer {
             id: asked.id,
             accept: false,
+            once: false,
         });
         wait("the refusal is shown to the viewer", &viewer, |s| {
             matches!(s.dial, Dial::Failed { .. }).then_some(())
@@ -923,5 +972,143 @@ mod tests {
         }));
         assert_eq!(host.state.lock().unwrap().incoming, Incoming::Off);
         assert!(!load_settings(&host.home).allow_incoming, "saved");
+    }
+
+    /// What the person at a desk decides about a desk that reaches it: in for this time
+    /// only, sent away, back without a question while it has just left, and limited in
+    /// what it may do.
+    #[test]
+    fn a_guest_is_let_in_sent_away_and_limited() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (host, port, _) = desk("guarded", &runtime);
+        host.start();
+        wait("the host listens", &host, |s| {
+            (s.incoming == Incoming::Listening).then_some(())
+        });
+        let target = format!("127.0.0.1:{port}");
+        let guest_home =
+            std::env::temp_dir().join(format!("illum-app-guest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&guest_home);
+        let guest = Endpoint {
+            identity: Arc::new(illum_net::Identity::generate().unwrap()),
+            store: Arc::new(tokio::sync::Mutex::new(
+                illum_core::store::TrustStore::load(guest_home.join("trust.json")).unwrap(),
+            )),
+            device_name: "guest".into(),
+            timeouts: illum_net::Timeouts::default(),
+            prompt: Arc::new(|_| Box::pin(async { Answer::Always })),
+            capabilities: illum_net::session::all_capabilities(),
+        };
+        let dial = || {
+            let (guest, target) = (guest.clone(), target.clone());
+            runtime.spawn(async move { connect(&guest, &target).await })
+        };
+        let gone = |host: &Arc<Backend>| {
+            wait("nobody is connected", host, |s| {
+                s.sessions.is_empty().then_some(())
+            })
+        };
+        let this_time = |host: &Arc<Backend>| {
+            let asked = wait("the host is asked", host, |s| s.questions.front().cloned());
+            host.command(Command::Answer {
+                id: asked.id,
+                accept: true,
+                once: true,
+            });
+        };
+
+        // Accepted for this time: connected, and not among the trusted desks.
+        let dialing = dial();
+        this_time(&host);
+        let mut conn = runtime.block_on(dialing).unwrap().unwrap();
+        let offered = conn.peer_hello.clone().unwrap().capabilities;
+        assert!(offered.iter().any(|c| c == "audio"), "{offered:?}");
+        wait("the guest is shown as connected", &host, |s| {
+            (s.sessions == ["guest"]).then_some(())
+        });
+        assert!(host.state.lock().unwrap().trusted.is_empty());
+
+        // Sent away: it is told goodbye, so it does not come back by itself.
+        host.command(Command::EndSession("guest".into()));
+        let said = runtime.block_on(async {
+            loop {
+                match conn.recv_control(Duration::from_secs(5), "goodbye").await {
+                    Ok(ControlMsg::Bye) => break Ok(()),
+                    Ok(_) => {}
+                    Err(e) => break Err(e),
+                }
+            }
+        });
+        assert!(said.is_ok(), "{said:?}");
+        drop(conn);
+        gone(&host);
+
+        // Sent away means asked about again.
+        let dialing = dial();
+        this_time(&host);
+        let conn = runtime.block_on(dialing).unwrap().unwrap();
+        wait("the guest is connected again", &host, |s| {
+            (s.sessions == ["guest"]).then_some(())
+        });
+        // It leaves by itself (a dropped link looks the same): back without a question.
+        drop(conn);
+        gone(&host);
+        let conn = runtime.block_on(dial()).unwrap().unwrap();
+        assert!(host.state.lock().unwrap().questions.is_empty());
+        drop(conn);
+        gone(&host);
+
+        // No sound for whoever connects from now on. (The test pattern has a hum and no
+        // keyboard to switch off; the three switches take the same way.)
+        host.command(Command::SaveSettings(Settings {
+            let_sound: false,
+            ..Settings::default()
+        }));
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        let mut staying = loop {
+            // The host listens anew; for a moment nobody is there.
+            if let Ok(Ok(conn)) = runtime.block_on(dial()) {
+                let offered = conn.peer_hello.clone().unwrap().capabilities;
+                if !offered.iter().any(|c| c == "audio") {
+                    assert!(offered.iter().any(|c| c == "screen"), "{offered:?}");
+                    break conn;
+                }
+            }
+            assert!(std::time::Instant::now() < until, "sound is still offered");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        // Incoming off and on again while that desk is connected: it stays connected, and
+        // the port, which the listening before held a moment ago, is listened on anew.
+        let quiet = Settings {
+            let_sound: false,
+            ..Settings::default()
+        };
+        host.command(Command::SaveSettings(Settings {
+            allow_incoming: false,
+            ..quiet.clone()
+        }));
+        assert_eq!(host.state.lock().unwrap().incoming, Incoming::Off);
+        host.command(Command::SaveSettings(quiet));
+        wait("the host listens again", &host, |s| match &s.incoming {
+            Incoming::Listening => Some(()),
+            Incoming::Failed(why) => panic!("the host cannot listen again: {why}"),
+            Incoming::Off => None,
+        });
+        let second = runtime.block_on(dial()).unwrap().unwrap();
+        wait("both are shown as connected", &host, |s| {
+            (s.sessions == ["guest", "guest"]).then_some(())
+        });
+        staying.send_control(&ControlMsg::Ping { seq: 7 });
+        let answered = runtime.block_on(staying.recv_control(Duration::from_secs(5), "pong"));
+        assert!(
+            matches!(answered, Ok(ControlMsg::Pong { seq: 7 })),
+            "{answered:?}"
+        );
+        drop(second);
+        let _ = std::fs::remove_dir_all(&guest_home);
     }
 }

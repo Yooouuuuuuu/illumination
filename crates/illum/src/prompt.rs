@@ -17,6 +17,7 @@ pub fn console_prompt() -> Prompt {
             tokio::task::spawn_blocking(move || ask(&req))
                 .await
                 .unwrap_or(false)
+                .into()
         })
     })
 }

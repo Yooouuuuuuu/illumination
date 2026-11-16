@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 #[derive(Debug, Clone)]
@@ -58,8 +58,25 @@ pub struct PromptRequest {
     pub address: String,
 }
 
+/// What the person said to a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    No,
+    /// Yes for this time; nothing is remembered. (For a host's key this is the same as
+    /// `Always`: a key is checked once.)
+    Once,
+    /// Yes, and remembered.
+    Always,
+}
+
+impl From<bool> for Answer {
+    fn from(yes: bool) -> Answer {
+        if yes { Answer::Always } else { Answer::No }
+    }
+}
+
 pub type Prompt =
-    Arc<dyn Fn(PromptRequest) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+    Arc<dyn Fn(PromptRequest) -> Pin<Box<dyn Future<Output = Answer> + Send>> + Send + Sync>;
 
 /// Everything one side needs to connect or accept.
 #[derive(Clone)]
@@ -199,8 +216,8 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
             };
             let trusted = tokio::time::timeout(t.prompt, (ep.prompt)(request))
                 .await
-                .unwrap_or(false);
-            if !trusted {
+                .unwrap_or(Answer::No);
+            if trusted == Answer::No {
                 return Err(NetError::NotTrusted);
             }
             true
@@ -280,7 +297,8 @@ pub async fn accept(
         if known {
             store.touch_peer(fingerprint.as_str(), &address)?;
         }
-        known
+        // Or accepted for this time, and still here or just gone.
+        known || store.guest_allowed(fingerprint.as_str())
     };
     if !paired {
         let request = PromptRequest {
@@ -291,8 +309,8 @@ pub async fn accept(
         };
         let accepted = tokio::time::timeout(t.prompt, (ep.prompt)(request))
             .await
-            .unwrap_or(false);
-        if !accepted {
+            .unwrap_or(Answer::No);
+        if accepted == Answer::No {
             let reason = "not accepted by the person at the host".to_string();
             conn.send_control(&ControlMsg::Denied {
                 reason: reason.clone(),
@@ -300,10 +318,12 @@ pub async fn accept(
             conn.close(t.hello).await;
             return Err(NetError::Denied(reason));
         }
-        ep.store
-            .lock()
-            .await
-            .pair(fingerprint.as_str(), &hello.device_name, &address)?;
+        let mut store = ep.store.lock().await;
+        if accepted == Answer::Once {
+            store.admit_guest(fingerprint.as_str());
+        } else {
+            store.pair(fingerprint.as_str(), &hello.device_name, &address)?;
+        }
     }
     conn.send_control(&ControlMsg::Accepted);
     conn.peer_hello = Some(hello);
@@ -332,7 +352,8 @@ pub async fn serve_host_session(mut conn: Connection, idle: Duration) -> Result<
 /// TCP listeners on the chosen addresses, merged into one stream of incoming connections, plus
 /// the UDP media sockets on the same port number.
 pub struct Listener {
-    incoming: mpsc::Receiver<(TcpStream, SocketAddr)>,
+    /// Dropped with the listener, so the port is free the moment it is.
+    listeners: Vec<TcpListener>,
     local: Vec<SocketAddr>,
     acceptor: TlsAcceptor,
     media: Arc<MediaHub>,
@@ -343,7 +364,6 @@ impl Listener {
     /// UDP uses the same number (tests); otherwise both use `port`.
     pub async fn bind(ep: &Endpoint, addrs: &[IpAddr], port: u16) -> Result<Listener> {
         let acceptor = TlsAcceptor::from(tls::server_config(&ep.identity)?);
-        let (tx, incoming) = mpsc::channel(16);
         // With port 0 (tests) TCP and UDP must share one number that both can bind. Windows
         // reserves scattered blocks of ports (Hyper-V, WSL), separately for TCP and UDP, and
         // refuses them with WSAEACCES (10013); its own ephemeral choice walks sequentially, so
@@ -404,18 +424,8 @@ impl Listener {
                 NetError::Io(std::io::Error::other("could not bind the media port"))
             }));
         };
-        for listener in listeners {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                while let Ok(pair) = listener.accept().await {
-                    if tx.send(pair).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
         Ok(Listener {
-            incoming,
+            listeners,
             local,
             acceptor,
             media,
@@ -435,8 +445,29 @@ impl Listener {
         self.acceptor.clone()
     }
 
+    /// The next connection on any of the addresses. `None` when listening has broken down.
     pub async fn next(&mut self) -> Option<(TcpStream, SocketAddr)> {
-        self.incoming.recv().await
+        let mut failures = 0u32;
+        std::future::poll_fn(|cx| {
+            for listener in &self.listeners {
+                match listener.poll_accept(cx) {
+                    std::task::Poll::Ready(Ok(pair)) => return std::task::Poll::Ready(Some(pair)),
+                    // A connection that went away before it was taken is nothing; a listener
+                    // that only fails is the end.
+                    std::task::Poll::Ready(Err(e)) => {
+                        failures += 1;
+                        if failures > 100 {
+                            tracing::warn!(target: "net", "Listening failed: {e}");
+                            return std::task::Poll::Ready(None);
+                        }
+                        cx.waker().wake_by_ref();
+                    }
+                    std::task::Poll::Pending => {}
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
     }
 }
 

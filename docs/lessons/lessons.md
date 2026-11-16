@@ -298,3 +298,23 @@ unassigned block 28241–28588), outside Windows' outgoing-port range (49152+), 
 range on this PC, and used by no well-known program.
 
 Milestone targets in [`../roadmap/roadmap.md`](../roadmap/roadmap.md) are measured on this setup.
+
+## Listening again in the same process (found 2026-11-16, fixed in v0.13.2)
+
+Since v0.5.0 a host that stopped listening never gave its port back. Two things held it:
+- each TCP listener sat in a task of its own that only ended when it tried to hand over the
+  *next* connection, so the socket stayed open until somebody dialled once more;
+- each UDP socket had a receive thread that held the hub that owned the sockets, a circle
+  nothing broke.
+
+Nothing showed it while a host listened once per process. The app's "Allow incoming
+connections" switched off and on again, and the installed host listening anew for any
+reason, ran into "address in use". It was found by a test that changes a setting while a
+desk is connected, not by use.
+
+What it is now: the listener owns its TCP sockets and polls them itself, so dropping it
+closes them at once; the receive threads hold the hub weakly and end when everyone else let
+go (the hub wakes them as it goes); and binding the media port again while sessions of the
+listening before still run gives back the hub they hold, since the port is one and in use.
+
+The lesson: a thing that is started must have a test that stops it and starts it again.

@@ -111,7 +111,8 @@ and control processes yet.
   for the account signed in at the host's screen, and answered only for a program in the
   host's own session. A request is one line of JSON and so is the answer; there are two
   kinds, a change to the desks (remember a host's key, forget a host, forget a trusted
-  desk; `illum_core::store::Change`) and the settings. The host serves one program at a
+  desk; `illum_core::store::Change`), the settings, and (v0.13.2) ending the sessions of a
+  connected desk. The host serves one program at a
   time and opens the pipe anew for each, refusing to open it if one of that name exists
   already, and at least every five seconds, so that it is open for whoever signed in
   since. The trust store itself routes its changes (`TrustStore::write_through`), so the
@@ -1042,6 +1043,25 @@ Initial permissions:
 
 Settings are stored per paired device. The config format is **versioned** from day one (AnyDesk
 logs `Migrating V0 -> V1`).
+
+*v0.13.2, what is built of this:* the person at a desk decides three things about the desks
+that reach it.
+- **What a connected desk may do**, for all of them alike, in Settings: use the keyboard and
+  mouse, hear this desk's sound, share the clipboard (`let_control`, `let_sound`,
+  `let_clipboard`; the screen is always seen). The host leaves what is switched off out of
+  what it offers in its hello, so the controller's window shows a host that cannot be
+  controlled as view-only by the means it already had. A change makes the host listen anew
+  with the new offer; a desk connected at that moment keeps what it had until it connects
+  again. Per-desk settings are not built.
+- **In for this time only.** The question about a new desk has three answers: decline,
+  "This time", "Accept and trust". A desk let in for this time is not written anywhere: it
+  is kept in memory (`TrustStore::admit_guest`) while it is connected and for two minutes
+  after its last session here ended, so that a dropped link, or the session that follows the
+  app's first reach, does not ask again.
+- **Sending a desk away.** Each connected desk is shown on the home screen with a
+  "Disconnect" button. The host tells the controller goodbye, so its window closes and
+  does not take it for a dropped link and come back. A desk in for this time is asked about
+  again at once; a trusted desk can simply connect again (forget it to stop that).
 
 ## 10. Session policy
 

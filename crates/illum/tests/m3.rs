@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 fn endpoint(name: &str) -> Endpoint {
     let dir = std::env::temp_dir().join(format!("illum-m3-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let yes: Prompt = Arc::new(|_| Box::pin(async { true }));
+    let yes: Prompt = Arc::new(|_| Box::pin(async { illum_net::Answer::Always }));
     Endpoint {
         identity: Arc::new(Identity::generate().unwrap()),
         store: Arc::new(tokio::sync::Mutex::new(
@@ -93,7 +93,14 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
         let conn = accept(&host, &listener.acceptor(), tcp, peer)
             .await
             .unwrap();
-        let _ = serve_session(conn, config, Duration::from_secs(30), listener.media()).await;
+        let _ = serve_session(
+            conn,
+            config,
+            Duration::from_secs(30),
+            listener.media(),
+            Default::default(),
+        )
+        .await;
     });
 
     let conn = connect(&endpoint("ctl"), &addr.to_string()).await.unwrap();

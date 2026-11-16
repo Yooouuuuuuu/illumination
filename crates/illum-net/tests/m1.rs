@@ -29,7 +29,7 @@ fn side(name: &str, answer: bool, timeouts: Timeouts) -> Side {
     let p = prompts.clone();
     let prompt: Prompt = Arc::new(move |_req| {
         p.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move { answer })
+        Box::pin(async move { answer.into() })
     });
     let ep = Endpoint {
         identity: Arc::new(Identity::generate().unwrap()),
@@ -215,7 +215,7 @@ async fn silent_controller_cannot_hang_the_host() {
 async fn unanswered_pairing_prompt_times_out_as_refusal() {
     let mut host = side("host-g", true, short_timeouts());
     // A prompt nobody answers.
-    host.ep.prompt = Arc::new(|_req| Box::pin(std::future::pending::<bool>()));
+    host.ep.prompt = Arc::new(|_req| Box::pin(std::future::pending::<illum_net::Answer>()));
     let ctl = side("ctl-g", true, short_timeouts());
     let addr = start_host(&host).await;
     let err = connect(&ctl.ep, &addr.to_string()).await.err().unwrap();
@@ -250,7 +250,7 @@ async fn prompts_carry_the_right_details() {
     let s = seen.clone();
     ctl.ep.prompt = Arc::new(move |req| {
         s.lock().unwrap().push(req);
-        Box::pin(async { true })
+        Box::pin(async { illum_net::Answer::Always })
     });
     let conn = connect(&ctl.ep, &addr.to_string()).await.unwrap();
     conn.close(Duration::from_secs(1)).await;

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 fn endpoint(name: &str) -> Endpoint {
     let dir = std::env::temp_dir().join(format!("illum-m8-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let yes: Prompt = Arc::new(|_| Box::pin(async { true }));
+    let yes: Prompt = Arc::new(|_| Box::pin(async { illum_net::Answer::Always }));
     Endpoint {
         identity: Arc::new(Identity::generate().unwrap()),
         store: Arc::new(tokio::sync::Mutex::new(
@@ -50,7 +50,14 @@ async fn start_host(name: &str) -> SocketAddr {
                         screen: Some(factory),
                         ..HostConfig::default()
                     };
-                    let _ = serve_session(conn, config, Duration::from_secs(30), media).await;
+                    let _ = serve_session(
+                        conn,
+                        config,
+                        Duration::from_secs(30),
+                        media,
+                        Default::default(),
+                    )
+                    .await;
                 }
             });
         }

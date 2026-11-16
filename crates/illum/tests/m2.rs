@@ -27,7 +27,7 @@ const H: u32 = 360;
 fn endpoint_with(name: &str, extra: &[String]) -> Endpoint {
     let dir = std::env::temp_dir().join(format!("illum-m2-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let yes: Prompt = Arc::new(|_| Box::pin(async { true }));
+    let yes: Prompt = Arc::new(|_| Box::pin(async { illum_net::Answer::Always }));
     let mut capabilities = illum_net::session::all_capabilities();
     capabilities.extend_from_slice(extra);
     Endpoint {
@@ -79,7 +79,14 @@ async fn start_host_with(
                         })),
                         ..HostConfig::default()
                     };
-                    let _ = serve_session(conn, config, Duration::from_secs(30), media).await;
+                    let _ = serve_session(
+                        conn,
+                        config,
+                        Duration::from_secs(30),
+                        media,
+                        Default::default(),
+                    )
+                    .await;
                 }
             });
         }

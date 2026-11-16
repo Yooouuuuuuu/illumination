@@ -3,10 +3,10 @@
 //! Stored as versioned JSON (architecture §9).
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STORE_VERSION: u32 = 1;
 
@@ -73,6 +73,18 @@ pub enum Change {
 /// changed.
 pub type Through = Arc<dyn Fn(&Change) -> Result<bool, String> + Send + Sync>;
 
+/// How long a desk accepted "this time" may come back after its last session here ended: a
+/// reconnection after a dropped link, or the session that follows the app's first reach.
+pub const GUEST_GRACE: Duration = Duration::from_secs(120);
+
+/// A desk accepted for this time only. Kept in memory, never written.
+#[derive(Debug, Clone, Copy)]
+struct Guest {
+    sessions: u32,
+    /// With no session: until when it may still come back.
+    until: Instant,
+}
+
 /// One writer at a time in this process, from reading the file to replacing it.
 static WRITING: Mutex<()> = Mutex::new(());
 
@@ -83,6 +95,7 @@ pub struct TrustStore {
     seen: Option<SystemTime>,
     /// Set when this process may not write the file itself.
     through: Option<Through>,
+    guests: HashMap<String, Guest>,
 }
 
 impl std::fmt::Debug for TrustStore {
@@ -137,6 +150,7 @@ impl TrustStore {
             data,
             seen,
             through: None,
+            guests: HashMap::new(),
         })
     }
 
@@ -270,6 +284,45 @@ impl TrustStore {
         }
     }
 
+    /// Lets a desk in for this time without remembering it (the person chose "this time").
+    pub fn admit_guest(&mut self, fingerprint: &str) {
+        self.guests.insert(
+            fingerprint.to_string(),
+            Guest {
+                sessions: 0,
+                until: Instant::now() + GUEST_GRACE,
+            },
+        );
+    }
+
+    /// Whether a desk accepted for this time may (still) connect without being asked about.
+    pub fn guest_allowed(&mut self, fingerprint: &str) -> bool {
+        let now = Instant::now();
+        self.guests
+            .retain(|_, guest| guest.sessions > 0 || guest.until > now);
+        self.guests.contains_key(fingerprint)
+    }
+
+    /// A session with a guest began.
+    pub fn guest_entered(&mut self, fingerprint: &str) {
+        if let Some(guest) = self.guests.get_mut(fingerprint) {
+            guest.sessions += 1;
+        }
+    }
+
+    /// A session with a guest ended; after the last, it may come back for [`GUEST_GRACE`].
+    pub fn guest_left(&mut self, fingerprint: &str) {
+        if let Some(guest) = self.guests.get_mut(fingerprint) {
+            guest.sessions = guest.sessions.saturating_sub(1);
+            guest.until = Instant::now() + GUEST_GRACE;
+        }
+    }
+
+    /// The person ended a guest's session: it is asked about again at once.
+    pub fn dismiss_guest(&mut self, fingerprint: &str) {
+        self.guests.remove(fingerprint);
+    }
+
     pub fn paired_peers(&self) -> impl Iterator<Item = (&String, &PairedPeer)> {
         self.data.paired_peers.iter()
     }
@@ -396,6 +449,16 @@ mod through_tests {
             .unwrap();
         assert!(app.forget_peer("ff").unwrap());
         assert!(service.lock().unwrap().paired_peer("ff").is_none());
+        // A guest gets in while it is connected and for a while after, and is never written.
+        assert!(!app.guest_allowed("9a"));
+        app.admit_guest("9a");
+        app.guest_entered("9a");
+        assert!(app.guest_allowed("9a"));
+        app.guest_left("9a");
+        assert!(app.guest_allowed("9a"), "may come back");
+        app.dismiss_guest("9a");
+        assert!(!app.guest_allowed("9a"));
+        assert!(app.paired_peer("9a").is_none());
         // A service that refuses is an error, not a silent success.
         app.write_through(Arc::new(|_| Err("no".to_string())));
         assert!(matches!(

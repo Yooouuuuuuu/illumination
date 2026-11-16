@@ -11,6 +11,36 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-16
+
+Not released.
+
+### Added
+
+- **Disconnect a desk that is connected to this one.** The home screen lists
+  each connected desk with a "Disconnect" button. Its window closes and it does
+  not reconnect by itself.
+- **Accept a new desk for this time only.** The question about a new desk now
+  has "This time" next to "Accept and trust": it is let in now and not
+  remembered. A dropped link within two minutes does not ask again; being
+  disconnected from here does.
+- **Choose what a connected desk may do.** Settings has "When another desk
+  connects here": use the keyboard and mouse, hear this desk's sound, share the
+  clipboard. A desk connected at that moment keeps what it had until it
+  connects again.
+
+### Fixed
+
+- **"Allow incoming connections" can be switched off and on again.** A desk
+  that stopped listening never gave its port back, so switching it on again
+  failed with "another Illumination is already listening" until the app, or
+  the installed service, was restarted. Present since 0.5.0.
+
+Verified with cargo fmt, cargo clippy and cargo test, on one PC: a desk let in
+for this time, sent away, asked about again, back without a question after
+leaving by itself, the sound switched off for the next connection, and incoming
+switched off and on while a desk stays connected.
+
 ## [0.13.1] - 2026-11-16
 
 Not released.

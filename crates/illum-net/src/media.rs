@@ -296,13 +296,63 @@ pub struct MediaHub {
     port: u16,
 }
 
+impl Drop for MediaHub {
+    fn drop(&mut self) {
+        // Wakes each receive thread, which then finds the hub gone and lets its socket go.
+        for socket in &self.sockets {
+            if let Ok(own) = socket.local_addr() {
+                let _ = socket.send_to(&[], own);
+            }
+        }
+    }
+}
+
 impl MediaHub {
     /// Binds UDP on every address at `port` and starts a receive thread per socket.
+    ///
+    /// A hub lives for as long as a listener or a session holds it, and its sockets with it.
+    /// A host that listens anew while sessions of the listening before still run (the person
+    /// changed a setting) gets the same hub back: the port is one, and it is in use.
     pub fn bind(addrs: &[IpAddr], port: u16) -> Result<Arc<MediaHub>> {
+        static LIVE: Mutex<Vec<std::sync::Weak<MediaHub>>> = Mutex::new(Vec::new());
+        let mut live = LIVE.lock().expect("live hubs");
+        live.retain(|hub| hub.strong_count() > 0);
+        if port != 0 {
+            let same = live
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .find(|hub| {
+                    hub.port == port
+                        && hub.sockets.len() == addrs.len()
+                        && hub
+                            .sockets
+                            .iter()
+                            .zip(addrs)
+                            .all(|(s, ip)| s.local_addr().is_ok_and(|a| a.ip() == *ip))
+                });
+            if let Some(hub) = same {
+                return Ok(hub);
+            }
+        }
         let mut sockets = Vec::new();
         for ip in addrs {
-            let socket = UdpSocket::bind(SocketAddr::new(*ip, port))?;
+            // A hub let go a moment ago gives its port back as its receive thread ends.
+            let mut tries = 0;
+            let socket = loop {
+                match UdpSocket::bind(SocketAddr::new(*ip, port)) {
+                    Ok(socket) => break socket,
+                    Err(e)
+                        if port != 0 && tries < 10 && e.kind() == std::io::ErrorKind::AddrInUse =>
+                    {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
             enlarge_buffers(&socket);
+            // So that a receive thread whose hub is gone finds out even if nothing arrives.
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
             sockets.push(Arc::new(socket));
         }
         let bound_port = sockets
@@ -316,12 +366,14 @@ impl MediaHub {
             port: bound_port,
         });
         for socket in &hub.sockets {
-            let (socket, hub) = (socket.clone(), hub.clone());
+            // The thread does not keep the hub alive: it ends when everyone else let go.
+            let (socket, hub) = (socket.clone(), Arc::downgrade(&hub));
             std::thread::Builder::new()
                 .name("media-rx".into())
-                .spawn(move || hub.receive_loop(&socket))
+                .spawn(move || MediaHub::receive_loop(&hub, &socket))
                 .expect("spawn media receive thread");
         }
+        live.push(Arc::downgrade(&hub));
         Ok(hub)
     }
 
@@ -361,20 +413,34 @@ impl MediaHub {
             .remove(&session_id);
     }
 
-    fn receive_loop(&self, socket: &UdpSocket) {
+    fn receive_loop(hub: &std::sync::Weak<MediaHub>, socket: &UdpSocket) {
         let mut buf = vec![0u8; 2048];
         loop {
-            let (len, from) = match socket.recv_from(&mut buf) {
+            let received = socket.recv_from(&mut buf);
+            // Nobody holds the hub any more: let the socket, and with it the port, go.
+            let Some(this) = hub.upgrade() else {
+                return;
+            };
+            let this = &*this;
+            let (len, from) = match received {
                 Ok(x) => x,
                 // Windows reports ICMP "port unreachable" on the receiving socket; ignore it.
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
                 Err(_) => return,
             };
             let datagram = &buf[..len];
             let Some(id) = peek_session_id(datagram) else {
                 continue;
             };
-            let Some(session) = self
+            let Some(session) = this
                 .sessions
                 .lock()
                 .expect("sessions lock")

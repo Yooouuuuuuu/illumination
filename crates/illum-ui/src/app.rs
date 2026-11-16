@@ -63,6 +63,10 @@ pub struct Settings {
     pub clipboard: bool,
     /// Listen for other desks while the app is open.
     pub allow_incoming: bool,
+    /// What a desk connected to this one may do, besides seeing the screen.
+    pub let_control: bool,
+    pub let_sound: bool,
+    pub let_clipboard: bool,
 }
 
 impl Default for Settings {
@@ -78,6 +82,9 @@ impl Default for Settings {
             sound: true,
             clipboard: true,
             allow_incoming: true,
+            let_control: true,
+            let_sound: true,
+            let_clipboard: true,
         }
     }
 }
@@ -172,9 +179,13 @@ pub enum Command {
     Answer {
         id: u64,
         accept: bool,
+        /// Accepted for this time only: nothing is remembered.
+        once: bool,
     },
     ForgetDesk(String),
     ForgetTrusted(String),
+    /// End the sessions of the desk of this name that is connected to this one.
+    EndSession(String),
     SaveSettings(Settings),
 }
 
@@ -802,6 +813,16 @@ fn this_desk(
                 RichText::new(format!("Can't accept connections: {why}")).font(semibold(14.0)),
             );
         }
+        for name in &state.sessions {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{name} is connected")).font(semibold(15.0)));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(button("Disconnect", WHITE, 36.0)).clicked() {
+                        out.push(Command::EndSession(name.clone()));
+                    }
+                });
+            });
+        }
         let line = ui.available_rect_before_wrap();
         ui.painter().line_segment(
             [line.left_top(), egui::pos2(line.right(), line.top())],
@@ -1027,6 +1048,17 @@ fn settings(ui: &mut Ui, state: &AppState, out: &mut Vec<Command>) {
     });
     card(ui, WHITE, |ui| {
         ui.set_width(ui.available_width());
+        title(ui, "When another desk connects here");
+        ui.label(muted(
+            "It always sees this screen. A desk connected now keeps what it had until it \
+             connects again.",
+        ));
+        ui.checkbox(&mut s.let_control, "It may use the keyboard and mouse");
+        ui.checkbox(&mut s.let_sound, "It may hear this desk's sound");
+        ui.checkbox(&mut s.let_clipboard, "It may share the clipboard");
+    });
+    card(ui, WHITE, |ui| {
+        ui.set_width(ui.available_width());
         title(ui, "Trusted desks");
         ui.label(muted(
             "These connect to this desk without asking. Forget one and it has to be accepted \
@@ -1137,8 +1169,9 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
                     QuestionKind::AcceptDesk => (
                         "It shows this key:",
                         "It should match the key on that desk's own screen. Accepting lets it \
-                         see this screen, use the keyboard and mouse, share the clipboard and \
-                         hear this desk's sound, now and next time without asking.",
+                         see this screen and, as far as this desk's settings allow, use the \
+                         keyboard and mouse, share the clipboard and hear its sound. \
+                         \"Accept and trust\" also lets it in next time without asking.",
                         "Accept and trust",
                         "Decline",
                     ),
@@ -1166,13 +1199,27 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let w = ui.available_width();
+                    let once = q.kind == QuestionKind::AcceptDesk;
+                    let no_width = if once { w * 0.24 } else { w * 0.34 };
                     if ui
-                        .add(button(no, WHITE, 48.0).min_size(vec2(w * 0.34, 48.0)))
+                        .add(button(no, WHITE, 48.0).min_size(vec2(no_width, 48.0)))
                         .clicked()
                     {
                         out.push(Command::Answer {
                             id: q.id,
                             accept: false,
+                            once: false,
+                        });
+                    }
+                    if once
+                        && ui
+                            .add(button("This time", WHITE, 48.0).min_size(vec2(w * 0.26, 48.0)))
+                            .clicked()
+                    {
+                        out.push(Command::Answer {
+                            id: q.id,
+                            accept: true,
+                            once: true,
                         });
                     }
                     if ui
@@ -1182,6 +1229,7 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
                         out.push(Command::Answer {
                             id: q.id,
                             accept: true,
+                            once: false,
                         });
                     }
                 });

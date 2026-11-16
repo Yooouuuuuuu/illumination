@@ -21,6 +21,8 @@ pub enum Request {
     Trust { change: Change },
     /// The settings as the person left them.
     Settings { settings: Settings },
+    /// End the sessions of the desk of this name that is connected to this one.
+    EndSession { name: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,8 +49,11 @@ pub fn pipe_name(home: &Path, usual: bool) -> String {
     format!(r"\\.\pipe\Illumination-{hash:016x}")
 }
 
+/// Ends the sessions of the desk of that name; says how many there were.
+pub type EndSessions = Arc<dyn Fn(&str) -> usize + Send + Sync>;
+
 /// Carries out one request in the home folder. This is the host's side.
-pub fn carry_out(home: &Path, request: &Request) -> Reply {
+pub fn carry_out(home: &Path, end: &EndSessions, request: &Request) -> Reply {
     let done = match request {
         Request::Trust { change } => TrustStore::load(home.join("trust.json"))
             .and_then(|mut store| store.apply(change))
@@ -56,6 +61,7 @@ pub fn carry_out(home: &Path, request: &Request) -> Reply {
         Request::Settings { settings } => crate::app::save_settings(home, settings)
             .map(|()| true)
             .map_err(|e| format!("{e:#}")),
+        Request::EndSession { name } => Ok(end(name) > 0),
     };
     match done {
         Ok(changed) => Reply {
@@ -72,7 +78,7 @@ pub fn carry_out(home: &Path, request: &Request) -> Reply {
 }
 
 /// Answers one line.
-fn answer(home: &Path, line: &str) -> Reply {
+fn answer(home: &Path, end: &EndSessions, line: &str) -> Reply {
     let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(e) => {
@@ -97,9 +103,10 @@ fn answer(home: &Path, line: &str) -> Reply {
             "save the settings (incoming {})",
             if settings.allow_incoming { "on" } else { "off" }
         ),
+        Request::EndSession { name } => format!("disconnect \"{name}\""),
     };
     tracing::info!(target: "service", "Asked by the app: {what}.");
-    let reply = carry_out(home, &request);
+    let reply = carry_out(home, end, &request);
     if !reply.ok {
         tracing::warn!(target: "service", "Not done: {}", reply.why);
     }
@@ -159,12 +166,12 @@ pub fn trust_through(pipe: String) -> Through {
 /// line and given one. Opened for the system and for whoever is signed in at this screen
 /// now; when run by hand (not as the system), for the person running it.
 #[cfg(windows)]
-pub async fn serve(home: std::path::PathBuf, pipe: String) {
+pub async fn serve(home: std::path::PathBuf, pipe: String, end: EndSessions) {
     if illum_win::runs_as_system() {
         let signed_in = || illum_win::own_session().and_then(illum_win::session_user_sid);
-        serve_for(home, pipe, Some(signed_in)).await
+        serve_for(home, pipe, end, Some(signed_in)).await
     } else {
-        serve_for(home, pipe, None::<fn() -> Option<String>>).await
+        serve_for(home, pipe, end, None::<fn() -> Option<String>>).await
     }
 }
 
@@ -174,6 +181,7 @@ pub async fn serve(home: std::path::PathBuf, pipe: String) {
 async fn serve_for(
     home: std::path::PathBuf,
     pipe: String,
+    end: EndSessions,
     guest: Option<impl Fn() -> Option<String>>,
 ) {
     use std::os::windows::io::AsRawHandle;
@@ -237,6 +245,7 @@ async fn serve_for(
             continue;
         }
         let home = home.clone();
+        let end = end.clone();
         let served = async move {
             let (reading, mut writing) = tokio::io::split(server);
             let mut reading = BufReader::new(reading);
@@ -245,7 +254,7 @@ async fn serve_for(
                 .take(LONGEST_REQUEST)
                 .read_line(&mut line)
                 .await?;
-            let reply = tokio::task::spawn_blocking(move || answer(&home, line.trim()))
+            let reply = tokio::task::spawn_blocking(move || answer(&home, &end, line.trim()))
                 .await
                 .map_err(std::io::Error::other)?;
             let mut text = serde_json::to_string(&reply).map_err(std::io::Error::other)?;
@@ -268,7 +277,7 @@ async fn serve_for(
 }
 
 #[cfg(not(windows))]
-pub async fn serve(_home: std::path::PathBuf, _pipe: String) {
+pub async fn serve(_home: std::path::PathBuf, _pipe: String, _end: EndSessions) {
     // No installed service on the other systems yet (architecture §3).
     std::future::pending::<()>().await
 }
@@ -289,7 +298,13 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let serving = runtime.spawn(serve(home.clone(), pipe.clone()));
+        let ended = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let noted = ended.clone();
+        let end: EndSessions = Arc::new(move |name: &str| {
+            noted.lock().unwrap().push(name.to_string());
+            usize::from(name == "laptop")
+        });
+        let serving = runtime.spawn(serve(home.clone(), pipe.clone(), end));
 
         let mut store = TrustStore::load(home.join("trust.json")).unwrap();
         store.write_through(trust_through(pipe.clone()));
@@ -319,6 +334,19 @@ mod tests {
             Ok(true)
         );
         assert_eq!(crate::app::load_settings(&home), settings);
+
+        // Ending a session reaches the host's own hand for it, and says whether there was one.
+        let end_of = |name: &str| {
+            ask(
+                &pipe,
+                &Request::EndSession {
+                    name: name.to_string(),
+                },
+            )
+        };
+        assert_eq!(end_of("laptop"), Ok(true));
+        assert_eq!(end_of("nobody"), Ok(false));
+        assert_eq!(*ended.lock().unwrap(), ["laptop", "nobody"]);
 
         // Something that is not a request gets an answer saying so, and the pipe lives on.
         {
@@ -381,6 +409,7 @@ mod tests {
         let serving = runtime.spawn(serve_for(
             home.clone(),
             pipe.clone(),
+            Arc::new(|_| 0),
             Some(move || Some(guest.clone())),
         ));
         assert_eq!(ask(&pipe, &request), Ok(true), "the account named gets in");
@@ -390,7 +419,12 @@ mod tests {
         // Nobody signed in. (A test run as the system itself would get in; none is.)
         if !illum_win::runs_as_system() {
             let pipe = pipe_name(&home.join("nobody"), false);
-            let serving = runtime.spawn(serve_for(home.clone(), pipe.clone(), Some(|| None)));
+            let serving = runtime.spawn(serve_for(
+                home.clone(),
+                pipe.clone(),
+                Arc::new(|_| 0),
+                Some(|| None),
+            ));
             let refused = ask(&pipe, &request).unwrap_err();
             assert!(refused.contains("does not answer"), "{refused}");
             serving.abort();

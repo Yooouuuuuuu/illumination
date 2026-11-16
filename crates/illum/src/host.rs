@@ -977,12 +977,15 @@ impl Drop for MediaLink {
     }
 }
 
-/// Serves one accepted session until the controller says bye, disconnects or goes idle.
+/// Serves one accepted session until the controller says bye, disconnects or goes idle. `end`
+/// is the person at this desk ending it: the controller is told goodbye, so it does not take
+/// it for a dropped link and come back.
 pub async fn serve_session(
     mut conn: Connection,
     config: HostConfig,
     idle: Duration,
     media: Arc<MediaHub>,
+    end: Arc<tokio::sync::Notify>,
 ) -> Result<(), NetError> {
     let mut capture: Option<Capture> = None;
     let mut link: Option<MediaLink> = None;
@@ -1003,7 +1006,14 @@ pub async fn serve_session(
         None
     };
     let result = loop {
-        let frame = match tokio::time::timeout(idle, conn.recv()).await {
+        let received = tokio::select! {
+            received = tokio::time::timeout(idle, conn.recv()) => received,
+            () = end.notified() => {
+                conn.send_control(&ControlMsg::Bye);
+                break Ok(());
+            }
+        };
+        let frame = match received {
             Err(_) => break Err(NetError::Timeout("session (idle)")),
             Ok(Err(err)) => break Err(err),
             Ok(Ok(None)) => break Ok(()),

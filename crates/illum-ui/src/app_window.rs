@@ -538,8 +538,16 @@ mod tests {
             address: "100.64.0.31:28326".into(),
             fingerprint: first_time.desks[1].fingerprint.clone(),
         });
+        let mut connected = sample_state();
+        connected.sessions = vec!["studio-laptop".into()];
         let screens = [
             ("home", HomeUi::default(), sample_state(), (1120.0, 760.0)),
+            (
+                "home-connected",
+                HomeUi::default(),
+                connected,
+                (1120.0, 760.0),
+            ),
             (
                 "home-narrow",
                 HomeUi::default(),
@@ -550,7 +558,7 @@ mod tests {
                 "settings",
                 HomeUi::on_settings(),
                 sample_state(),
-                (1120.0, 1100.0),
+                (1120.0, 1500.0),
             ),
             ("accept", HomeUi::default(), with_question, (1120.0, 760.0)),
             (

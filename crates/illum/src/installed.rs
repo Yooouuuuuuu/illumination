@@ -13,9 +13,9 @@
 //!   desk's question is a small window the host starts as the person (`illum ask`); its exit
 //!   code is the answer.
 
-use crate::{SessionEvent, accept_loop, endpoint, host_config, open_listener};
+use crate::{Sessions, accept_loop, endpoint, host_config_with, open_listener};
 use anyhow::{Context, Result, bail};
-use illum_net::{Prompt, PromptKind, PromptRequest, bind};
+use illum_net::{Answer, Prompt, PromptKind, PromptRequest, bind};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -28,9 +28,20 @@ const HOST_LOOK: Duration = Duration::from_secs(1);
 /// How long the host waits before trying again after it could not listen (no tailnet address
 /// yet after a start with Windows, the port still held by an app that is closing).
 const HOST_RETRY: Duration = Duration::from_secs(5);
-/// `illum ask` exits with this when the person accepted.
+/// `illum ask` exits with this when the person accepted and the desk is to be remembered.
 pub const ASK_ACCEPTED: u8 = 0;
 pub const ASK_DECLINED: u8 = 1;
+/// Accepted for this time only.
+pub const ASK_ONCE: u8 = 2;
+
+/// What `illum ask` said by how it ended. Anything unexpected (closed, crashed) is a no.
+fn answer_of(code: Option<i64>) -> Answer {
+    match code {
+        Some(c) if c == i64::from(ASK_ACCEPTED) => Answer::Always,
+        Some(c) if c == i64::from(ASK_ONCE) => Answer::Once,
+        _ => Answer::No,
+    }
+}
 
 /// What the installed host is doing, for the app to show. Written by the host on every
 /// change; read by the app.
@@ -83,6 +94,16 @@ impl Told {
     }
 }
 
+/// What a connected desk may do besides seeing the screen, as the settings say: control,
+/// sound, clipboard. A change here makes the host listen anew, offering what is left.
+fn offered(settings: &illum_ui::app::Settings) -> (bool, bool, bool) {
+    (
+        settings.let_control,
+        settings.let_sound,
+        settings.let_clipboard,
+    )
+}
+
 /// The host of an installed desk: listens while the settings allow it, on the tailnet
 /// addresses the machine has now, and says what it does in `host-status.json`. Runs until the
 /// process is ended (by the service).
@@ -107,24 +128,32 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         s.version = env!("CARGO_PKG_VERSION").into();
     });
     tracing::info!(target: "service", "Illumination {} host of the installed desk.", env!("CARGO_PKG_VERSION"));
-    // What the app may not write itself, it asks for here (`control`).
+    let shown = told.clone();
+    let sessions = Sessions::new(move |names| shown.change(|s| s.sessions = names));
+    // What the app may not do itself, it asks for here (`control`).
+    let ending = sessions.clone();
     let _asked = AbortOnDrop(tokio::spawn(crate::control::serve(
         home.to_path_buf(),
         crate::control::pipe_name(home, crate::is_usual_home(home)),
+        Arc::new(move |name: &str| ending.end(name)),
     )));
-    // Probing the encoders can take a moment; once, not on the async threads.
-    let config = match tokio::task::spawn_blocking(|| host_config(false, false, false)).await {
-        Ok(config) => config,
-        Err(e) => {
-            told.change(|s| {
-                s.incoming = "failed".into();
-                s.why = e.to_string();
-            });
-            return;
+    // One endpoint for as long as the host runs: the desks accepted "this time" live in it.
+    let base = loop {
+        match endpoint(home) {
+            Ok(ep) => break ep,
+            Err(e) => {
+                tracing::warn!(target: "service", "Not ready: {e:#}");
+                told.change(|s| {
+                    s.incoming = "failed".into();
+                    s.why = format!("{e:#}");
+                });
+                tokio::time::sleep(HOST_RETRY).await;
+            }
         }
     };
     loop {
-        if !crate::app::load_settings(home).allow_incoming {
+        let settings = crate::app::load_settings(home);
+        if !settings.allow_incoming {
             told.change(|s| {
                 s.incoming = "off".into();
                 s.why.clear();
@@ -132,8 +161,25 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
             tokio::time::sleep(HOST_LOOK).await;
             continue;
         }
+        let offer = offered(&settings);
+        // Probing the encoders can take a moment the first time; not on the async threads.
+        let (control, sound, clipboard) = offer;
+        let probed = tokio::task::spawn_blocking(move || {
+            host_config_with(false, !sound, !clipboard, !control)
+        })
+        .await;
+        let config = match probed {
+            Ok(config) => config,
+            Err(e) => {
+                told.change(|s| {
+                    s.incoming = "failed".into();
+                    s.why = e.to_string();
+                });
+                return;
+            }
+        };
         let listening = async {
-            let mut ep = endpoint(home)?;
+            let mut ep = base.clone();
             ep.prompt = asking_prompt(home_flag.clone());
             let listener = open_listener(&mut ep, &config, bind_to, port).await?;
             anyhow::Ok((ep, listener))
@@ -151,29 +197,21 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
             }
         };
         let addresses = listen_addresses(bind_to);
-        tracing::info!(target: "service", "Listening on {:?}.", listener.local_addrs());
+        tracing::info!(target: "service", "Listening on {:?} (control {control}, sound {sound}, clipboard {clipboard}).", listener.local_addrs());
         told.change(|s| {
             s.incoming = "listening".into();
             s.why.clear();
         });
-        let shown = told.clone();
-        let on_session = Arc::new(move |event: SessionEvent| {
-            shown.change(|s| match event {
-                SessionEvent::Started(name) => s.sessions.push(name),
-                SessionEvent::Ended(name) => {
-                    if let Some(i) = s.sessions.iter().position(|n| *n == name) {
-                        s.sessions.remove(i);
-                    }
-                }
-            })
-        });
-        let accepting = tokio::spawn(accept_loop(ep, listener, config.clone(), on_session));
-        // Until the person switches incoming off, or the machine's addresses change (the
-        // tailnet came up late, or went). Sessions already running carry on either way.
+        let accepting = tokio::spawn(accept_loop(ep, listener, config, sessions.clone()));
+        // Until the person switches incoming off or changes what a desk may do, or the
+        // machine's addresses change (the tailnet came up late, or went). Sessions already
+        // running carry on either way.
         loop {
             tokio::time::sleep(HOST_LOOK).await;
+            let now = crate::app::load_settings(home);
             if accepting.is_finished()
-                || !crate::app::load_settings(home).allow_incoming
+                || !now.allow_incoming
+                || offered(&now) != offer
                 || listen_addresses(bind_to) != addresses
             {
                 break;
@@ -217,13 +255,13 @@ fn asking_prompt(home_flag: Option<PathBuf>) -> Prompt {
         let home_flag = home_flag.clone();
         Box::pin(async move {
             if req.kind != PromptKind::PairPeer {
-                return false; // the host never dials out
+                return Answer::No; // the host never dials out
             }
             let gave_up = Arc::new(AtomicBool::new(false));
             let _guard = GaveUp(gave_up.clone());
             tokio::task::spawn_blocking(move || ask(&req, home_flag.as_deref(), &gave_up))
                 .await
-                .unwrap_or(false)
+                .unwrap_or(Answer::No)
         })
     })
 }
@@ -235,9 +273,9 @@ fn quoted(arg: &str) -> String {
     format!("\"{}\"", arg.replace('"', "'").trim_end_matches('\\'))
 }
 
-fn ask(req: &PromptRequest, home_flag: Option<&Path>, gave_up: &AtomicBool) -> bool {
+fn ask(req: &PromptRequest, home_flag: Option<&Path>, gave_up: &AtomicBool) -> Answer {
     let Ok(exe) = std::env::current_exe() else {
-        return false;
+        return Answer::No;
     };
     let mut args = vec![
         "ask".to_string(),
@@ -255,16 +293,17 @@ fn ask(req: &PromptRequest, home_flag: Option<&Path>, gave_up: &AtomicBool) -> b
     tracing::info!(target: "service", "Asking the person at this desk about \"{}\" at {}.", req.name, req.address);
     let answer = ask_in_window(&exe, &args, gave_up);
     tracing::info!(target: "service", "\"{}\" at {}: {}.", req.name, req.address, match answer {
-        Some(true) => "accepted",
-        Some(false) => "declined",
+        Some(Answer::Always) => "accepted",
+        Some(Answer::Once) => "accepted for this time",
+        Some(Answer::No) => "declined",
         None => "nobody could be asked",
     });
-    answer.unwrap_or(false)
+    answer.unwrap_or(Answer::No)
 }
 
 /// Runs the question's window and waits for it. `None` when it could not be shown.
 #[cfg(windows)]
-fn ask_in_window(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<bool> {
+fn ask_in_window(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<Answer> {
     if illum_win::runs_as_system() {
         // As the person, not as the system: a window of ours on their desktop must not carry
         // system rights.
@@ -282,11 +321,11 @@ fn ask_in_window(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<bo
         };
         loop {
             if let Some(code) = window.wait(Duration::from_millis(100)) {
-                return Some(code == u32::from(ASK_ACCEPTED));
+                return Some(answer_of(Some(i64::from(code))));
             }
             if gave_up.load(Ordering::SeqCst) {
                 window.kill();
-                return Some(false);
+                return Some(Answer::No);
             }
         }
     }
@@ -294,12 +333,12 @@ fn ask_in_window(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<bo
 }
 
 #[cfg(not(windows))]
-fn ask_in_window(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<bool> {
+fn ask_in_window(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<Answer> {
     ask_as_child(exe, args, gave_up)
 }
 
 /// The same window as an ordinary child: a host started by hand already runs as the person.
-fn ask_as_child(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<bool> {
+fn ask_as_child(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<Answer> {
     let mut window = std::process::Command::new(exe)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -307,13 +346,13 @@ fn ask_as_child(exe: &Path, args: &[String], gave_up: &AtomicBool) -> Option<boo
         .ok()?;
     loop {
         match window.try_wait() {
-            Ok(Some(status)) => return Some(status.code() == Some(i32::from(ASK_ACCEPTED))),
+            Ok(Some(status)) => return Some(answer_of(status.code().map(i64::from))),
             Ok(None) => {}
             Err(_) => return None,
         }
         if gave_up.load(Ordering::SeqCst) {
             let _ = window.kill();
-            return Some(false);
+            return Some(Answer::No);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -696,6 +735,17 @@ mod tests {
         std::fs::write(status_path(&home), r#"{"incoming":"off","new":1}"#).unwrap();
         assert_eq!(read_status(&home).unwrap().incoming, "off");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_window_answers_by_how_it_ends() {
+        assert_eq!(answer_of(Some(0)), Answer::Always);
+        assert_eq!(answer_of(Some(2)), Answer::Once);
+        assert_eq!(answer_of(Some(1)), Answer::No);
+        // Closed from the title bar, ended by the task manager, crashed.
+        for other in [None, Some(-1), Some(3), Some(0xC000_0005)] {
+            assert_eq!(answer_of(other), Answer::No);
+        }
     }
 
     #[test]
