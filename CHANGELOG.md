@@ -11,6 +11,23 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-11-16
+
+Not released.
+
+### Added
+
+- **Your desks show which ones are online.** Each card says "Online" or
+  "Offline" and lights or darkens its little screen. The app looks every
+  twenty seconds by knocking on the desk's port; nothing goes through a server.
+
+### Changed
+
+- A host no longer writes a warning to its log for every connection that left
+  without saying anything (which is what such a knock is).
+
+Verified with cargo fmt, cargo clippy and cargo test.
+
 ## [0.13.4] - 2026-11-16
 
 Not released.

@@ -1137,6 +1137,16 @@ Crates are added only when a milestone needs them.
 
 ## 14. The app (v0.12.0)
 
+*Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
+now: its little screen is lit and the line reads "Online", or it is dark and reads
+"Offline". The app knocks on each desk's port every twenty seconds, and at once when the
+list changes: a TCP connection that is closed again without a word (two seconds to
+answer). No server is asked and nothing about this desk is sent. A host tells such a knock
+from a failed connection (it left before saying anything) and keeps it out of its log
+above debug level. "Online" therefore means: something listens on that address and port,
+which is what Connect needs first; that it is an Illumination with the key known here is
+only seen on connecting.
+
 `illum` with no command opens the app: one window with **This desk** (the address to give out,
 its key, "Allow incoming connections"), **Remote desk** (an address and Connect), **Your desks**
 (every host this desk has connected to) and **Settings**. The layout follows AnyDesk's home

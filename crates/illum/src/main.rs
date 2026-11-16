@@ -894,6 +894,20 @@ async fn open_listener(
         .context("opening the listening port")
 }
 
+/// Whether a connection ended before the peer said anything at all (no TLS hello).
+fn left_unspoken(err: &illum_net::NetError) -> bool {
+    match err {
+        illum_net::NetError::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+        ),
+        illum_net::NetError::Closed => true,
+        _ => false,
+    }
+}
+
 /// Accepts connections and serves each as a session, until the listener closes or this future
 /// is dropped (sessions already running carry on).
 async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, sessions: Sessions) {
@@ -904,7 +918,7 @@ async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, s
         let media = listener.media();
         let sessions = sessions.clone();
         tokio::spawn(async move {
-            tracing::info!(target: "service", "[{peer}] Incoming connection.");
+            tracing::debug!(target: "service", "[{peer}] Incoming connection.");
             match accept(&ep, &acceptor, tcp, peer).await {
                 Ok(conn) => {
                     let (name, version) = conn
@@ -939,6 +953,11 @@ async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, s
                         }
                     }
                     drop(entered);
+                }
+                // Left before saying anything: another desk's app looking whether this one
+                // is there (its "online" mark), every few seconds. Not worth a line each.
+                Err(err) if left_unspoken(&err) => {
+                    tracing::debug!(target: "service", "[{peer}] Looked in and left.")
                 }
                 Err(err) => {
                     tracing::warn!(target: "service", "[{peer}] Not connected: {}", describe(&err))
@@ -1428,5 +1447,44 @@ mod tests {
         assert!(
             matches!(cli.command, Some(Command::Connect { ref target, pings: 3 }) if target == "100.100.101.1")
         );
+    }
+
+    /// Another desk's app knocking to see whether this one is there is told apart from a
+    /// connection that failed: it connected and left without a word.
+    #[test]
+    fn a_knock_is_not_a_failed_connection() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let home = std::env::temp_dir().join(format!("illum-knock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let ep = endpoint(&home).unwrap();
+        runtime.block_on(async {
+            let mut listener = illum_net::Listener::bind(&ep, &["127.0.0.1".parse().unwrap()], 0)
+                .await
+                .unwrap();
+            let address = listener.local_addrs()[0];
+            // The knock: connect, say nothing, leave.
+            drop(tokio::net::TcpStream::connect(address).await.unwrap());
+            let (tcp, peer) = listener.next().await.unwrap();
+            let refused = accept(&ep, &listener.acceptor(), tcp, peer)
+                .await
+                .err()
+                .expect("nothing was said");
+            assert!(left_unspoken(&refused), "{refused:?}");
+            // Something that speaks, but not our language, is a failed connection.
+            use tokio::io::AsyncWriteExt;
+            let mut stranger = tokio::net::TcpStream::connect(address).await.unwrap();
+            stranger.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            let (tcp, peer) = listener.next().await.unwrap();
+            let refused = accept(&ep, &listener.acceptor(), tcp, peer)
+                .await
+                .err()
+                .expect("not a desk");
+            assert!(!left_unspoken(&refused), "{refused:?}");
+        });
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

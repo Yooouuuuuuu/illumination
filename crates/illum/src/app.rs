@@ -185,6 +185,8 @@ struct Backend {
     listening: Mutex<Option<JoinHandle<()>>>,
     /// The desks connected to this one, while this app does the listening itself.
     sessions: Sessions,
+    /// Rung when the list of desks changed, so the new one's "online" is looked at now.
+    desks_changed: tokio::sync::Notify,
 }
 
 /// The command line of a session: `view <target> <flags>`, then `--home` when this app was
@@ -272,6 +274,7 @@ impl Backend {
                 launch,
                 listening: Mutex::new(None),
                 sessions,
+                desks_changed: tokio::sync::Notify::new(),
             }
         })
     }
@@ -281,6 +284,8 @@ impl Backend {
         let this = self.clone();
         self.runtime
             .spawn(async move { this.refresh_desks().await });
+        let this = self.clone();
+        self.runtime.spawn(async move { this.watch_desks().await });
         if self
             .state
             .lock()
@@ -321,10 +326,14 @@ impl Backend {
                 .collect();
             (desks, trusted)
         };
+        let new_desks = self.state.lock().expect("app state").desks != desks;
         self.update(|s| {
             s.desks = desks;
             s.trusted = trusted;
         });
+        if new_desks {
+            self.desks_changed.notify_one();
+        }
     }
 
     fn command(self: &Arc<Self>, command: Command) {
@@ -409,6 +418,44 @@ impl Backend {
                     self.sessions.end(&name);
                 }
             },
+        }
+    }
+
+    /// Keeps "online" true on the desk cards: every so often each desk's port is knocked on.
+    /// Nothing is said and nothing is sent; a host takes it for a connection that left
+    /// before speaking.
+    async fn watch_desks(self: Arc<Self>) {
+        /// How often the desks are looked at, and how long one has to answer.
+        const EVERY: Duration = Duration::from_secs(20);
+        const PATIENCE: Duration = Duration::from_secs(2);
+        loop {
+            let addresses: Vec<String> = {
+                let state = self.state.lock().expect("app state");
+                state.desks.iter().map(|d| d.address.clone()).collect()
+            };
+            let knocks = addresses.into_iter().map(|address| {
+                tokio::spawn(async move {
+                    let answered = matches!(
+                        tokio::time::timeout(PATIENCE, tokio::net::TcpStream::connect(&address))
+                            .await,
+                        Ok(Ok(_))
+                    );
+                    (address, answered)
+                })
+            });
+            let mut online = HashMap::new();
+            for knock in knocks.collect::<Vec<_>>() {
+                if let Ok((address, answered)) = knock.await {
+                    online.insert(address, answered);
+                }
+            }
+            if self.state.lock().expect("app state").online != online {
+                self.update(|s| s.online = online);
+            }
+            tokio::select! {
+                () = tokio::time::sleep(EVERY) => {}
+                () = self.desks_changed.notified() => {}
+            }
         }
     }
 
@@ -855,6 +902,7 @@ mod tests {
         let (host, port, _) = desk("host", &runtime);
         let (viewer, _, launches) = desk("viewer", &runtime);
         host.start();
+        viewer.start();
         wait("the host listens", &host, |s| match &s.incoming {
             Incoming::Listening => Some(()),
             Incoming::Failed(why) => panic!("the host cannot listen: {why}"),
@@ -897,6 +945,9 @@ mod tests {
         assert!(flags.contains(&"--view-only".to_string()), "{flags:?}");
         let desks = wait("the host is among the viewer's desks", &viewer, |s| {
             (!s.desks.is_empty()).then(|| s.desks.clone())
+        });
+        wait("the host is marked online on the viewer", &viewer, |s| {
+            (s.online.get(&target) == Some(&true)).then_some(())
         });
         assert_eq!(
             (desks[0].name.as_str(), desks[0].address.as_str()),

@@ -13,7 +13,7 @@ use egui::{
     Stroke, StrokeKind, Ui, Vec2, vec2,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 pub mod color {
@@ -160,6 +160,8 @@ pub struct AppState {
     /// Names of the desks connected to this one right now.
     pub sessions: Vec<String>,
     pub desks: Vec<Desk>,
+    /// Whether each of them answers right now, by address. Missing: not looked yet.
+    pub online: HashMap<String, bool>,
     pub trusted: Vec<TrustedDesk>,
     pub dial: Dial,
     pub questions: VecDeque<Question>,
@@ -711,7 +713,19 @@ impl HomeUi {
                     ui.allocate_ui_with_layout(
                         vec2(each, 0.0),
                         Layout::top_down(Align::Min),
-                        |ui| desk_card(ui, desk, each, dialing, self.view_only, self.mute, out),
+                        |ui| {
+                            let online = state.online.get(&desk.address).copied();
+                            desk_card(
+                                ui,
+                                desk,
+                                online,
+                                each,
+                                dialing,
+                                self.view_only,
+                                self.mute,
+                                out,
+                            )
+                        },
                     );
                 }
             });
@@ -855,9 +869,11 @@ fn this_desk(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn desk_card(
     ui: &mut Ui,
     desk: &Desk,
+    online: Option<bool>,
     width: f32,
     dialing: bool,
     view_only: bool,
@@ -884,7 +900,8 @@ fn desk_card(
             ui.painter().rect(
                 screen,
                 CornerRadius::same(5),
-                YELLOW,
+                // Lit while the desk answers; dark when it does not.
+                if online == Some(false) { NAVY } else { YELLOW },
                 Stroke::new(2.5, TILE),
                 StrokeKind::Inside,
             );
@@ -899,8 +916,13 @@ fn desk_card(
                     )
                     .truncate(),
                 );
+                let reach = match online {
+                    Some(true) => "Online · known since",
+                    Some(false) => "Offline · known since",
+                    None => "Known since",
+                };
                 ui.label(
-                    RichText::new(format!("Known since {}", date(desk.first_seen)))
+                    RichText::new(format!("{reach} {}", date(desk.first_seen)))
                         .size(13.0)
                         .color(MUTED),
                 );
@@ -1276,6 +1298,10 @@ pub fn sample_state() -> AppState {
             name: "studio-laptop".into(),
             last_address: "100.64.0.20".into(),
         }],
+        online: HashMap::from([
+            ("100.64.0.20:28326".to_string(), true),
+            ("100.64.0.31:28326".to_string(), false),
+        ]),
         dial: Dial::Idle,
         questions: VecDeque::new(),
         settings: Settings::default(),
