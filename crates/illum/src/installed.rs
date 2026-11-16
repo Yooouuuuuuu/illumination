@@ -107,6 +107,11 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         s.version = env!("CARGO_PKG_VERSION").into();
     });
     tracing::info!(target: "service", "Illumination {} host of the installed desk.", env!("CARGO_PKG_VERSION"));
+    // What the app may not write itself, it asks for here (`control`).
+    let _asked = AbortOnDrop(tokio::spawn(crate::control::serve(
+        home.to_path_buf(),
+        crate::control::pipe_name(home, crate::is_usual_home(home)),
+    )));
     // Probing the encoders can take a moment; once, not on the async threads.
     let config = match tokio::task::spawn_blocking(|| host_config(false, false, false)).await {
         Ok(config) => config,
@@ -176,6 +181,14 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         }
         accepting.abort();
         let _ = accepting.await;
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -490,22 +503,7 @@ pub fn install(home: &Path) -> Result<()> {
             "profile=any",
         ],
     )?;
-    // The app runs as the person and the host as the system; both keep their files here.
-    // (Users: S-1-5-32-545. See architecture §3 for what this leaves open.)
-    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
-    let home_text = home.display().to_string();
-    must(
-        "sharing the home folder",
-        "icacls.exe",
-        &[
-            &home_text,
-            "/grant",
-            "*S-1-5-32-545:(OI)(CI)M",
-            "/T",
-            "/C",
-            "/Q",
-        ],
-    )?;
+    close_home(home)?;
     must("starting the service", "sc.exe", &["start", SERVICE_NAME])?;
     wait_until(|| service_state() == ServiceState::Running);
     println!(
@@ -518,9 +516,57 @@ pub fn install(home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Makes the home folder the system's: the system and administrators write it, the PC's
+/// users read it. The host has system rights and believes what is in there (which desks
+/// get in without asking), so no ordinary account may write it; the app asks the host
+/// instead (`control`). Files made before the install, by whoever ran the app then, are
+/// taken over too: their maker could otherwise open them up again.
+#[cfg(windows)]
+fn close_home(home: &Path) -> Result<()> {
+    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+    let home_text = home.display().to_string();
+    // Administrators: S-1-5-32-544. The system: S-1-5-18. Users: S-1-5-32-545.
+    must(
+        "taking over the home folder",
+        "icacls.exe",
+        &[&home_text, "/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"],
+    )?;
+    must(
+        "closing the home folder",
+        "icacls.exe",
+        &[
+            &home_text,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "*S-1-5-32-545:(OI)(CI)RX",
+            "/Q",
+        ],
+    )?;
+    // Everything inside takes the folder's list and nothing of its own.
+    let inside = format!(r"{home_text}\*");
+    // (Nothing inside yet, on a first install, is "file not found" to icacls.)
+    let _ = tool("icacls.exe", &[&inside, "/reset", "/T", "/C", "/Q"]);
+    Ok(())
+}
+
+/// Gives the home folder back to the PC's users, for running the app without the service.
+#[cfg(windows)]
+fn open_home(home: &Path) {
+    if !home.is_dir() {
+        return;
+    }
+    let home_text = home.display().to_string();
+    let _ = tool(
+        "icacls.exe",
+        &[&home_text, "/grant", "*S-1-5-32-545:(OI)(CI)M", "/Q"],
+    );
+}
+
 /// Stops and removes the service and its firewall rule. Keys, desks and settings stay.
 #[cfg(windows)]
-pub fn uninstall() -> Result<()> {
+pub fn uninstall(home: &Path) -> Result<()> {
     use illum_win::{SERVICE_NAME, ServiceState, service_state};
     if service_state() == ServiceState::NotInstalled {
         println!("The Illumination service is not installed.");
@@ -541,6 +587,7 @@ pub fn uninstall() -> Result<()> {
         "netsh.exe",
         &["advfirewall", "firewall", "delete", "rule", FIREWALL_RULE],
     );
+    open_home(home);
     println!("The Illumination service is removed. Keys, desks and settings are kept.");
     Ok(())
 }
@@ -593,13 +640,24 @@ pub fn install(_home: &Path) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-pub fn uninstall() -> Result<()> {
+pub fn uninstall(_home: &Path) -> Result<()> {
     bail!("the installed service exists on Windows only so far")
 }
 
 #[cfg(not(windows))]
 pub fn status(_home: &Path) -> Result<()> {
     bail!("the installed service exists on Windows only so far")
+}
+
+/// The pipe on which this program asks the installed host for changes to `home`, if that is
+/// how it has to make them: the service runs, `home` is the folder it serves, and this is
+/// not the host itself.
+pub fn control_pipe(home: &Path) -> Option<String> {
+    #[cfg(windows)]
+    if illum_win::runs_as_system() {
+        return None;
+    }
+    (crate::is_usual_home(home) && service_runs()).then(|| crate::control::pipe_name(home, true))
 }
 
 /// Whether the installed service is running, so that the app leaves the listening to it.

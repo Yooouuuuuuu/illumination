@@ -50,7 +50,7 @@ pub(crate) fn load_settings(home: &Path) -> Settings {
     }
 }
 
-fn save_settings(home: &Path, settings: &Settings) -> Result<()> {
+pub(crate) fn save_settings(home: &Path, settings: &Settings) -> Result<()> {
     let path = settings_path(home);
     let text = serde_json::to_string_pretty(settings)?;
     // Written whole, then moved into place: a crash never leaves half a file.
@@ -168,6 +168,8 @@ struct Hosting {
     test_pattern: bool,
     /// Leave the listening to the installed service while it runs (the app; not the tests).
     service: bool,
+    /// Set on an installed desk: the settings are saved by the host, asked on this pipe.
+    control: Option<String>,
 }
 
 struct Backend {
@@ -344,7 +346,18 @@ impl Backend {
             }
             Command::SaveSettings(settings) => {
                 let was = self.state.lock().expect("app state").settings.clone();
-                if let Err(e) = save_settings(&self.home, &settings) {
+                let saved = match &self.hosting.control {
+                    Some(pipe) => crate::control::ask(
+                        pipe,
+                        &crate::control::Request::Settings {
+                            settings: settings.clone(),
+                        },
+                    )
+                    .map(|_| ())
+                    .map_err(anyhow::Error::msg),
+                    None => save_settings(&self.home, &settings),
+                };
+                if let Err(e) = saved {
                     tracing::warn!(target: "app", "Settings not saved: {e:#}");
                 }
                 let incoming = settings.allow_incoming;
@@ -521,6 +534,9 @@ impl Backend {
     fn watch_session(self: &Arc<Self>, mut child: std::process::Child, shown: String) {
         let this = self.clone();
         let started = std::time::Instant::now();
+        let log = crate::own_folder(&self.home)
+            .join("logs")
+            .join("viewer.log");
         self.runtime.spawn_blocking(move || {
             let status = child.wait();
             let early = started.elapsed() < Duration::from_secs(20);
@@ -529,9 +545,10 @@ impl Backend {
                     if s.dial == Dial::Idle {
                         s.dial = Dial::Failed {
                             target: shown,
-                            message: "The session ended right away. The log file viewer.log \
-                                      in the Illumination folder says why."
-                                .to_string(),
+                            message: format!(
+                                "The session ended right away. Its log says why: {}",
+                                log.display()
+                            ),
                         };
                     }
                 });
@@ -571,6 +588,7 @@ pub fn run_app(
             port: DEFAULT_PORT,
             test_pattern: false,
             service: true,
+            control: crate::installed::control_pipe(home),
         },
         session_process(home_flag),
     );
@@ -749,6 +767,7 @@ mod tests {
                 port,
                 test_pattern: true,
                 service: false,
+                control: None,
             },
             Arc::new(move |target, flags| {
                 noted.lock().unwrap().push((target.to_string(), flags));

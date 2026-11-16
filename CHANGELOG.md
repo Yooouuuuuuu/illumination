@@ -11,6 +11,30 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-16
+
+Not released.
+
+### Changed
+
+- **An installed desk's files can no longer be changed by other accounts of the
+  PC.** Installing now makes the home folder (`%ProgramData%\Illumination`) the
+  system's: users can read it, not write it. The app asks the service to save
+  the settings, to remember or forget a desk and to forget a trusted desk, over
+  a local connection that only the system and the person signed in at the
+  screen can open. This closes what 0.13.0 listed as known.
+- The app's and the session windows' logs of an installed desk are now in
+  `%LOCALAPPDATA%\Illumination\logs`. The service's and the host's stay in the
+  home folder. An Illumination that is only run keeps everything where it was.
+- Uninstalling gives the home folder back to the PC's users.
+
+### Known
+
+- Not yet tried with the installed service on either desk; the tests cover the
+  asking, the answering and who is let in. The lock screen is still untried.
+
+Verified with cargo fmt, cargo clippy and cargo test.
+
 ## [0.13.0] - 2026-11-16
 
 Not released: no tag and no installer published until both desks confirm it.

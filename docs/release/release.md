@@ -35,7 +35,8 @@ What the installer does:
 - copies `illum.exe`, the FFmpeg libraries and the licence to `C:\Program Files\Illumination`;
 - adds the Start-menu and desktop shortcuts and the entry in Windows' list of apps;
 - runs `illum service install`: registers and starts the service, opens the firewall for the
-  program, and lets the app and the service share `%ProgramData%\Illumination`.
+  program, and makes `%ProgramData%\Illumination` the system's (users read it; the app asks
+  the service for its changes, architecture §3).
 
 Its uninstaller runs `illum service uninstall` and removes what the installer added.
 `%ProgramData%\Illumination` (this desk's key, its desks, its settings, the logs) is kept by

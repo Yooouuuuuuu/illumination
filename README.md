@@ -104,7 +104,8 @@ and UDP. (Over Tailscale this is usually not needed: its Windows client permits 
 own interface.)
 
 Each role also writes a debug-level log file: `%ProgramData%\Illumination\logs\service.log` on
-the host and `…\viewer.log` on the viewer. Send those when something looks wrong.
+the host and `…\viewer.log` on the viewer. On an installed desk the app's and the viewer's logs
+are in `%LOCALAPPDATA%\Illumination\logs`. Send those when something looks wrong.
 
 **Measuring instead of guessing:** `illum view <host> --fixed …` streams at one quality with no
 adaptation, `--duration N --report file.json` records every second, `illum workload` on the

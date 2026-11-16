@@ -204,14 +204,18 @@ outages every 4 s: survived. Not yet measured live.
 - wake lock *(done early in v0.7.3: the host holds system and display awake while a session streams)*
 - restart on session change *(v0.13.0)*
 - install/uninstall commands (service registration, firewall rule, `SoftwareSASGeneration`) *(v0.13.0: `illum service install` / `uninstall` and the installer; `SoftwareSASGeneration` comes with Ctrl+Alt+Del)*
-- the app asks the service for changes instead of writing the home folder itself, so the folder can be closed to other accounts (architecture §3, left open in v0.13.0)
+- the app asks the service for changes instead of writing the home folder itself, so the folder can be closed to other accounts *(v0.13.1: `illum::control`, a pipe for the system and the person at the screen; installing closes the folder)*
 
 **Check:**
-- [ ] Connect when nobody is logged in (login screen). Log in remotely.
+- [ ] Connect when nobody is logged in (login screen). Log in remotely. *(Put off by the user,
+  2026-11-16, with the next one: to be tried last, once everything else is confirmed, so that
+  a failure cannot get in the way of the other tests. The first thing to try: lock the laptop
+  with Win+L while connected and see whether the picture and the typing follow.)*
 - [ ] A UAC prompt appears and can be answered remotely. The session never drops.
 - [ ] Ctrl+Alt+Shift+Del opens the Ctrl+Alt+Del screen on the host.
 - [ ] The host does not sleep during an hour-long idle session. After the session, normal sleep works again.
-- [ ] Input reaches an elevated window.
+- [x] Input reaches an elevated window. *(Confirmed by the user from the installed v0.13.0,
+  2026-11-16: the administrator terminal on the laptop that swallowed input before.)*
 
 ## M7: Desktop features
 - **The app window (v0.12.0, done ahead of M6):** `illum` with no command opens the home window:

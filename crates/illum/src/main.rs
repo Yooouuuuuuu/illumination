@@ -6,6 +6,7 @@
 //! full app window arrive in later milestones.
 
 mod app;
+mod control;
 mod installed;
 mod prompt;
 
@@ -268,6 +269,32 @@ fn default_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".illumination"))
 }
 
+/// Whether `home` is the folder an installed desk uses, the one the service's host serves.
+pub(crate) fn is_usual_home(home: &Path) -> bool {
+    home == default_home()
+}
+
+/// Where this program keeps files of its own (its log, what it found out about the GPU): the
+/// home folder where it may write there, else the person's own folder. On an installed desk
+/// the home folder belongs to the system (architecture §3).
+pub(crate) fn own_folder(home: &Path) -> PathBuf {
+    let probe = home.join(format!(".write-{}", std::process::id()));
+    let writable = std::fs::create_dir_all(home).is_ok() && std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if writable {
+        return home.to_path_buf();
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .map(|p| PathBuf::from(p).join("Illumination"))
+        .or_else(|| {
+            std::env::var_os("XDG_STATE_HOME").map(|p| PathBuf::from(p).join("illumination"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state/illumination"))
+        })
+        .unwrap_or_else(|| home.to_path_buf())
+}
+
 fn device_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -276,7 +303,11 @@ fn device_name() -> String {
 
 fn endpoint(home: &Path) -> Result<Endpoint> {
     let identity = Identity::load_or_create(home).context("loading the device key")?;
-    let store = TrustStore::load(home.join("trust.json")).context("loading the trust store")?;
+    let mut store = TrustStore::load(home.join("trust.json")).context("loading the trust store")?;
+    // On an installed desk the store is the service's to write; this program asks it.
+    if let Some(pipe) = installed::control_pipe(home) {
+        store.write_through(control::trust_through(pipe));
+    }
     Ok(Endpoint {
         identity: Arc::new(identity),
         store: Arc::new(Mutex::new(store)),
@@ -321,10 +352,7 @@ fn init_logging(cli: &Cli) -> Option<PathBuf> {
         (Some(Command::Ask { .. }), Role::Frontend) => "ask".to_string(),
         (_, role) => format!("{role:?}").to_lowercase(),
     };
-    let path = cli
-        .home
-        .clone()
-        .unwrap_or_else(default_home)
+    let path = own_folder(&cli.home.clone().unwrap_or_else(default_home))
         .join("logs")
         .join(format!("{role}.log"));
     let file = std::fs::create_dir_all(path.parent().expect("logs directory"))
@@ -488,7 +516,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         (Role::Frontend, Some(Command::Service { action })) => match action {
             ServiceAction::Install => installed::install(&home),
-            ServiceAction::Uninstall => installed::uninstall(),
+            ServiceAction::Uninstall => installed::uninstall(&home),
             ServiceAction::Status => installed::status(&home),
             ServiceAction::Run => unreachable!("handled in main"),
         },
@@ -815,7 +843,7 @@ fn run_view(
     // else H.265, else tiles. `--codec` narrows the offer for measurement runs. The GPU
     // probe's answer is kept in the home folder for a week: on a two-GPU laptop it took
     // several seconds before every connection.
-    illum_ffmpeg::set_probe_cache_dir(home.to_path_buf());
+    illum_ffmpeg::set_probe_cache_dir(own_folder(home));
     let decode_caps = illum_ffmpeg::decode_capabilities(args.params.hw_decode);
     let offered: Vec<String> = match args.codec {
         None | Some(CodecChoice::Av1) => decode_caps,

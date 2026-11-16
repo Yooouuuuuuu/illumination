@@ -16,8 +16,9 @@ mod input;
 #[cfg(windows)]
 mod obstacle;
 #[cfg(windows)]
-mod power;
+mod pipe;
 #[cfg(windows)]
+mod power;
 mod service;
 
 #[cfg(windows)]
@@ -34,8 +35,9 @@ pub use input::{
 #[cfg(windows)]
 pub use obstacle::input_obstacle;
 #[cfg(windows)]
-pub use power::KeepAwake;
+pub use pipe::{PipeSecurity, own_user_sid, pipe_client_session, session_user_sid};
 #[cfg(windows)]
+pub use power::KeepAwake;
 pub use service::{
     SERVICE_NAME, ServiceState, SessionProcess, console_session, own_session, run_as_service,
     runs_as_system, service_state, start_as_session_user, start_in_session,

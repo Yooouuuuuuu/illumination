@@ -102,12 +102,29 @@ and control processes yet.
   (`installer/illumination.nsi`, built by `scripts/build-installer.ps1`) copies the program
   to Program Files and runs the first; its uninstaller runs the second. Keys, desks and
   settings stay in the home folder through both.
-- **Left open, to close before a release:** the home folder is writable by every user of the
-  PC (the app runs as the person and the host as the system, and both write there). On a PC
-  with several accounts, another account could add its own device to `trust.json` and so
-  reach the screen of whoever is signed in, with system rights. Closing it means the app
-  asks the service to make changes instead of writing the files itself, which is the pipe of
-  the rule above.
+- **The home folder is the system's (v0.13.1).** The host has system rights and believes
+  what is in the home folder: which desks get in without asking. So installing gives the
+  folder to the system and administrators and leaves the PC's users reading only (the
+  owner of every file in it is changed too; the maker of a file can always open it up
+  again). What the person's programs change, they ask the host to change, on the pipe of
+  the rule above (`illum::control`): `\\.\pipe\Illumination`, opened for the system and
+  for the account signed in at the host's screen, and answered only for a program in the
+  host's own session. A request is one line of JSON and so is the answer; there are two
+  kinds, a change to the desks (remember a host's key, forget a host, forget a trusted
+  desk; `illum_core::store::Change`) and the settings. The host serves one program at a
+  time and opens the pipe anew for each, refusing to open it if one of that name exists
+  already, and at least every five seconds, so that it is open for whoever signed in
+  since. The trust store itself routes its changes (`TrustStore::write_through`), so the
+  app, a session window and `illum forget` all take the same way without knowing. The
+  programs' own files (their logs, the GPU probe's answer) go to the person's folder,
+  `%LOCALAPPDATA%\Illumination`, wherever the home folder cannot be written. Uninstalling
+  gives the folder back to the users, for running the app without the service.
+- **Still open:** the desk's key is readable by every account of the PC, as the app needs
+  it to connect out. Any account of an installed desk can therefore connect as this desk
+  to the desks that accepted it. AnyDesk and RustDesk are the same in this (one identity
+  per machine). And the app does not check who serves the pipe: a program of the person's
+  own that got there first could answer "done" without doing it, which the lists, read
+  from the files, would not show.
 
 ## 4. Network and trust
 
@@ -945,7 +962,8 @@ and move there when it is not their own (`OpenInputDesktop`, `SetThreadDesktop`)
 then duplicates again. Only a host started by the installed service may open that other
 desktop. A host that is merely run stays where it is and tells the controller why input does
 not arrive (§6). Not yet seen working on a lock screen: it was written on a desktop that
-could not be locked for the test.
+could not be locked for the test, and the test from the laptop is put off until the rest is
+confirmed (user, 2026-11-16: a failure there could cost the session the other tests need).
 
 ## 8. Clipboard, audio, files
 

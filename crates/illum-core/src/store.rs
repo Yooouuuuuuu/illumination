@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const STORE_VERSION: u32 = 1;
@@ -23,6 +24,8 @@ pub enum StoreError {
     },
     #[error("trust store {path} has version {found}, this build understands {STORE_VERSION}")]
     Version { path: PathBuf, found: u32 },
+    #[error("the Illumination service did not make the change: {0}")]
+    Service(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,12 +51,48 @@ struct TrustData {
     paired_peers: BTreeMap<String, PairedPeer>,
 }
 
-#[derive(Debug)]
+/// One change to the store that a person's program makes. On an installed desk the store
+/// belongs to the service, and the change is asked of it (architecture §3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum Change {
+    PinHost {
+        address: String,
+        fingerprint: String,
+        name: String,
+    },
+    ForgetHost {
+        address: String,
+    },
+    ForgetPeer {
+        fingerprint: String,
+    },
+}
+
+/// Makes a [`Change`] somewhere else (the installed service) and says whether anything
+/// changed.
+pub type Through = Arc<dyn Fn(&Change) -> Result<bool, String> + Send + Sync>;
+
+/// One writer at a time in this process, from reading the file to replacing it.
+static WRITING: Mutex<()> = Mutex::new(());
+
 pub struct TrustStore {
     path: PathBuf,
     data: TrustData,
     /// The file's modification time when it was last read or written here.
     seen: Option<SystemTime>,
+    /// Set when this process may not write the file itself.
+    through: Option<Through>,
+}
+
+impl std::fmt::Debug for TrustStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustStore")
+            .field("path", &self.path)
+            .field("data", &self.data)
+            .field("through", &self.through.is_some())
+            .finish()
+    }
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -93,18 +132,76 @@ impl TrustStore {
             Err(source) => return Err(StoreError::Io { path, source }),
         };
         let seen = modified(&path);
-        Ok(TrustStore { path, data, seen })
+        Ok(TrustStore {
+            path,
+            data,
+            seen,
+            through: None,
+        })
     }
 
     /// Takes up what another process wrote since this one last looked: the app and the
     /// installed host share the file. A file that cannot be read leaves what is known as it is.
     pub fn refresh(&mut self) {
-        let now = modified(&self.path);
-        if now != self.seen
-            && let Ok(fresh) = TrustStore::load(self.path.clone())
-        {
-            *self = fresh;
+        if modified(&self.path) != self.seen {
+            self.reload();
         }
+    }
+
+    fn reload(&mut self) {
+        if let Ok(fresh) = TrustStore::load(self.path.clone()) {
+            self.data = fresh.data;
+            self.seen = fresh.seen;
+        }
+    }
+
+    /// From here on this store's changes of [`Change`] are made by `through`, not written
+    /// here.
+    pub fn write_through(&mut self, through: Through) {
+        self.through = Some(through);
+    }
+
+    /// Makes a change: through the service if this store was told so, else in the file.
+    fn change(&mut self, change: Change) -> Result<bool, StoreError> {
+        match self.through.clone() {
+            Some(through) => {
+                let changed = through(&change).map_err(StoreError::Service)?;
+                self.reload();
+                Ok(changed)
+            }
+            None => self.apply(&change),
+        }
+    }
+
+    /// Makes a change in the file itself. Returns whether anything changed.
+    pub fn apply(&mut self, change: &Change) -> Result<bool, StoreError> {
+        let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        self.refresh();
+        let changed = match change {
+            Change::PinHost {
+                address,
+                fingerprint,
+                name,
+            } => {
+                self.data.known_hosts.insert(
+                    address.clone(),
+                    KnownHost {
+                        fingerprint: fingerprint.clone(),
+                        name: name.clone(),
+                        first_seen: now(),
+                    },
+                );
+                true
+            }
+            Change::ForgetHost { address } => self.data.known_hosts.remove(address).is_some(),
+            Change::ForgetPeer { fingerprint } => {
+                self.data.paired_peers.remove(fingerprint).is_some()
+            }
+        };
+        if changed {
+            self.save()?;
+        }
+        Ok(changed)
     }
 
     pub fn path(&self) -> &Path {
@@ -121,35 +218,25 @@ impl TrustStore {
         fingerprint: &str,
         name: &str,
     ) -> Result<(), StoreError> {
-        self.refresh();
-        self.data.known_hosts.insert(
-            address.to_string(),
-            KnownHost {
-                fingerprint: fingerprint.to_string(),
-                name: name.to_string(),
-                first_seen: now(),
-            },
-        );
-        self.save()
+        self.change(Change::PinHost {
+            address: address.to_string(),
+            fingerprint: fingerprint.to_string(),
+            name: name.to_string(),
+        })
+        .map(|_| ())
     }
 
     pub fn forget_host(&mut self, address: &str) -> Result<bool, StoreError> {
-        self.refresh();
-        let removed = self.data.known_hosts.remove(address).is_some();
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
+        self.change(Change::ForgetHost {
+            address: address.to_string(),
+        })
     }
 
     /// Unpairs a device: its next connection has to be accepted again.
     pub fn forget_peer(&mut self, fingerprint: &str) -> Result<bool, StoreError> {
-        self.refresh();
-        let removed = self.data.paired_peers.remove(fingerprint).is_some();
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
+        self.change(Change::ForgetPeer {
+            fingerprint: fingerprint.to_string(),
+        })
     }
 
     pub fn paired_peer(&self, fingerprint: &str) -> Option<&PairedPeer> {
@@ -157,6 +244,7 @@ impl TrustStore {
     }
 
     pub fn pair(&mut self, fingerprint: &str, name: &str, address: &str) -> Result<(), StoreError> {
+        let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
         self.refresh();
         self.data.paired_peers.insert(
             fingerprint.to_string(),
@@ -171,6 +259,7 @@ impl TrustStore {
 
     /// Records where a paired peer last connected from. Not saved if nothing changed.
     pub fn touch_peer(&mut self, fingerprint: &str, address: &str) -> Result<(), StoreError> {
+        let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
         self.refresh();
         match self.data.paired_peers.get_mut(fingerprint) {
             Some(peer) if peer.last_address != address => {
@@ -271,5 +360,48 @@ mod tests {
         assert!(store.forget_peer("ff").unwrap());
         assert!(!store.forget_peer("ff").unwrap());
         assert!(TrustStore::load(&path).unwrap().paired_peer("ff").is_none());
+    }
+}
+
+#[cfg(test)]
+mod through_tests {
+    use super::*;
+
+    /// A store told to write through something else never touches the file itself, and shows
+    /// what the other side wrote.
+    #[test]
+    fn changes_go_through_and_come_back() {
+        let dir = std::env::temp_dir().join(format!("illum-store-through-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("trust.json");
+        // The "service": its own store on the same file.
+        let service = Arc::new(Mutex::new(TrustStore::load(&path).unwrap()));
+        let mut app = TrustStore::load(&path).unwrap();
+        let asked = service.clone();
+        app.write_through(Arc::new(move |change| {
+            asked
+                .lock()
+                .unwrap()
+                .apply(change)
+                .map_err(|e| e.to_string())
+        }));
+        app.pin_host("h:1", "aa", "desk").unwrap();
+        assert_eq!(app.known_host("h:1").unwrap().fingerprint, "aa");
+        assert!(app.forget_host("h:1").unwrap());
+        assert!(!app.forget_host("h:1").unwrap(), "nothing left to forget");
+        service
+            .lock()
+            .unwrap()
+            .pair("ff", "laptop", "1.2.3.4")
+            .unwrap();
+        assert!(app.forget_peer("ff").unwrap());
+        assert!(service.lock().unwrap().paired_peer("ff").is_none());
+        // A service that refuses is an error, not a silent success.
+        app.write_through(Arc::new(|_| Err("no".to_string())));
+        assert!(matches!(
+            app.pin_host("h:2", "bb", "x"),
+            Err(StoreError::Service(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
