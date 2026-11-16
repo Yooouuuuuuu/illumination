@@ -36,6 +36,9 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 pub struct MediaFlags {
     pub screen_paused: AtomicBool,
     pub host_sent_us: AtomicU64,
+    /// Which of the host's displays is asked for: `ViewParams::display` at first, another once
+    /// the person chose one in the window. Read whenever the screen is (re)started.
+    pub display: std::sync::atomic::AtomicU32,
 }
 
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
@@ -102,6 +105,22 @@ pub struct ViewParams {
 }
 
 impl ViewParams {
+    /// The request to start streaming `display` with these limits.
+    pub fn screen_start(&self, display: u32) -> ControlMsg {
+        ControlMsg::ScreenStart {
+            display,
+            max_bitrate_kbps: self.max_bitrate_kbps,
+            max_fps: self.max_fps,
+            fec_min: self.fec_min,
+            fec_max: self.fec_max,
+            latency_limit_ms: self.latency_limit_ms,
+            audio: self.audio,
+            fixed: self.fixed,
+            scale_percent: self.scale_percent,
+            scale_rungs: self.scale_rungs,
+        }
+    }
+
     pub fn new(display: u32) -> ViewParams {
         ViewParams {
             display,
@@ -493,7 +512,12 @@ fn media_loop(
             {
                 last_reconnect = now;
                 tracing::warn!(target: "media", "No video for {} s though the host is sending; rebuilding the media path.", RECONNECT_AFTER.as_secs());
-                sender.send_control(reconnect);
+                // For the display asked for now, which may not be the one it began with.
+                let mut again = reconnect.clone();
+                if let ControlMsg::ScreenStart { display, .. } = &mut again {
+                    *display = flags.display.load(Ordering::Relaxed);
+                }
+                sender.send_control(&again);
             }
             Some("video stalled; reconnecting…")
         } else if awaiting_since.is_some_and(|s| now.duration_since(s) >= KEYFRAME_TIMEOUT) {
@@ -574,6 +598,7 @@ pub async fn run_viewer_session(
     shared: Shared,
     notify: Notify,
 ) -> Result<(), NetError> {
+    let display = params.display;
     run_viewer_session_sharing_media(
         conn,
         params,
@@ -581,7 +606,10 @@ pub async fn run_viewer_session(
         notify,
         MediaSlot::default(),
         None,
-        Arc::new(MediaFlags::default()),
+        Arc::new(MediaFlags {
+            display: display.into(),
+            ..MediaFlags::default()
+        }),
     )
     .await
 }
@@ -602,18 +630,7 @@ pub async fn run_viewer_session_sharing_media(
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
     }
     // Kept so the media loop can re-send it to rebuild a stuck media path (§5.5).
-    let screen_start = ControlMsg::ScreenStart {
-        display: params.display,
-        max_bitrate_kbps: params.max_bitrate_kbps,
-        max_fps: params.max_fps,
-        fec_min: params.fec_min,
-        fec_max: params.fec_max,
-        latency_limit_ms: params.latency_limit_ms,
-        audio: params.audio,
-        fixed: params.fixed,
-        scale_percent: params.scale_percent,
-        scale_rungs: params.scale_rungs,
-    };
+    let screen_start = params.screen_start(flags.display.load(Ordering::Relaxed));
     conn.send_control(&screen_start);
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.
@@ -762,6 +779,15 @@ pub async fn run_viewer_session_sharing_media(
                             encode_us,
                         });
                     }
+                }
+                Ok(ControlMsg::Displays { names, current }) => {
+                    tracing::info!(target: "session", "The host has {} displays; showing number {}.", names.len(), current + 1);
+                    {
+                        let mut state = shared.lock().expect("view state lock");
+                        state.displays = names;
+                        state.display = current;
+                    }
+                    notify();
                 }
                 Ok(ControlMsg::InputBlocked { reason }) => {
                     let reason = (!reason.is_empty()).then_some(reason);

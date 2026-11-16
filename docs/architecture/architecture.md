@@ -243,6 +243,17 @@ the GPU-preference lookup inside its own process (undocumented, fragile).
 **Windows.Graphics.Capture** stays the intended middle step of the chain: it is independent of
 GPU binding and works from a service; it comes with the capture work of M7.
 
+**Several displays (v0.13.3).** A session streams one display, the one `ScreenStart` names
+(0 is the main one). When the screen starts, the host tells a controller that lists the
+`displays` capability what displays it has, each as its size, and which one is being
+streamed (`ControlMsg::Displays`). The session window then offers them by number in its top
+bar, and choosing one sends `ScreenStart` for it: the host stops the stream, lets go of
+whatever input was held on the display it leaves, and starts capture, encoder and input for
+the other, exactly as it does for the first. The viewer remembers the choice for the rest of
+the session (`MediaFlags::display`), so a reconnection and the rebuilding of a stuck media
+path ask for the display that was chosen, not the one the session began with. Showing all
+displays as one picture is not built.
+
 ### 5.2 One pixel format
 - Internally every frame is **BGRA8**, the format Windows calls `X8R8G8B8`. AnyDesk logs
   `Format changed to 1920x1080 (X8R8G8B8)`.

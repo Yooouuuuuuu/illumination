@@ -77,6 +77,9 @@ async fn start_host_with(
                         audio: Some(Arc::new(|| {
                             Ok(Box::new(ToneSource::default()) as Box<dyn AudioSource>)
                         })),
+                        displays: Some(Arc::new(|| {
+                            vec!["640 × 360, main".to_string(), "320 × 180".to_string()]
+                        })),
                         ..HostConfig::default()
                     };
                     let _ = serve_session(
@@ -477,4 +480,49 @@ async fn audio_arrives_when_asked_and_not_when_muted() {
         0,
         "muted: no audio sent"
     );
+}
+
+/// A host with two displays says so, and shows the other one when the viewer asks for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_other_display_is_shown_when_asked_for() {
+    use illum_media::picture::Picture;
+    fn width(state: &ViewState) -> Option<u32> {
+        state.frame.as_deref().map(|picture| match picture {
+            Picture::Bgra(frame) => frame.width,
+            Picture::Yuv(yuv) => yuv.width,
+        })
+    }
+    let factory: SourceFactory = Arc::new(|display| {
+        let (w, h) = if display == 0 { (W, H) } else { (W / 2, H / 2) };
+        Ok(Box::new(PatternSource::new(w, h, 120)) as Box<dyn ScreenSource>)
+    });
+    let addr = start_host("host-two-displays", Some(factory)).await;
+    let conn = connect(&endpoint("ctl-two-displays"), &addr.to_string())
+        .await
+        .unwrap();
+    let sender = conn.sender();
+    let shared: Shared = Arc::default();
+    let view = params(None);
+    let session = tokio::spawn(run_viewer_session(
+        conn,
+        view.clone(),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&shared, "the first display", |s| {
+        s.displays.len() == 2 && s.display == 0 && width(s) == Some(W)
+    })
+    .await;
+    sender.send_control(&view.screen_start(1));
+    wait_for(&shared, "the second display", |s| {
+        s.display == 1 && width(s) == Some(W / 2)
+    })
+    .await;
+    // And back.
+    sender.send_control(&view.screen_start(0));
+    wait_for(&shared, "the first display again", |s| {
+        s.display == 0 && width(s) == Some(W)
+    })
+    .await;
+    session.abort();
 }

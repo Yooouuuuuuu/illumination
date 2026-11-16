@@ -657,6 +657,34 @@ fn host_config_with(
         audio,
         // The test pattern is a non-interactive stream; the real host syncs the clipboard (§8).
         clipboard: !test_pattern && !no_clipboard,
+        displays: display_names(test_pattern),
+    }
+}
+
+/// The displays a controller can choose between, each as its size ("2560 × 1440, main").
+fn display_names(test_pattern: bool) -> Option<illum::host::DisplaysFn> {
+    if test_pattern {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        Some(Arc::new(|| {
+            illum_win::list_displays()
+                .map(|displays| {
+                    displays
+                        .iter()
+                        .map(|d| {
+                            let main = if d.primary { ", main" } else { "" };
+                            format!("{} × {}{main}", d.width, d.height)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -1010,6 +1038,9 @@ fn run_view(
     // Shared with the window: pause the screen while minimized, and tell a static host from a
     // dead path (§5.4).
     let flags = Arc::new(illum::viewer::MediaFlags::default());
+    flags
+        .display
+        .store(args.params.display, std::sync::atomic::Ordering::Relaxed);
     // Clipboard both ways when both sides offer it (§8); a copy here is sent through whichever
     // connection is live, the host's applied. Kept across reconnections, hence the Arc.
     let clipboard = if args.params.clipboard && hello.capabilities.iter().any(|c| c == "clipboard")
@@ -1233,6 +1264,17 @@ fn run_view(
                             .screen_paused
                             .store(minimized, std::sync::atomic::Ordering::Relaxed);
                         live.send_control(&ControlMsg::ScreenPause { paused: minimized });
+                    })
+                },
+                // Another of the host's displays: the screen is started anew for it, as it is
+                // for a stuck media path, and the choice outlives a reconnection.
+                on_display: {
+                    let (live, flags, params) = (live.clone(), flags.clone(), args.params.clone());
+                    Box::new(move |display| {
+                        flags
+                            .display
+                            .store(display, std::sync::atomic::Ordering::Relaxed);
+                        live.send_control(&params.screen_start(display));
                     })
                 },
                 gpu: args.gpu,

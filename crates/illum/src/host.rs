@@ -182,7 +182,12 @@ pub struct HostConfig {
     pub audio: Option<AudioFactory>,
     /// Sync the clipboard both ways with the controller (§8); off with `--no-clipboard`.
     pub clipboard: bool,
+    /// The host's displays, each in a few words, in the order `screen` counts them.
+    pub displays: Option<DisplaysFn>,
 }
+
+/// Lists the displays now (one may have been plugged in since the session began).
+pub type DisplaysFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// Creates the audio source, inside the audio thread.
 pub type AudioFactory = Arc<dyn Fn() -> Result<Box<dyn AudioSource>, MediaError> + Send + Sync>;
@@ -1125,6 +1130,14 @@ pub async fn serve_session(
                         conn.send_control(&ControlMsg::MediaEndpoint { port: media.port() });
                         conn.send_control(&l.quality(""));
                         link = Some(l);
+                        if let Some(list) = &config.displays
+                            && viewer_caps.iter().any(|c| c == "displays")
+                        {
+                            conn.send_control(&ControlMsg::Displays {
+                                names: list(),
+                                current: index,
+                            });
+                        }
                     }
                     (None, _) => conn.send_control(&ControlMsg::ScreenError {
                         reason: "this host cannot share its screen".into(),

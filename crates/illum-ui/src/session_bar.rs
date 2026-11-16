@@ -27,6 +27,10 @@ pub struct BarState {
     pub status: String,
     /// Something to say instead (reconnecting, the picture is paused).
     pub notice: Option<String>,
+    /// The host's displays, each in a few words; a choice is offered when there are several.
+    pub displays: Vec<String>,
+    /// The one being shown.
+    pub display: u32,
 }
 
 /// What the person asked for.
@@ -36,6 +40,8 @@ pub enum BarAction {
     Keyboard(KeyboardMode),
     Pointer(PointerMode),
     Fullscreen(bool),
+    /// Show another of the host's displays.
+    Display(u32),
     Disconnect,
 }
 
@@ -133,6 +139,17 @@ pub fn draw(ui: &mut Ui, state: &BarState) -> (Vec<BarAction>, BarSpace) {
                     &[(ViewMode::Fit, "Fit"), (ViewMode::Original, "Original")],
                 ) {
                     out.push(BarAction::View(view));
+                }
+                if state.displays.len() > 1 {
+                    ui.label(RichText::new("Display").size(13.0).color(MUTED));
+                    let numbers: Vec<(u32, String)> = (0..state.displays.len() as u32)
+                        .map(|i| (i, (i + 1).to_string()))
+                        .collect();
+                    let choices: Vec<(u32, &str)> =
+                        numbers.iter().map(|(i, n)| (*i, n.as_str())).collect();
+                    if let Some(display) = segments(ui, state.display, &choices) {
+                        out.push(BarAction::Display(display));
+                    }
                 }
                 if state.controlling {
                     ui.label(RichText::new("Keyboard").size(13.0).color(MUTED));
@@ -243,5 +260,7 @@ pub fn sample() -> BarState {
         status: "AV1 · rung 1/12: 20.0 Mb/s 30 fps, parity 5 % · 30 fps · 18 ms · input 14 ms"
             .into(),
         notice: None,
+        displays: vec!["2560 × 1440, main".into(), "1920 × 1080".into()],
+        display: 0,
     }
 }

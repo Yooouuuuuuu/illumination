@@ -19,6 +19,7 @@ pub const CAPABILITIES: &[&str] = &[
     "audio",
     "clipboard",
     "input-notice",
+    "displays",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
@@ -231,6 +232,14 @@ pub enum ControlMsg {
     /// Sent only to a controller that lists the `input-notice` capability (architecture §6).
     InputBlocked {
         reason: String,
+    },
+    /// Host → controller, when the screen starts: the host's displays, in the order
+    /// `ScreenStart` counts them, each in a few words ("2560 × 1440, main"), and the one
+    /// being streamed. Sent only to a controller that lists the `displays` capability; it
+    /// switches by sending `ScreenStart` for another one (architecture §5.1).
+    Displays {
+        names: Vec<String>,
+        current: u32,
     },
     /// Orderly end of session.
     Bye,

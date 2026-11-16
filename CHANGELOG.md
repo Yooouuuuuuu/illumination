@@ -11,6 +11,21 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-11-16
+
+Not released.
+
+### Added
+
+- **Switch between the host's displays.** When the host has more than one, the
+  session window's top bar shows "Display 1 2 …"; choosing one shows that
+  display and sends the keyboard and mouse there. The choice is kept through a
+  reconnection. Both desks need this version.
+
+Verified with cargo fmt, cargo clippy and cargo test: a host with two test
+displays, the viewer switching to the second and back. Not yet tried on the two
+real displays of the desktop.
+
 ## [0.13.2] - 2026-11-16
 
 Not released.

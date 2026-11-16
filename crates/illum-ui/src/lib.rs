@@ -236,6 +236,10 @@ pub struct ViewState {
     /// Why the host is not taking input, while it is not (its lock screen, an administrator's
     /// window): shown where the notice is, when nothing more urgent is.
     pub input_notice: Option<String>,
+    /// The host's displays, each in a few words, and the one being shown. Empty until the
+    /// host said (an older host never does).
+    pub displays: Vec<String>,
+    pub display: u32,
     /// Keyboard layouts, for the Auto keyboard mode.
     pub host_layout: Option<String>,
     pub local_layout: Option<String>,
@@ -271,6 +275,8 @@ impl Default for ViewState {
             status: None,
             notice: None,
             input_notice: None,
+            displays: Vec::new(),
+            display: 0,
             host_layout: None,
             local_layout: None,
             recorder: None,
@@ -448,6 +454,8 @@ pub struct ViewerOptions {
     /// Called when the window is minimized (true) or restored (false), so the session can ask
     /// the host to pause or resume the screen (architecture §5.4).
     pub on_minimize: Box<dyn Fn(bool)>,
+    /// Called when another of the host's displays is chosen in the window.
+    pub on_display: Box<dyn Fn(u32)>,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Being in front is reported by [`UiEvent::Front`] (the keyboard grab asks the system
@@ -516,6 +524,8 @@ impl ViewerWindow {
             status_line: String::new(),
             last_summary: String::new(),
             bar_notice: None,
+            displays: Vec::new(),
+            display: 0,
             focused: None,
             fullscreen: false,
             icon_announced: false,
@@ -573,6 +583,9 @@ struct App {
     status_line: String,
     last_summary: String,
     bar_notice: Option<String>,
+    /// The host's displays and the one shown, as the host last said.
+    displays: Vec<String>,
+    display: u32,
     /// Whether the window is in front, once known.
     focused: Option<bool>,
     fullscreen: bool,
@@ -788,6 +801,10 @@ impl App {
             }
         }
         let rtt = state.clock.last_rtt;
+        if self.displays != state.displays {
+            self.displays = state.displays.clone();
+        }
+        self.display = state.display;
         let notice_now = state
             .status
             .clone()
@@ -1107,6 +1124,8 @@ impl App {
             fullscreen: self.fullscreen,
             status: self.status_line.clone(),
             notice: self.bar_notice.clone(),
+            displays: self.displays.clone(),
+            display: self.display,
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1178,6 +1197,13 @@ impl App {
                         .set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
                 }
                 self.fullscreen = on;
+            }
+            BarAction::Display(display) => {
+                // Nothing stays held on the display that is left.
+                if let Some(input) = &self.options.input {
+                    input.release_all();
+                }
+                (self.options.on_display)(display);
             }
             BarAction::Disconnect => event_loop.exit(),
         }
