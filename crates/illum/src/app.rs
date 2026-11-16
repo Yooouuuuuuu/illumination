@@ -39,7 +39,7 @@ fn settings_path(home: &Path) -> PathBuf {
 
 /// The saved settings; the defaults when there are none or the file cannot be read (a damaged
 /// settings file must not keep the app from opening).
-fn load_settings(home: &Path) -> Settings {
+pub(crate) fn load_settings(home: &Path) -> Settings {
     let path = settings_path(home);
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
@@ -166,6 +166,8 @@ struct Hosting {
     listen_on: Vec<IpAddr>,
     port: u16,
     test_pattern: bool,
+    /// Leave the listening to the installed service while it runs (the app; not the tests).
+    service: bool,
 }
 
 struct Backend {
@@ -280,7 +282,8 @@ impl Backend {
     /// Copies the trust store's two lists into what the window shows.
     async fn refresh_desks(&self) {
         let (desks, trusted) = {
-            let store = self.ep.store.lock().await;
+            let mut store = self.ep.store.lock().await;
+            store.refresh();
             let desks = store
                 .known_hosts()
                 .map(|(address, host)| Desk {
@@ -363,6 +366,14 @@ impl Backend {
             self.update(|s| s.incoming = Incoming::Off);
             return;
         }
+        if self.hosting.service && crate::installed::service_runs() {
+            let this = self.clone();
+            *listening = Some(
+                self.runtime
+                    .spawn(async move { this.follow_service().await }),
+            );
+            return;
+        }
         let this = self.clone();
         let test_pattern = self.hosting.test_pattern;
         *listening = Some(self.runtime.spawn(async move {
@@ -424,6 +435,44 @@ impl Backend {
                 }
             }
         }));
+    }
+
+    /// Shows what the installed host does, while it does the listening: whether it listens,
+    /// who is connected, and the desks it accepted. The host reads the same settings file,
+    /// so switching incoming off here stops it there.
+    async fn follow_service(self: Arc<Self>) {
+        tracing::info!(target: "app", "The installed service listens for this desk.");
+        let mut sessions: Option<Vec<String>> = None;
+        loop {
+            let incoming = if !crate::installed::service_runs() {
+                Incoming::Failed(
+                    "the Illumination service is not running. Start it from Windows' Services, \n                     or restart this PC."
+                        .to_string(),
+                )
+            } else {
+                match crate::installed::read_status(&self.home) {
+                    Some(status) => {
+                        if sessions.as_ref() != Some(&status.sessions) {
+                            // A desk may have been accepted a moment ago: show it as trusted.
+                            self.refresh_desks().await;
+                            sessions = Some(status.sessions.clone());
+                            let now = status.sessions.clone();
+                            self.update(|s| s.sessions = now);
+                        }
+                        match status.incoming.as_str() {
+                            "listening" => Incoming::Listening,
+                            "failed" => Incoming::Failed(status.why),
+                            _ => Incoming::Off,
+                        }
+                    }
+                    None => Incoming::Off,
+                }
+            };
+            if self.state.lock().expect("app state").incoming != incoming {
+                self.update(|s| s.incoming = incoming);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     /// Reaches `target` from here (key check and errors in the window), then opens the session
@@ -521,6 +570,7 @@ pub fn run_app(
             listen_on: Vec::new(),
             port: DEFAULT_PORT,
             test_pattern: false,
+            service: true,
         },
         session_process(home_flag),
     );
@@ -530,6 +580,37 @@ pub fn run_app(
     window
         .run(state, move |command| backend.command(command))
         .map_err(anyhow::Error::msg)
+}
+
+/// The window of `illum ask`: one question about a new desk, for the person at this desk. The
+/// installed host starts it and reads the answer from how it ends.
+pub fn run_ask(name: &str, address: &str, fingerprint: &str) -> std::process::ExitCode {
+    use crate::installed::{ASK_ACCEPTED, ASK_DECLINED};
+    #[cfg(windows)]
+    illum_win::leave_own_console();
+    let declined = std::process::ExitCode::from(ASK_DECLINED);
+    let Ok(window) = AppWindow::new() else {
+        return declined;
+    };
+    let mut state = AppState::default();
+    state.questions.push_back(Question {
+        id: 1,
+        kind: QuestionKind::AcceptDesk,
+        name: name.to_string(),
+        address: address.to_string(),
+        fingerprint: fingerprint.to_string(),
+    });
+    let answered = window.run_question(Arc::new(Mutex::new(state)), |command| {
+        if let Command::Answer { accept, .. } = command {
+            // The answer is the exit code; nothing else is left to do here.
+            std::process::exit(i32::from(if accept { ASK_ACCEPTED } else { ASK_DECLINED }));
+        }
+    });
+    if let Err(why) = answered {
+        tracing::warn!(target: "app", "The question could not be shown: {why}");
+    }
+    // Closed without an answer.
+    declined
 }
 
 #[cfg(test)]
@@ -667,6 +748,7 @@ mod tests {
                 listen_on: vec!["127.0.0.1".parse().unwrap()],
                 port,
                 test_pattern: true,
+                service: false,
             },
             Arc::new(move |target, flags| {
                 noted.lock().unwrap().push((target.to_string(), flags));

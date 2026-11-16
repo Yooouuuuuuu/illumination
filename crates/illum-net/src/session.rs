@@ -175,7 +175,11 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
     )?;
 
     // Trust check before anything is sent over the encrypted channel.
-    let pinned = ep.store.lock().await.known_host(&address).cloned();
+    let pinned = {
+        let mut store = ep.store.lock().await;
+        store.refresh();
+        store.known_host(&address).cloned()
+    };
     let newly_trusted = match pinned {
         Some(known) if known.fingerprint == fingerprint.as_str() => false,
         Some(known) => {
@@ -271,6 +275,7 @@ pub async fn accept(
     let address = peer.to_string();
     let paired = {
         let mut store = ep.store.lock().await;
+        store.refresh();
         let known = store.paired_peer(fingerprint.as_str()).is_some();
         if known {
             store.touch_peer(fingerprint.as_str(), &address)?;

@@ -47,6 +47,10 @@ pub struct GdiSource {
 }
 
 impl GdiSource {
+    pub(crate) fn display_index(&self) -> usize {
+        self.info.index
+    }
+
     /// Captures display `index` from [`list_displays`].
     pub fn new(index: usize) -> Result<GdiSource, MediaError> {
         let info = list_displays()?

@@ -6,6 +6,7 @@
 //! full app window arrive in later milestones.
 
 mod app;
+mod installed;
 mod prompt;
 
 use anyhow::{Context, Result, bail};
@@ -82,6 +83,11 @@ struct Cli {
     /// Do not sync the clipboard with the controller (with --service).
     #[arg(long, requires = "service")]
     no_clipboard: bool,
+
+    /// Started by the installed service (`illum service run`), not by hand: asks about new
+    /// desks in a window of its own and follows the app's settings (with --service).
+    #[arg(long, requires = "service", hide = true)]
+    from_service: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -193,6 +199,22 @@ enum Command {
     Displays,
     /// Show which video codecs this machine can encode and decode (AV1, H.265).
     Codecs,
+    /// The installed service: lets this desk be reached at any time, in windows that run as
+    /// administrator too. `install` and `uninstall` need an administrator.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+    /// Ask the person at this desk about a new desk (started by the installed host).
+    #[command(hide = true)]
+    Ask {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        address: String,
+        #[arg(long)]
+        fingerprint: String,
+    },
     /// Show this device's key fingerprint.
     Fingerprint,
     /// List pinned hosts and paired devices.
@@ -202,6 +224,19 @@ enum Command {
         /// The address exactly as you connected to it, e.g. 100.100.101.1:7171
         address: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+enum ServiceAction {
+    /// Register this program as a Windows service, open the firewall for it and start it.
+    Install,
+    /// Stop and remove the service. Keys, desks and settings are kept.
+    Uninstall,
+    /// Say whether the service is installed and what its host is doing.
+    Status,
+    /// What Windows starts (not for use by hand).
+    #[command(hide = true)]
+    Run,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -282,6 +317,8 @@ fn init_logging(cli: &Cli) -> Option<PathBuf> {
     let role = match (&cli.command, cli.role()) {
         (Some(Command::View { .. }), Role::Frontend) => "viewer".to_string(),
         (None, Role::Frontend) => "app".to_string(),
+        (Some(Command::Service { .. }), Role::Frontend) => "service-run".to_string(),
+        (Some(Command::Ask { .. }), Role::Frontend) => "ask".to_string(),
         (_, role) => format!("{role:?}").to_lowercase(),
     };
     let path = cli
@@ -384,6 +421,17 @@ fn main() -> std::process::ExitCode {
         Some(Command::Workload { screen }) if cli.role() == Role::Frontend => {
             illum_ui::run_workload(*screen).map_err(anyhow::Error::msg)
         }
+        Some(Command::Ask {
+            name,
+            address,
+            fingerprint,
+        }) if cli.role() == Role::Frontend => {
+            return app::run_ask(name, address, fingerprint);
+        }
+        // Windows runs the service on threads of its own choosing.
+        Some(Command::Service {
+            action: ServiceAction::Run,
+        }) if cli.role() == Role::Frontend => installed::run_service(),
         // No command: the app window, which also owns the main thread.
         None if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
@@ -404,6 +452,10 @@ async fn run(cli: Cli) -> Result<()> {
     let home = cli.home.clone().unwrap_or_else(default_home);
     let role = cli.role();
     match (role, cli.command) {
+        (Role::Service, _) if cli.from_service => {
+            installed::run_host(&home, cli.home.clone(), cli.port, &cli.bind).await;
+            Ok(())
+        }
         (Role::Service, _) => {
             run_service(
                 &home,
@@ -434,6 +486,13 @@ async fn run(cli: Cli) -> Result<()> {
             println!("\nWritten to {}.", out.display());
             Ok(())
         }
+        (Role::Frontend, Some(Command::Service { action })) => match action {
+            ServiceAction::Install => installed::install(&home),
+            ServiceAction::Uninstall => installed::uninstall(),
+            ServiceAction::Status => installed::status(&home),
+            ServiceAction::Run => unreachable!("handled in main"),
+        },
+        (Role::Frontend, Some(Command::Ask { .. })) => unreachable!("handled in main"),
         (Role::Frontend, Some(Command::Displays)) => list_displays(),
         (Role::Frontend, Some(Command::Codecs)) => {
             list_codecs();

@@ -8,6 +8,8 @@ mod audio;
 #[cfg(windows)]
 mod dda;
 #[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
 mod gdi;
 #[cfg(windows)]
 mod input;
@@ -15,6 +17,8 @@ mod input;
 mod obstacle;
 #[cfg(windows)]
 mod power;
+#[cfg(windows)]
+mod service;
 
 #[cfg(windows)]
 pub use audio::{LoopbackCapture, Playback};
@@ -31,6 +35,11 @@ pub use input::{
 pub use obstacle::input_obstacle;
 #[cfg(windows)]
 pub use power::KeepAwake;
+#[cfg(windows)]
+pub use service::{
+    SERVICE_NAME, ServiceState, SessionProcess, console_session, own_session, run_as_service,
+    runs_as_system, service_state, start_as_session_user, start_in_session,
+};
 
 #[cfg(windows)]
 use illum_media::MediaError;
@@ -83,6 +92,14 @@ impl ScreenCapture {
 #[cfg(windows)]
 impl ScreenSource for ScreenCapture {
     fn poll(&mut self, timeout: Duration) -> Result<Vec<SourceEvent>, MediaError> {
+        // The lock screen and Windows' permission prompts are on a desktop of their own: go
+        // where the screen is, and capture again from there (§7).
+        if desktop::follow_input_desktop() {
+            match &mut self.method {
+                Method::Dda(dda) => dda.lost(),
+                Method::Gdi(gdi) => *gdi = GdiSource::new(gdi.display_index())?,
+            }
+        }
         if let Method::Dda(dda) = &mut self.method {
             match dda.poll(timeout) {
                 Err(e) if dda.is_unsupported() => {

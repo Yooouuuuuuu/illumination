@@ -196,14 +196,15 @@ outages every 4 s: survived. Not yet measured live.
   link allows, with the limit shown as unreachable only if the link really can't do it.
 
 ## M6: Service and secure desktop
-- Windows service (`--service`, SYSTEM)
-- backend started per session as SYSTEM in the console session
-- `--control` per user
-- desktop switcher (suspend, switch, restart)
+- Windows service *(v0.13.0: `illum service run`, the system account; it keeps one host running in the session at the screen)*
+- backend started per session as SYSTEM in the console session *(v0.13.0: the host itself runs there and listens; a backend separate from the listener is not built)*
+- `--control` per user *(not built; a new desk's question is a window started as the person, `illum ask`)*
+- desktop switcher (suspend, switch, restart) *(v0.13.0: written, `illum_win::desktop`; not yet seen working on a lock screen)*
 - Ctrl+Alt+Del via `SendSAS`, hotkey Ctrl+Alt+Shift+Del
 - wake lock *(done early in v0.7.3: the host holds system and display awake while a session streams)*
-- restart on session change
-- install/uninstall commands (service registration, firewall rule, `SoftwareSASGeneration`)
+- restart on session change *(v0.13.0)*
+- install/uninstall commands (service registration, firewall rule, `SoftwareSASGeneration`) *(v0.13.0: `illum service install` / `uninstall` and the installer; `SoftwareSASGeneration` comes with Ctrl+Alt+Del)*
+- the app asks the service for changes instead of writing the home folder itself, so the folder can be closed to other accounts (architecture §3, left open in v0.13.0)
 
 **Check:**
 - [ ] Connect when nobody is logged in (login screen). Log in remotely.

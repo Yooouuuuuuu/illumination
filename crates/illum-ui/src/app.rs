@@ -1074,6 +1074,19 @@ fn settings(ui: &mut Ui, state: &AppState, out: &mut Vec<Command>) {
 }
 
 /// The question in front of everything else: one of the two key checks.
+/// Draws nothing but the first waiting question, on the app's ground: the window of
+/// `illum ask`, which the installed host opens for a new desk.
+pub fn draw_question(ui: &mut Ui, state: &AppState) -> Vec<Command> {
+    let mut out = Vec::new();
+    egui::CentralPanel::default()
+        .frame(Frame::new().fill(TILE))
+        .show(ui, |_| {});
+    if let Some(q) = state.questions.front() {
+        question(ui.ctx(), q, &mut out);
+    }
+    out
+}
+
 fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
     let frame = Frame::new()
         .fill(WHITE)

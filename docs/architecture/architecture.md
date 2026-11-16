@@ -73,6 +73,42 @@ Rules:
 *v0.4.x:* the session logic runs inside `--service` itself; the per-session backend and the
 control process arrive with the service milestone.
 
+*v0.13.0, what is built of this:* the service and one host, without the separate backend
+and control processes yet.
+- **`illum service run`** is what Windows starts (the system account, session 0). It does one
+  thing: it keeps a host running in the session that has the physical screen, started with
+  the service's own token moved into that session (`start_in_session`), and starts it again
+  when it ends or when the screen goes to another session.
+- **`illum --service --from-service`** is that host. It is the same listener and the same
+  session code as the app's own, so nothing about sessions differs between an installed desk
+  and one that is only run. Having system rights it reaches windows that run as
+  administrator, and its capture and input threads follow the screen to the lock screen and
+  to permission prompts (§7). It listens on its own, so a session change ends the sessions
+  in it; the viewer reconnects.
+- **The app** does not listen while the service runs. No pipe joins the two; they share the
+  home folder. The host reads `settings.json` every second ("Allow incoming connections" in
+  the app switches the host's listening), and writes `host-status.json` on every change
+  (listening or not and why, who is connected), which the app shows. Both re-read
+  `trust.json` when its time stamp changed, before every look-up and every change, so a desk
+  accepted by the host appears in the app and one forgotten in the app is refused by the
+  host.
+- **A new desk's question** is a small window the host starts *as the person signed in*
+  (`illum ask`, through `WTSQueryUserToken`): a window of ours with system rights on
+  someone's desktop would be a way up for any program there. Its exit code is the answer.
+  Nobody signed in, the window closed, or sixty seconds without an answer: declined. A desk
+  accepted before is never asked about, which is what lets it in with nobody there.
+- **Install and uninstall** are `illum service install` and `illum service uninstall` (they
+  need an administrator; `sc.exe`, `netsh` and `icacls` do the registering). The installer
+  (`installer/illumination.nsi`, built by `scripts/build-installer.ps1`) copies the program
+  to Program Files and runs the first; its uninstaller runs the second. Keys, desks and
+  settings stay in the home folder through both.
+- **Left open, to close before a release:** the home folder is writable by every user of the
+  PC (the app runs as the person and the host as the system, and both write there). On a PC
+  with several accounts, another account could add its own device to `trust.json` and so
+  reach the screen of whoever is signed in, with system rights. Closing it means the app
+  asks the service to make changes instead of writing the files itself, which is the pipe of
+  the rule above.
+
 ## 4. Network and trust
 
 ### 4.1 Listening
@@ -902,6 +938,14 @@ The backend follows desktop switches as AnyDesk's `desktop_switcher` does:
 4. **Restart capture.** DDA reports "access lost" on a switch, and that is expected, not an error.
 
 The session stays connected throughout.
+
+*v0.13.0:* built as `illum_win::desktop::follow_input_desktop`. The thread that captures and
+the thread that injects each ask, at most four times a second, which desktop has the screen,
+and move there when it is not their own (`OpenInputDesktop`, `SetThreadDesktop`); the capture
+then duplicates again. Only a host started by the installed service may open that other
+desktop. A host that is merely run stays where it is and tells the controller why input does
+not arrive (§6). Not yet seen working on a lock screen: it was written on a desktop that
+could not be locked for the test.
 
 ## 8. Clipboard, audio, files
 

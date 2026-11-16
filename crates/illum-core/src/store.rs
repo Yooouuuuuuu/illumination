@@ -52,6 +52,12 @@ struct TrustData {
 pub struct TrustStore {
     path: PathBuf,
     data: TrustData,
+    /// The file's modification time when it was last read or written here.
+    seen: Option<SystemTime>,
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 fn now() -> u64 {
@@ -86,7 +92,19 @@ impl TrustStore {
             },
             Err(source) => return Err(StoreError::Io { path, source }),
         };
-        Ok(TrustStore { path, data })
+        let seen = modified(&path);
+        Ok(TrustStore { path, data, seen })
+    }
+
+    /// Takes up what another process wrote since this one last looked: the app and the
+    /// installed host share the file. A file that cannot be read leaves what is known as it is.
+    pub fn refresh(&mut self) {
+        let now = modified(&self.path);
+        if now != self.seen
+            && let Ok(fresh) = TrustStore::load(self.path.clone())
+        {
+            *self = fresh;
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -103,6 +121,7 @@ impl TrustStore {
         fingerprint: &str,
         name: &str,
     ) -> Result<(), StoreError> {
+        self.refresh();
         self.data.known_hosts.insert(
             address.to_string(),
             KnownHost {
@@ -115,6 +134,7 @@ impl TrustStore {
     }
 
     pub fn forget_host(&mut self, address: &str) -> Result<bool, StoreError> {
+        self.refresh();
         let removed = self.data.known_hosts.remove(address).is_some();
         if removed {
             self.save()?;
@@ -124,6 +144,7 @@ impl TrustStore {
 
     /// Unpairs a device: its next connection has to be accepted again.
     pub fn forget_peer(&mut self, fingerprint: &str) -> Result<bool, StoreError> {
+        self.refresh();
         let removed = self.data.paired_peers.remove(fingerprint).is_some();
         if removed {
             self.save()?;
@@ -136,6 +157,7 @@ impl TrustStore {
     }
 
     pub fn pair(&mut self, fingerprint: &str, name: &str, address: &str) -> Result<(), StoreError> {
+        self.refresh();
         self.data.paired_peers.insert(
             fingerprint.to_string(),
             PairedPeer {
@@ -149,6 +171,7 @@ impl TrustStore {
 
     /// Records where a paired peer last connected from. Not saved if nothing changed.
     pub fn touch_peer(&mut self, fingerprint: &str, address: &str) -> Result<(), StoreError> {
+        self.refresh();
         match self.data.paired_peers.get_mut(fingerprint) {
             Some(peer) if peer.last_address != address => {
                 peer.last_address = address.to_string();
@@ -167,7 +190,7 @@ impl TrustStore {
     }
 
     /// Writes to a temporary file and renames it over the old one.
-    fn save(&self) -> Result<(), StoreError> {
+    fn save(&mut self) -> Result<(), StoreError> {
         let io = |source| StoreError::Io {
             path: self.path.clone(),
             source,
@@ -178,7 +201,9 @@ impl TrustStore {
         let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(&self.data).expect("trust data always serialises");
         std::fs::write(&tmp, bytes).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        std::fs::rename(&tmp, &self.path).map_err(io)?;
+        self.seen = modified(&self.path);
+        Ok(())
     }
 }
 

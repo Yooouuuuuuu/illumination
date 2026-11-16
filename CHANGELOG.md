@@ -11,6 +11,43 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-16
+
+Not released: no tag and no installer published until both desks confirm it.
+
+### Added
+
+- **Illumination can be installed.** `Illumination_0.13.0_x64-setup.exe` (built
+  with `scripts/build-installer.ps1`) puts the program in Program Files, adds it
+  to the Start menu and the desktop, and installs a Windows service. It asks for
+  an administrator once. Uninstalling removes all of it and keeps this desk's
+  key, its desks and its settings.
+- **An installed desk can be reached in windows that run as administrator.**
+  The service keeps the host running with system rights in the session at the
+  screen, so typing, clicking and scrolling arrive there too. An Illumination
+  that is only run, not installed, works as before, with the limits it had.
+- **An installed desk can be reached while the app is closed**, and after a
+  restart before anyone opens it. A desk you accepted before connects without
+  anyone there. A new desk is still asked about, in a small window of its own.
+- **The lock screen, the sign-in screen and Windows' permission prompts** are
+  followed by an installed host: it captures and types where the screen is.
+  Written, not yet seen working.
+- `illum service install`, `uninstall` and `status` for doing the same from a
+  terminal opened as administrator.
+
+### Changed
+
+- With the service running, the app no longer listens itself. "Allow incoming
+  connections" switches the service's listening, and the status in the window
+  is what the service reports.
+- The app and the host notice each other's changes to the list of desks: a desk
+  forgotten in the app is refused by the host at its next connection.
+
+### Known
+
+- On a PC with several accounts, another account can change this desk's files
+  in its home folder. To be closed before this is released (architecture §3).
+
 ## [0.12.8] - 2026-11-16
 
 ### Fixed

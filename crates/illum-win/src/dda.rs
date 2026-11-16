@@ -210,6 +210,13 @@ impl DdaSource {
         self.index
     }
 
+    /// What was being duplicated is gone (the thread moved to another desktop): duplicate
+    /// again on the next poll.
+    pub(crate) fn lost(&mut self) {
+        self.dup = None;
+        self.retry_at = Instant::now();
+    }
+
     /// True when Desktop Duplication cannot work for this display from this process (every
     /// adapter refused), so a different capture method is needed.
     pub fn is_unsupported(&self) -> bool {

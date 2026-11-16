@@ -34,7 +34,11 @@ pub(crate) fn injected(all: bool) {
 /// Why input injected by this program does not reach what is on screen right now, in words
 /// for the person at the controller; `None` while nothing is known to be in the way.
 pub fn input_obstacle() -> Option<String> {
-    if let Some(reason) = other_desktop() {
+    // A host started by the installed service follows the screen there (`desktop`).
+    static SYSTEM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*SYSTEM.get_or_init(crate::service::runs_as_system)
+        && let Some(reason) = other_desktop()
+    {
         return Some(reason);
     }
     // Windows does not report this one: `SendInput` claims success and the window in front

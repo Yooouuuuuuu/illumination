@@ -141,9 +141,29 @@ impl AppWindow {
         state: Arc<Mutex<AppState>>,
         on_command: impl FnMut(Command) + 'static,
     ) -> Result<(), String> {
+        self.run_as(state, on_command, false)
+    }
+
+    /// Runs a small window that shows only the first waiting question, until it is closed.
+    /// For `illum ask`: `on_command` gets the answer.
+    pub fn run_question(
+        self,
+        state: Arc<Mutex<AppState>>,
+        on_command: impl FnMut(Command) + 'static,
+    ) -> Result<(), String> {
+        self.run_as(state, on_command, true)
+    }
+
+    fn run_as(
+        self,
+        state: Arc<Mutex<AppState>>,
+        on_command: impl FnMut(Command) + 'static,
+        question_only: bool,
+    ) -> Result<(), String> {
         let mut app = App {
             state,
             on_command: Box::new(on_command),
+            question_only,
             home: HomeUi::default(),
             ctx: egui::Context::default(),
             shown: None,
@@ -175,6 +195,8 @@ struct Shown {
 struct App {
     state: Arc<Mutex<AppState>>,
     on_command: Box<dyn FnMut(Command)>,
+    /// The small window of `illum ask`: one question and nothing else.
+    question_only: bool,
     home: HomeUi,
     ctx: egui::Context,
     shown: Option<Shown>,
@@ -185,10 +207,18 @@ struct App {
 
 impl App {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<Shown, String> {
-        let attrs = Window::default_attributes()
-            .with_title("Illumination")
-            .with_inner_size(LogicalSize::new(1120.0, 760.0))
-            .with_min_inner_size(LogicalSize::new(420.0, 520.0));
+        let attrs = Window::default_attributes().with_title("Illumination");
+        let attrs = if self.question_only {
+            // In front of whatever is on screen: someone is waiting for the answer.
+            attrs
+                .with_inner_size(LogicalSize::new(520.0, 580.0))
+                .with_resizable(false)
+                .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
+        } else {
+            attrs
+                .with_inner_size(LogicalSize::new(1120.0, 760.0))
+                .with_min_inner_size(LogicalSize::new(420.0, 520.0))
+        };
         let window = Arc::new(
             event_loop
                 .create_window(crate::icon::with_icon(attrs))
@@ -265,9 +295,13 @@ impl App {
         let state = self.state.lock().expect("app state").clone();
         let raw = shown.input.take_egui_input(&shown.window);
         let mut commands = Vec::new();
-        let mut output = self
-            .ctx
-            .run_ui(raw, |ui| commands = self.home.draw(ui, &state));
+        let mut output = self.ctx.run_ui(raw, |ui| {
+            commands = if self.question_only {
+                crate::app::draw_question(ui, &state)
+            } else {
+                self.home.draw(ui, &state)
+            }
+        });
         shown
             .input
             .handle_platform_output(&shown.window, std::mem::take(&mut output.platform_output));

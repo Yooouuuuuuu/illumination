@@ -32,6 +32,17 @@ After building (below), run `illum.exe` with no arguments on both machines.
 Don't run `illum --service` on a machine at the same time as the app: both want the same port,
 and the app will say it cannot listen.
 
+## Install (Windows)
+
+Build the installer with `pwsh scriptsuild-installer.ps1` and run
+`targetinstallerIllumination_<version>_x64-setup.exe` (no released download yet). It asks for an
+administrator once, because it installs a Windows service. With the service this desk can be
+reached while the app is closed, after a restart, and in windows that run as administrator;
+a desk you accepted before connects with nobody there, and a new one is asked about in a small
+window. Run without installing, Illumination works as described below, with those limits.
+Uninstalling keeps this desk's key, its desks and its settings. More in
+[docs/release/release.md](docs/release/release.md).
+
 ## Try it (console)
 
 Build on each machine (needs [Rust](https://rustup.rs) and, once, two downloads: a prebuilt
@@ -130,6 +141,8 @@ viewer.
 illum                  # the app window
 illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern,
                        #   --no-audio, --no-clipboard)
+illum service install    # install the Windows service (terminal opened as administrator);
+                         #   also: service uninstall, service status
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
