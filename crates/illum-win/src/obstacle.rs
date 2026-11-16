@@ -17,8 +17,8 @@ use windows::Win32::System::StationsAndDesktops::{
     OpenInputDesktop, UOI_NAME,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::PWSTR;
@@ -37,13 +37,20 @@ pub fn input_obstacle() -> Option<String> {
     if let Some(reason) = other_desktop() {
         return Some(reason);
     }
+    // Windows does not report this one: `SendInput` claims success and the window in front
+    // simply never gets the input. So look at who is in front rather than wait for a refusal.
+    let front = foreground_program();
+    if let Some((name, true)) = &front
+        && !elevated(unsafe { GetCurrentProcess() })
+    {
+        return Some(format!(
+            "the window in front on the host ({name}) runs as administrator, and Windows keeps \
+             input out of it"
+        ));
+    }
     if REFUSED.load(Ordering::Relaxed) {
-        return Some(match foreground_program() {
-            Some((name, true)) => format!(
-                "the window in front on the host ({name}) runs as administrator, and Windows \
-                 keeps input out of it"
-            ),
-            Some((name, false)) => {
+        return Some(match front {
+            Some((name, _)) => {
                 format!("Windows on the host refused the input (window in front: {name})")
             }
             None => "Windows on the host refused the input".to_string(),
@@ -115,28 +122,31 @@ fn foreground_program() -> Option<(String, bool)> {
         }
         Err(_) => format!("process {pid}"),
     };
-    // A token we may not even open belongs to something above us: count it as administrator.
-    let mut token = HANDLE::default();
-    let elevated = match unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } {
-        Ok(()) => {
-            let mut info = TOKEN_ELEVATION::default();
-            let mut size = 0u32;
-            let read = unsafe {
-                GetTokenInformation(
-                    token,
-                    TokenElevation,
-                    Some((&raw mut info).cast()),
-                    std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-                    &mut size,
-                )
-            };
-            let _ = unsafe { CloseHandle(token) };
-            read.is_ok() && info.TokenIsElevated != 0
-        }
-        Err(_) => true,
-    };
+    let elevated = elevated(process);
     let _ = unsafe { CloseHandle(process) };
     Some((name, elevated))
+}
+
+/// Whether a process runs as administrator. A token we may not even open belongs to something
+/// above us, and counts as one.
+fn elevated(process: HANDLE) -> bool {
+    let mut token = HANDLE::default();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.is_err() {
+        return true;
+    }
+    let mut info = TOKEN_ELEVATION::default();
+    let mut size = 0u32;
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&raw mut info).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(token) };
+    read.is_ok() && info.TokenIsElevated != 0
 }
 
 #[cfg(test)]

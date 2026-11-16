@@ -842,6 +842,13 @@ whether input delay is the network or the host.
     read raw input, which is why copying its hook alone was not enough. **Do not turn device
     events on in the viewer** (raw mouse motion included) without moving the hook to another
     process.
+  - **An administrator window in front is found by looking, not by a refusal (v0.12.8).**
+    `SendInput` returns success when Windows drops the input because the window in front runs
+    at a higher level than the sender, so the "did Windows take it all" check of v0.12.6 stays
+    quiet. Seen 2026-11-16: the laptop had a terminal in front, five wheel notches each way
+    left its picture unchanged, all input was acknowledged and no notice came. The host now
+    compares the front window's process with its own: front elevated and host not is an
+    obstacle on its own.
   - **The grab asks the system who is in front; it is not told (v0.12.7).** The hook used to be
     switched on and off by the window's focus events. Those were seen to come late or not at
     all, both ways (2026-11-15: in two of four runs the window was in front and never told, so

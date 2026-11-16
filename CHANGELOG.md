@@ -11,6 +11,19 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.12.8] - 2026-11-16
+
+### Fixed
+
+- **A host whose front window runs as administrator now says so.** Windows
+  keeps the input of an ordinary program out of such a window, and it does so
+  without reporting an error, so the check added in 0.12.6 never noticed:
+  typing, clicking and scrolling did nothing and no reason was shown. The host
+  now looks at the window in front itself and tells the controller. Reaching
+  such windows needs the host to run as a service, which is not built yet;
+  until then, start the host as administrator or bring an ordinary window to
+  the front.
+
 ## [0.12.7] - 2026-11-15
 
 ### Fixed
