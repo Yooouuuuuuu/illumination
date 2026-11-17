@@ -88,6 +88,9 @@ async fn start_host_with(
                         Duration::from_secs(30),
                         media,
                         Default::default(),
+                        Arc::new(std::sync::atomic::AtomicU64::new(
+                            illum_media::clock::now_us(),
+                        )),
                     )
                     .await;
                 }
@@ -620,6 +623,9 @@ async fn an_idle_session_is_warned_and_then_ended() {
                         Duration::from_secs(30),
                         media,
                         Default::default(),
+                        Arc::new(std::sync::atomic::AtomicU64::new(
+                            illum_media::clock::now_us(),
+                        )),
                     )
                     .await;
                 }

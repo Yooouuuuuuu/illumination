@@ -182,6 +182,12 @@ enum Command {
         /// Name of the step in the report (default: the report file's name).
         #[arg(long)]
         label: Option<String>,
+        /// This window is a display popped out of another session window (started by it).
+        #[arg(long, hide = true)]
+        popout: bool,
+        /// The process whose window this one belongs to: it closes when that one is gone.
+        #[arg(long, hide = true)]
+        parent: Option<u32>,
     },
     /// Show the measurement workload full screen on this machine (the host side of a
     /// measurement run): still, fine detail and full motion, 20 s each, on the wall clock.
@@ -420,6 +426,8 @@ fn main() -> std::process::ExitCode {
             duration,
             report,
             label,
+            popout,
+            parent,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
@@ -431,6 +439,9 @@ fn main() -> std::process::ExitCode {
                 duration: duration.map(Duration::from_secs),
                 report: report.clone(),
                 label: label.clone(),
+                popout: *popout,
+                parent: *parent,
+                home_flag: cli.home.clone(),
                 params: ViewParams {
                     max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
                     max_fps: *max_fps,
@@ -808,6 +819,11 @@ async fn run_service(home: &Path, port: u16, bind_to: &[IpAddr], config: HostCon
 #[derive(Clone)]
 struct Sessions {
     live: Arc<std::sync::Mutex<Vec<Live>>>,
+    touched: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<std::sync::atomic::AtomicU64>>,
+        >,
+    >,
     /// Told the names, in the order they connected, whenever one comes or goes.
     changed: Arc<dyn Fn(Vec<String>) + Send + Sync>,
 }
@@ -836,21 +852,47 @@ impl Sessions {
     fn new(changed: impl Fn(Vec<String>) + Send + Sync + 'static) -> Sessions {
         Sessions {
             live: Arc::default(),
+            touched: Arc::default(),
             changed: Arc::new(changed),
         }
     }
 
+    /// The connected desks, each once: a desk with a display popped out has several
+    /// sessions here and is still one desk.
     fn names(&self) -> Vec<String> {
-        let live = self.live.lock().expect("sessions");
-        live.iter().map(|s| s.name.clone()).collect()
+        self.guests().into_iter().map(|(name, _, _)| name).collect()
+    }
+
+    /// When input last came from the desk at `address` (`now_us`), shared by all its
+    /// sessions here: the idle rule counts the desk, not each of its windows.
+    fn touched(&self, address: &str) -> Arc<std::sync::atomic::AtomicU64> {
+        let mut touched = self.touched.lock().expect("sessions");
+        touched.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(shared) = touched.get(address).and_then(std::sync::Weak::upgrade) {
+            return shared;
+        }
+        let fresh = Arc::new(std::sync::atomic::AtomicU64::new(
+            illum_media::clock::now_us(),
+        ));
+        touched.insert(address.to_string(), Arc::downgrade(&fresh));
+        fresh
     }
 
     /// The connected desks as the app lists them: name, address, connected since.
     fn guests(&self) -> Vec<(String, String, u64)> {
         let live = self.live.lock().expect("sessions");
-        live.iter()
-            .map(|s| (s.name.clone(), s.address.clone(), s.since))
-            .collect()
+        let mut desks: Vec<(String, String, u64)> = Vec::new();
+        for session in live.iter() {
+            // The first session of a desk is the one listed: its further ones are windows
+            // of the same visit.
+            if !desks
+                .iter()
+                .any(|(name, address, _)| *name == session.name && *address == session.address)
+            {
+                desks.push((session.name.clone(), session.address.clone(), session.since));
+            }
+        }
+        desks
     }
 
     fn enter(&self, name: &str, address: &str) -> Entered {
@@ -976,10 +1018,18 @@ async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, s
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" (Illumination {version}) started.");
                     let guest = conn.peer_fingerprint.as_str().to_string();
                     ep.store.lock().await.guest_entered(&guest);
-                    let entered = sessions.enter(&name, &peer.ip().to_string());
-                    let ended =
-                        serve_session(conn, config, ep.timeouts.idle, media, entered.end.clone())
-                            .await;
+                    let from = peer.ip().to_string();
+                    let touched = sessions.touched(&from);
+                    let entered = sessions.enter(&name, &from);
+                    let ended = serve_session(
+                        conn,
+                        config,
+                        ep.timeouts.idle,
+                        media,
+                        entered.end.clone(),
+                        touched,
+                    )
+                    .await;
                     {
                         // A desk accepted for this time may come back for a while, unless the
                         // person here sent it away.
@@ -1027,7 +1077,61 @@ struct ViewArgs {
     /// Write the per-second records here when the window closes (`--report`).
     report: Option<PathBuf>,
     label: Option<String>,
+    /// A display popped out of another session window: the picture alone.
+    popout: bool,
+    /// The session window this one belongs to.
+    parent: Option<u32>,
+    /// `--home`, to hand on to the windows this one opens.
+    home_flag: Option<PathBuf>,
     params: ViewParams,
+}
+
+/// The command line of a window showing `display` of the same host, popped out of this
+/// session: the same limits and the same permission, and no sound or clipboard of its own
+/// (the main window has those).
+fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::OsString> {
+    let p = &args.params;
+    let mut line: Vec<std::ffi::OsString> = vec![
+        "view".into(),
+        target.into(),
+        "--screen".into(),
+        display.to_string().into(),
+        "--popout".into(),
+        "--parent".into(),
+        std::process::id().to_string().into(),
+        "--mute".into(),
+        "--no-clipboard".into(),
+        "--keyboard".into(),
+        match args.keyboard {
+            KeyboardMode::Remote => "remote",
+            KeyboardMode::Local => "local",
+            KeyboardMode::Auto => "auto",
+        }
+        .into(),
+        "--pointer".into(),
+        args.pointer.to_string().into(),
+        "--max-bitrate".into(),
+        (f64::from(p.max_bitrate_kbps) / 1000.0).to_string().into(),
+        "--max-fps".into(),
+        p.max_fps.to_string().into(),
+        "--latency-limit".into(),
+        p.latency_limit_ms.to_string().into(),
+    ];
+    let mut flag = |on: bool, name: &str| {
+        if on {
+            line.push(name.into());
+        }
+    };
+    flag(args.view_only, "--view-only");
+    flag(p.scale_rungs, "--allow-scale");
+    flag(!p.reconnect, "--no-reconnect");
+    flag(!p.hw_decode, "--software-decode");
+    flag(!args.gpu, "--software-render");
+    if let Some(home) = &args.home_flag {
+        line.push("--home".into());
+        line.push(home.into());
+    }
+    line
 }
 
 /// Connects, then shows the host's screen in a window until it is closed.
@@ -1096,6 +1200,22 @@ fn run_view(
             waker.wake(UiEvent::Exit);
         });
     }
+    // A popped-out display follows the window it came from: gone with it, however it went.
+    if let Some(parent) = args.parent {
+        let waker = waker.clone();
+        std::thread::spawn(move || {
+            #[cfg(windows)]
+            while illum_win::process_alive(parent) {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            #[cfg(not(windows))]
+            let _ = parent;
+            #[cfg(windows)]
+            waker.wake(UiEvent::Exit);
+            #[cfg(not(windows))]
+            drop(waker);
+        });
+    }
     // All host-bound sends from the window go through this; the reconnect loop points it at the
     // current connection (§5.5).
     let live = illum::viewer::LiveSender::default();
@@ -1104,6 +1224,17 @@ fn run_view(
     // Shared with the window: pause the screen while minimized, and tell a static host from a
     // dead path (§5.4).
     let flags = Arc::new(illum::viewer::MediaFlags::default());
+    // The windows of other displays popped out of this one, to close them with it; and the
+    // command line that opens one.
+    let popped: Arc<std::sync::Mutex<Vec<std::process::Child>>> = Arc::default();
+    let pop_out_line = {
+        let base = pop_out_args(target, &args, 0);
+        Arc::new(move |number: u32| {
+            let mut line = base.clone();
+            line[3] = number.to_string().into(); // after "view <target> --screen"
+            line
+        })
+    };
     flags
         .display
         .store(args.params.display, std::sync::atomic::Ordering::Relaxed);
@@ -1342,6 +1473,32 @@ fn run_view(
                     Box::new(move || live.send_control(&ControlMsg::LockHost))
                 },
                 can_lock: with_input && hello.capabilities.iter().any(|c| c == "lock"),
+                popped_out: args.popout,
+                on_pop_out: {
+                    let (popped, line_for) = (popped.clone(), pop_out_line.clone());
+                    Box::new(move |number| {
+                        let Ok(exe) = std::env::current_exe() else {
+                            return;
+                        };
+                        let mut command = std::process::Command::new(exe);
+                        command
+                            .args(line_for(number))
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            command.creation_flags(0x0800_0000); // no console window
+                        }
+                        match command.spawn() {
+                            Ok(child) => popped.lock().expect("popped-out windows").push(child),
+                            Err(e) => {
+                                tracing::warn!(target: "session", "Display {} not popped out: {e}", number + 1)
+                            }
+                        }
+                    })
+                },
                 // Another of the host's displays: the screen is started anew for it, as it is
                 // for a stuck media path, and the choice outlives a reconnection.
                 on_display: {
@@ -1358,6 +1515,10 @@ fn run_view(
         )
         .map_err(anyhow::Error::msg)?;
 
+    // The displays popped out of this window close with it.
+    for mut window in popped.lock().expect("popped-out windows").drain(..) {
+        let _ = window.kill();
+    }
     // Window closed (or the session ended): say goodbye on whichever connection is live and
     // wait briefly for a clean close.
     live.send_control(&ControlMsg::ScreenStop);
@@ -1543,5 +1704,61 @@ mod tests {
             assert!(!left_unspoken(&refused), "{refused:?}");
         });
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// What a session window starts a popped-out display with is a command line this
+    /// program accepts, and it carries the display, the permission and the limits.
+    #[test]
+    fn a_pop_out_command_line_parses() {
+        use clap::Parser;
+        let args = ViewArgs {
+            keyboard: KeyboardMode::Local,
+            pointer: PointerMode::Host,
+            view_only: true,
+            gpu: false,
+            codec: None,
+            duration: None,
+            report: None,
+            label: None,
+            popout: false,
+            parent: None,
+            home_flag: Some(PathBuf::from(r"C:\Some Home")),
+            params: ViewParams {
+                max_bitrate_kbps: 7_500,
+                max_fps: 60,
+                latency_limit_ms: 80,
+                scale_rungs: true,
+                reconnect: false,
+                hw_decode: false,
+                ..ViewParams::new(0)
+            },
+        };
+        let mut line: Vec<std::ffi::OsString> = vec!["illum".into()];
+        line.extend(pop_out_args("100.64.0.20", &args, 2));
+        assert_eq!(line[4], "2", "the display is where the opener replaces it");
+        let cli = Cli::try_parse_from(&line).unwrap_or_else(|e| panic!("{line:?} is refused: {e}"));
+        let Some(Command::View {
+            screen,
+            popout,
+            parent,
+            view_only,
+            mute,
+            no_clipboard,
+            max_fps,
+            ..
+        }) = cli.command
+        else {
+            panic!("not a view command");
+        };
+        assert_eq!(
+            (screen, popout, parent),
+            (2, true, Some(std::process::id()))
+        );
+        assert!(
+            view_only && mute && no_clipboard,
+            "the main window's permission, no sound of its own"
+        );
+        assert_eq!(max_fps, 60);
+        assert_eq!(cli.home.as_deref(), Some(Path::new(r"C:\Some Home")));
     }
 }

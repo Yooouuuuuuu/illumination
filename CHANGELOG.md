@@ -11,6 +11,25 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-11-18
+
+Not released.
+
+### Added
+
+- **Pop out a display.** With a host that has several displays, More has "Pop
+  out display 2" (and so on): that display opens in a window of its own, which
+  you can put on another monitor. It has the main window's permission, no sound
+  of its own, and closes when the main window closes.
+
+### Changed
+
+- A desk with several windows open to this one is listed once under "Connected
+  here", and "Disconnect when idle" counts its input from any of them.
+
+Verified with cargo fmt, cargo clippy and cargo test. Not yet tried with a real
+host that has two displays.
+
 ## [0.14.3] - 2026-11-18
 
 Not released. Step four of the 0.14 redesign: the session window.

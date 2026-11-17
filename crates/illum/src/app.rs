@@ -1411,9 +1411,10 @@ mod tests {
         if let Incoming::Failed(why) = &host.state.lock().unwrap().incoming {
             panic!("the host cannot listen again: {why}");
         }
-        wait("both are shown as connected", &host, |s| {
-            (s.sessions == ["guest", "guest"]).then_some(())
-        });
+        // Two sessions of one desk (as with a display popped out) are one desk in the list.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(host.state.lock().unwrap().sessions, ["guest"]);
+        assert_eq!(host.state.lock().unwrap().guests.len(), 1);
         staying.send_control(&ControlMsg::Ping { seq: 7 });
         let answered = runtime.block_on(staying.recv_control(Duration::from_secs(5), "pong"));
         assert!(

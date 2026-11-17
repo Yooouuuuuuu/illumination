@@ -109,6 +109,9 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
             Duration::from_secs(30),
             listener.media(),
             Default::default(),
+            Arc::new(std::sync::atomic::AtomicU64::new(
+                illum_media::clock::now_us(),
+            )),
         )
         .await;
     });

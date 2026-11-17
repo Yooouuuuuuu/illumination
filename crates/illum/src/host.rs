@@ -1016,6 +1016,7 @@ pub async fn serve_session(
     idle: Duration,
     media: Arc<MediaHub>,
     end: Arc<tokio::sync::Notify>,
+    touched: Arc<AtomicU64>,
 ) -> Result<(), NetError> {
     let mut capture: Option<Capture> = None;
     let mut link: Option<MediaLink> = None;
@@ -1038,7 +1039,7 @@ pub async fn serve_session(
     // The idle rule (§10): no keyboard or mouse from the controller for `config.idle` ends
     // the session, with a warning a minute before to a controller that can show one.
     const IDLE_WARNING: Duration = Duration::from_secs(60);
-    let touched = Arc::new(AtomicU64::new(now_us()));
+    // `touched` is when input last came from this desk, through any of its sessions here.
     let warns = conn
         .peer_hello
         .as_ref()

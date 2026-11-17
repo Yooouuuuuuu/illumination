@@ -490,6 +490,10 @@ pub struct ViewerOptions {
     /// Whether the host can lock itself for us, and the call that asks.
     pub can_lock: bool,
     pub on_lock: Box<dyn Fn()>,
+    /// Called to open another of the host's displays in a window of its own.
+    pub on_pop_out: Box<dyn Fn(u32)>,
+    /// This window is such a popped-out display: the picture alone, with a tab that closes it.
+    pub popped_out: bool,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Being in front is reported by [`UiEvent::Front`] (the keyboard grab asks the system
@@ -532,6 +536,7 @@ impl ViewerWindow {
 
     /// Runs until the window is closed or `UiEvent::Exit` arrives.
     pub fn run(self, shared: Shared, options: ViewerOptions) -> Result<(), String> {
+        let popped_out = options.popped_out;
         let mut app = App {
             shared,
             options,
@@ -561,7 +566,11 @@ impl ViewerWindow {
             displays: Vec::new(),
             display: 0,
             focused: None,
-            mode: session_bar::WindowMode::Detail,
+            mode: if popped_out {
+                session_bar::WindowMode::Focus
+            } else {
+                session_bar::WindowMode::Detail
+            },
             icon_announced: false,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
@@ -1188,6 +1197,7 @@ impl App {
             display: self.display,
             can_sas: self.options.can_sas && self.options.input.is_some(),
             can_lock: self.options.can_lock && self.options.input.is_some(),
+            popped_out: self.options.popped_out,
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1281,6 +1291,7 @@ impl App {
             }
             BarAction::SecureAttention => (self.options.on_sas)(),
             BarAction::Lock => (self.options.on_lock)(),
+            BarAction::PopOut(display) => (self.options.on_pop_out)(display),
             BarAction::Disconnect => event_loop.exit(),
         }
     }

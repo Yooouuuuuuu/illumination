@@ -52,6 +52,8 @@ pub struct BarState {
     pub can_sas: bool,
     /// The host can lock itself when asked.
     pub can_lock: bool,
+    /// This window is a popped-out display: it has no bars, and its tab closes it.
+    pub popped_out: bool,
 }
 
 /// What the person asked for.
@@ -67,6 +69,8 @@ pub enum BarAction {
     SecureAttention,
     /// Lock the host.
     Lock,
+    /// Open another of the host's displays in a window of its own.
+    PopOut(u32),
     Disconnect,
 }
 
@@ -356,6 +360,16 @@ fn more_menu(ui: &mut Ui, state: &BarState, out: &mut Vec<BarAction>) {
                 out.push(BarAction::Lock);
             }
         }
+        if state.displays.len() > 1 {
+            group(ui, "Displays");
+            for display in 0..state.displays.len() as u32 {
+                if display != state.display
+                    && entry(ui, &format!("Pop out display {}", display + 1), false)
+                {
+                    out.push(BarAction::PopOut(display));
+                }
+            }
+        }
         ui.add_space(6.0);
         let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
         ui.painter().rect_filled(line, 0.0, LINE);
@@ -442,16 +456,25 @@ fn exit_tab(
             ui.painter().text(
                 tab.center(),
                 egui::Align2::CENTER_CENTER,
-                "Exit",
+                if state.popped_out { "Close" } else { "Exit" },
                 semibold(11.0),
                 NAVY,
             );
             if response.dragged() {
                 own.tab_offset += response.drag_delta().x;
             } else if response.clicked() {
-                out.push(BarAction::Mode(WindowMode::Detail));
+                // A popped-out display has no bars to come back to: its tab closes it.
+                out.push(if state.popped_out {
+                    BarAction::Disconnect
+                } else {
+                    BarAction::Mode(WindowMode::Detail)
+                });
             }
-            response.on_hover_text("Exit focus mode");
+            response.on_hover_text(if state.popped_out {
+                "Close this display's window"
+            } else {
+                "Exit focus mode"
+            });
         });
 }
 
@@ -473,5 +496,6 @@ pub fn sample() -> BarState {
         display: 0,
         can_sas: true,
         can_lock: true,
+        popped_out: false,
     }
 }

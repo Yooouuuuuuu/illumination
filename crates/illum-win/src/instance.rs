@@ -50,3 +50,18 @@ pub fn only_app(on_another: impl Fn() + Send + 'static) -> bool {
         });
     true
 }
+
+/// Whether the process with this id still runs. A popped-out display window uses it to
+/// follow its main window out.
+pub fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::WAIT_TIMEOUT;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
+            return false;
+        };
+        let state = WaitForSingleObject(process, 0);
+        let _ = CloseHandle(process);
+        state == WAIT_TIMEOUT
+    }
+}

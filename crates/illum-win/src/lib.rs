@@ -40,7 +40,7 @@ pub use input::{
     own_keyboard_layout,
 };
 #[cfg(windows)]
-pub use instance::only_app;
+pub use instance::{only_app, process_alive};
 #[cfg(windows)]
 pub use obstacle::input_obstacle;
 #[cfg(windows)]

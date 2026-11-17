@@ -1300,7 +1300,16 @@ app is one thing that is either running, with an icon in the tray, or not runnin
 - **Colours**: the window's own bar (title, minimize, close) is the icon's pale yellow
   where the system lets a program choose (Windows 11), on the app's window too; the two
   bars inside are paler still, with thin lines. The strong yellow is kept for a warning.
-- Not built: several displays at once (all in one picture, or one in a window of its own).
+- **A display in a window of its own (v0.14.4).** "Pop out display N" under More opens
+  that display in a second window, to put on another monitor. It is a second session to
+  the same host, started as a process of its own with the main window's limits and its
+  permission (view-only stays view-only), and without sound or clipboard of its own, which
+  the main window has. The window is the picture alone, with a "Close" tab at the top
+  edge. It closes with the main window: the main window ends the ones it opened, and each
+  watches for the main one being gone, should that end badly. On the host the desk is
+  still one desk: it is listed once, and the idle rule counts input from any of its
+  sessions.
+- Not built: all displays in one window (planned as tiles, each display its own stream).
 
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads

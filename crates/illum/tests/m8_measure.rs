@@ -56,6 +56,9 @@ async fn start_host(name: &str) -> SocketAddr {
                         Duration::from_secs(30),
                         media,
                         Default::default(),
+                        Arc::new(std::sync::atomic::AtomicU64::new(
+                            illum_media::clock::now_us(),
+                        )),
                     )
                     .await;
                 }
