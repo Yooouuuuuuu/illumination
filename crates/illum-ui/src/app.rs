@@ -214,6 +214,10 @@ pub struct AppState {
     pub incoming: Incoming,
     /// Names of the desks connected to this one right now.
     pub sessions: Vec<String>,
+    /// The same desks with where they are and since when, for the "connected here" list.
+    pub guests: Vec<Guest>,
+    /// How many sessions this desk has open to other desks.
+    pub outgoing: usize,
     pub desks: Vec<Desk>,
     /// Whether each desk that can be dialled answers right now, by `connect_to`. Missing:
     /// not looked yet.
@@ -256,6 +260,11 @@ pub enum Command {
     /// End the sessions of the desk of this name that is connected to this one.
     EndSession(String),
     SaveSettings(Settings),
+    /// Send the window to the tray; the app goes on.
+    Hide,
+    /// Close the app: every connection ends and this desk cannot be reached until it is
+    /// opened again.
+    Quit,
 }
 
 /// A key as four rows of four groups: short enough lines to compare across two screens.
@@ -709,6 +718,10 @@ pub struct HomeUi {
     jump: Option<Item>,
     /// Asked to leave Settings with unsaved changes.
     leaving: bool,
+    /// The "connected here" list is open.
+    connected: bool,
+    /// Asked to close while something is connected.
+    closing: bool,
 }
 
 impl HomeUi {
@@ -724,6 +737,35 @@ impl HomeUi {
     pub fn on_came_in() -> HomeUi {
         HomeUi {
             tab: Some(Tab::CameIn),
+            ..HomeUi::default()
+        }
+    }
+
+    /// Shows the list of desks connected here (the tray's "Connected here").
+    pub fn show_connected(&mut self) {
+        self.connected = true;
+    }
+
+    /// The person asked to close. Returns whether that can go ahead at once; with something
+    /// connected it cannot, and the question about it is shown instead.
+    pub fn ask_close(&mut self, state: &AppState) -> bool {
+        let connections = state.sessions.len() + state.outgoing;
+        self.closing = connections > 0;
+        connections == 0
+    }
+
+    /// Opens on the close question (for pictures).
+    pub fn closing() -> HomeUi {
+        HomeUi {
+            closing: true,
+            ..HomeUi::default()
+        }
+    }
+
+    /// Opens on the "connected here" list (for pictures).
+    pub fn connected() -> HomeUi {
+        HomeUi {
+            connected: true,
             ..HomeUi::default()
         }
     }
@@ -777,6 +819,8 @@ impl HomeUi {
             });
         self.edit_dialog(ui.ctx(), &mut out);
         self.leave_dialog(ui.ctx(), &mut out);
+        self.connected_dialog(ui.ctx(), state, &mut out);
+        self.close_dialog(ui.ctx(), state, &mut out);
         if let Some(q) = state.questions.front() {
             question(ui.ctx(), q, &mut out);
         }
@@ -802,7 +846,9 @@ impl HomeUi {
                             if ui.add(button("Settings", WHITE, 40.0)).clicked() {
                                 self.page = Page::Settings;
                             }
-                            status_pill(ui, state);
+                            if status_pill(ui, state) {
+                                self.connected = true;
+                            }
                         });
                     }
                     Page::Settings => {
@@ -1150,6 +1196,106 @@ impl HomeUi {
         }
     }
 
+    /// The desks connected here right now, each with a way to send it away.
+    fn connected_dialog(&mut self, ctx: &egui::Context, state: &AppState, out: &mut Vec<Command>) {
+        if !self.connected {
+            return;
+        }
+        let mut close = false;
+        dialog(ctx, "connected-here", |ui| {
+            ui.set_width(400.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Connected here").font(heading(20.0)));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(button("Close", WHITE, 36.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if state.guests.is_empty() {
+                ui.label(muted("No desk is connected."));
+            }
+            for guest in &state.guests {
+                Frame::new()
+                    .stroke(outline())
+                    .corner_radius(CornerRadius::same(12))
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&guest.name).font(heading(16.0)));
+                                    ui.label(
+                                        RichText::new(&guest.address).font(mono(12.0)).color(MUTED),
+                                    );
+                                });
+                                ui.label(
+                                    RichText::new(format!(
+                                        "for {}",
+                                        duration(state.now.saturating_sub(guest.since))
+                                    ))
+                                    .size(13.0),
+                                );
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.add(button("Disconnect", CORAL, 40.0)).clicked() {
+                                    out.push(Command::EndSession(guest.name.clone()));
+                                }
+                            });
+                        });
+                    });
+            }
+        });
+        if close {
+            self.connected = false;
+        }
+    }
+
+    /// Closing ends every connection: said first, with the way to keep them (the tray).
+    fn close_dialog(&mut self, ctx: &egui::Context, state: &AppState, out: &mut Vec<Command>) {
+        if !self.closing {
+            return;
+        }
+        let mut did = None;
+        dialog(ctx, "close-app", |ui| {
+            ui.set_width(392.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.label(RichText::new("Close Illumination?").font(heading(22.0)));
+            let connections = state.sessions.len() + state.outgoing;
+            ui.label(if connections == 1 {
+                "1 connection will end.".to_string()
+            } else {
+                format!("{connections} connections will end.")
+            });
+            ui.label(muted(
+                "This desk cannot be reached until you open it again.",
+            ));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.add(button("Cancel", WHITE, 44.0)).clicked() {
+                    did = Some(Command::DismissDial);
+                }
+                if ui.add(button("Minimize to tray", WHITE, 44.0)).clicked() {
+                    did = Some(Command::Hide);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(button("Close", CORAL, 44.0)).clicked() {
+                        did = Some(Command::Quit);
+                    }
+                });
+            });
+        });
+        if let Some(command) = did {
+            self.closing = false;
+            if command != Command::DismissDial {
+                out.push(command);
+            }
+        }
+    }
+
     fn leave_dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
         if !self.leaving {
             return;
@@ -1444,8 +1590,19 @@ fn dialog(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
         .show(ctx, add);
 }
 
-/// This desk's state, top right.
-fn status_pill(ui: &mut Ui, state: &AppState) {
+/// How long, as a clock: 12:40, 1:03:15.
+pub fn duration(seconds: u64) -> String {
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// This desk's state, top right. Returns whether it was clicked while a desk is connected
+/// (which opens the list of them).
+fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
     let (text, fill, solid) = match (&state.incoming, state.sessions.as_slice()) {
         (Incoming::Failed(_), _) => ("Cannot be reached".to_string(), CORAL, false),
         (_, [one]) => (format!("{one} is connected"), YELLOW, true),
@@ -1460,7 +1617,7 @@ fn status_pill(ui: &mut Ui, state: &AppState) {
         (Incoming::Listening, []) => ("Ready for connections".to_string(), GREEN, true),
         (Incoming::Off, []) => ("Not listening".to_string(), WHITE, false),
     };
-    Frame::new()
+    let pill = Frame::new()
         .fill(fill)
         .stroke(outline())
         .corner_radius(CornerRadius::same(255))
@@ -1480,6 +1637,7 @@ fn status_pill(ui: &mut Ui, state: &AppState) {
                 }
             });
         });
+    !state.sessions.is_empty() && pill.response.interact(Sense::click()).clicked()
 }
 
 fn this_desk(ui: &mut Ui, state: &AppState, width: f32, min_height: f32) {
@@ -1769,6 +1927,8 @@ pub fn sample_state() -> AppState {
         questions: VecDeque::new(),
         settings: Settings::default(),
         now,
+        guests: Vec::new(),
+        outgoing: 0,
     }
 }
 

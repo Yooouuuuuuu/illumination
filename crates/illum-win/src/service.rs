@@ -121,7 +121,22 @@ unsafe extern "system" fn control(control: u32, _: u32, _: *mut c_void, _: *mut 
     0
 }
 
-unsafe extern "system" fn service_main(_: u32, _: *mut PWSTR) {
+/// What the service was started with, after its own name: nothing when Windows started it
+/// at boot, whatever the starter passed otherwise.
+static START_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The arguments this service was started with (`sc start <name> <args>`).
+pub fn service_start_args() -> Vec<String> {
+    START_ARGS.lock().expect("service arguments").clone()
+}
+
+unsafe extern "system" fn service_main(count: u32, args: *mut PWSTR) {
+    if !args.is_null() {
+        let given = (1..count as usize)
+            .filter_map(|i| unsafe { (*args.add(i)).to_string().ok() })
+            .collect();
+        *START_ARGS.lock().expect("service arguments") = given;
+    }
     let Ok(handle) = (unsafe { RegisterServiceCtrlHandlerExW(NAME, Some(control), None) }) else {
         return;
     };

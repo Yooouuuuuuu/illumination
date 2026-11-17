@@ -80,7 +80,7 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-only"
     ${ElseIf} ${Silent}
       Abort "${NAME} is still open."
     ${Else}
-      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${NAME} is still open.$\n$\nClose its windows (sessions too), then press Retry." IDRETRY +2
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${NAME} is still open.$\n$\nQuit it from its icon in the tray (next to the clock), then press Retry." IDRETRY +2
       Abort "${NAME} is still open."
       StrCpy $1 0
     ${EndIf}
@@ -159,6 +159,8 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${NAME}.lnk"
   Delete "$DESKTOP\${NAME}.lnk"
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
+  ; What "Start on boot" added for whoever uninstalls.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${NAME}"
   ; %ProgramData%\Illumination (this desk's key, its desks, settings, logs) stays: installing
   ; again brings the same desk back.
 SectionEnd

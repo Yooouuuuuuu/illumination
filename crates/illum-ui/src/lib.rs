@@ -14,6 +14,7 @@ pub mod icon;
 pub mod input;
 pub mod measure;
 pub mod session_bar;
+pub mod tray;
 pub mod workload;
 
 pub use input::{GrabHotkeys, Grabbed, InputOut, KeyboardMode};

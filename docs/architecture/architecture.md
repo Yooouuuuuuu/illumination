@@ -1243,6 +1243,39 @@ Crates are added only when a milestone needs them.
 - "Allow incoming connections" is gone as a switch: an open app listens. Whether a desk
   gets in is its permission; not being reachable at all is closing the app (v0.14.2).
 
+*Running, hidden, closed (v0.14.2; decided with the user 2026-11-17, after Sunshine).* The
+app is one thing that is either running, with an icon in the tray, or not running at all.
+- **Minimize goes to the tray**, not the taskbar. A click on the tray icon opens the window;
+  its menu has Open, "Connected here: N" and Quit. The icon's tile turns the strong yellow
+  while a desk is connected here (`illum_ui::tray`, the `tray-icon` crate; no tray on
+  Linux yet, where the window minimizes as usual).
+- **Closing is closing everything**: the window's X, or Quit at the tray. Every session
+  this desk opened ends, every desk connected here is told goodbye, and on an installed
+  desk the service is stopped, so nothing of Illumination runs and the desk cannot be
+  reached until the app is opened again. With something connected the app asks first
+  ("N connections will end"), offering the tray instead. This replaces v0.13.0's "the
+  service always runs": whether an installed desk can be reached is now the same as
+  whether the app runs.
+- **Opening the app starts the service** again. Installing lets the PC's users start and
+  stop this one service and nothing else about it (`sc sdset`: start and stop for the
+  interactive users; not its configuration, which would be a way to run anything as the
+  system).
+- **Start on boot** (Settings, on by default) is two things: the app starts with the
+  sign-in, hidden in the tray (`illum --tray`, a value under the user's `Run` key that the
+  app keeps in step with the setting), and the service starts with Windows, so the desk
+  can be reached at the sign-in screen before anyone has signed in. Windows always starts
+  the service; with the setting off the service looks at the settings and stops again at
+  once. The app tells its own start of the service from Windows' by an argument
+  (`sc start Illumination app`).
+- **One app per person**: opened again while it runs, the running one's window comes up
+  (`illum_win::only_app`).
+- **Who is connected here** is a list opened from the top-right state or the tray:
+  each desk with its address and how long, and Disconnect. It never opens by itself. The
+  question about a new desk is the one window that does.
+- Not as drawn: the list and the close question are dialogs in the app's window, not
+  windows of their own, and the list does not yet show what a desk may do or how long it
+  has been idle.
+
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads
 "Offline". The app knocks on each desk's port every twenty seconds, and at once when the

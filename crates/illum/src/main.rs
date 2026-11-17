@@ -89,6 +89,9 @@ struct Cli {
     /// desks in a window of its own and follows the app's settings (with --service).
     #[arg(long, requires = "service", hide = true)]
     from_service: bool,
+    /// Start the app in the tray, its window hidden (what "Start on boot" runs).
+    #[arg(long)]
+    tray: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -263,7 +266,7 @@ impl Cli {
 }
 
 /// Device-wide folder, shared by every role (AnyDesk keeps its key in ProgramData too).
-fn default_home() -> PathBuf {
+pub(crate) fn default_home() -> PathBuf {
     std::env::var_os("ProgramData")
         .map(|p| PathBuf::from(p).join("Illumination"))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".illumination")))
@@ -465,7 +468,7 @@ fn main() -> std::process::ExitCode {
         // No command: the app window, which also owns the main thread.
         None if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
-            app::run_app(&runtime, &home, cli.home.clone())
+            app::run_app(&runtime, &home, cli.home.clone(), cli.tray)
         }
         _ => runtime.block_on(run(cli)),
     };
@@ -801,6 +804,10 @@ struct Sessions {
 struct Live {
     id: u64,
     name: String,
+    /// Where it connected from, without a port.
+    address: String,
+    /// Unix seconds when it connected.
+    since: u64,
     end: Arc<tokio::sync::Notify>,
     /// Ended by the person at this desk, not by the controller or the link.
     dismissed: Arc<std::sync::atomic::AtomicBool>,
@@ -827,7 +834,15 @@ impl Sessions {
         live.iter().map(|s| s.name.clone()).collect()
     }
 
-    fn enter(&self, name: &str) -> Entered {
+    /// The connected desks as the app lists them: name, address, connected since.
+    fn guests(&self) -> Vec<(String, String, u64)> {
+        let live = self.live.lock().expect("sessions");
+        live.iter()
+            .map(|s| (s.name.clone(), s.address.clone(), s.since))
+            .collect()
+    }
+
+    fn enter(&self, name: &str, address: &str) -> Entered {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let entered = Entered {
             sessions: self.clone(),
@@ -838,6 +853,10 @@ impl Sessions {
         self.live.lock().expect("sessions").push(Live {
             id: entered.id,
             name: name.to_string(),
+            address: address.to_string(),
+            since: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
             end: entered.end.clone(),
             dismissed: entered.dismissed.clone(),
         });
@@ -945,7 +964,7 @@ async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, s
                     tracing::info!(target: "service", "[{peer}] Session with \"{name}\" (Illumination {version}) started.");
                     let guest = conn.peer_fingerprint.as_str().to_string();
                     ep.store.lock().await.guest_entered(&guest);
-                    let entered = sessions.enter(&name);
+                    let entered = sessions.enter(&name, &peer.ip().to_string());
                     let ended =
                         serve_session(conn, config, ep.timeouts.idle, media, entered.end.clone())
                             .await;

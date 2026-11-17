@@ -11,6 +11,37 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-11-18
+
+Not released. Step three of the 0.14 redesign: running, hidden, closed.
+
+### Added
+
+- **A tray icon.** Minimizing sends the app to the tray instead of the taskbar.
+  A click opens the window; the menu has Open, "Connected here" and Quit. The
+  icon turns yellow while a desk is connected to this one.
+- **"Connected here"**: click the state at the top right, or the tray menu, to
+  see each connected desk, its address and for how long, with Disconnect.
+- **Start on boot** (Settings, on by default): the app starts in the tray when
+  you sign in, and an installed desk can be reached at the sign-in screen.
+- Opening the app while it is running brings its window up instead of starting
+  a second one.
+
+### Changed
+
+- **Closing the app closes everything.** The X, or Quit in the tray menu, ends
+  every connection and stops the service: nothing of Illumination is left
+  running and this desk cannot be reached until you open the app again. If
+  something is connected it asks first and offers the tray instead.
+- Opening the app starts the service again, without an administrator prompt.
+  Installing this version sets that up; a desk installed with an earlier
+  version needs the new installer run once.
+
+Verified with cargo fmt, cargo clippy and cargo test, by pictures of the new
+dialogs, and by starting the app in the tray on this desktop. Closing and
+reopening with the installed service has not been tried: it needs this
+version's installer.
+
 ## [0.14.1] - 2026-11-18
 
 Not released. Step two of the 0.14 redesign: the app window.

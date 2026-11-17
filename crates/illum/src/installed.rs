@@ -57,7 +57,17 @@ pub struct HostStatus {
     pub why: String,
     /// The desks connected to this one now.
     pub sessions: Vec<String>,
+    /// The same, with where each is and since when (Unix seconds).
+    pub guests: Vec<GuestStatus>,
     pub version: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuestStatus {
+    pub name: String,
+    pub address: String,
+    pub since: u64,
 }
 
 pub fn status_path(home: &Path) -> PathBuf {
@@ -137,8 +147,29 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         s.version = env!("CARGO_PKG_VERSION").into();
     });
     tracing::info!(target: "service", "Illumination {} host of the installed desk.", env!("CARGO_PKG_VERSION"));
-    let shown = told.clone();
-    let sessions = Sessions::new(move |names| shown.change(|s| s.sessions = names));
+    // The list is filled a line below, once the registry it reads exists.
+    let guests_of: Arc<Mutex<Option<Sessions>>> = Arc::default();
+    let (shown, read) = (told.clone(), guests_of.clone());
+    let sessions = Sessions::new(move |names| {
+        let guests = read
+            .lock()
+            .expect("sessions")
+            .as_ref()
+            .map(|s| s.guests())
+            .unwrap_or_default();
+        shown.change(|s| {
+            s.sessions = names;
+            s.guests = guests
+                .into_iter()
+                .map(|(name, address, since)| GuestStatus {
+                    name,
+                    address,
+                    since,
+                })
+                .collect();
+        })
+    });
+    *guests_of.lock().expect("sessions") = Some(sessions.clone());
     // What the app may not do itself, it asks for here (`control`).
     let ending = sessions.clone();
     let _asked = AbortOnDrop(tokio::spawn(crate::control::serve(
@@ -382,6 +413,13 @@ pub fn run_service() -> Result<()> {
     );
     illum_win::run_as_service(move |stop| {
         tracing::info!(target: "service", "Illumination {} service started.", env!("CARGO_PKG_VERSION"));
+        // Started by Windows at boot, with "Start on boot" switched off: not wanted until
+        // the person opens the app, which starts this service saying so (architecture §14).
+        let by_app = illum_win::service_start_args().iter().any(|a| a == STARTED_BY_APP);
+        if !by_app && !crate::app::load_settings(&crate::default_home()).start_on_boot {
+            tracing::info!(target: "service", "\"Start on boot\" is off: stopping until the app is opened.");
+            return;
+        }
         let mut host: Option<illum_win::SessionProcess> = None;
         let mut last_start: Option<std::time::Instant> = None;
         // Ctrl+Alt+Del for a controller: the host raises a flag, this service makes the
@@ -454,8 +492,11 @@ pub fn run_service() -> Result<()> {
 /// Runs a Windows tool and returns its exit code with what it printed.
 #[cfg(windows)]
 fn tool(program: &str, args: &[&str]) -> Result<(i32, String)> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW: also run from the windowed app, where a console would flash up.
     let out = std::process::Command::new(program)
         .args(args)
+        .creation_flags(0x0800_0000)
         .output()
         .with_context(|| format!("running {program}"))?;
     let said = format!(
@@ -474,6 +515,82 @@ fn must(what: &str, program: &str, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
+/// What the app passes when it starts the service, to tell its start from one at boot.
+pub const STARTED_BY_APP: &str = "app";
+
+/// Starts the installed service for the app that was just opened, if it is installed and
+/// not running, and waits for it to be up. `false` when there is no service to start.
+#[cfg(windows)]
+pub fn start_for_app() -> bool {
+    use illum_win::{SERVICE_NAME, ServiceState, service_state};
+    match service_state() {
+        ServiceState::NotInstalled => false,
+        ServiceState::Running => true,
+        ServiceState::Stopped => {
+            let _ = tool("sc.exe", &["start", SERVICE_NAME, STARTED_BY_APP]);
+            wait_until(|| service_state() == ServiceState::Running);
+            // Its host needs a moment more to open the pipe the app talks to.
+            std::thread::sleep(Duration::from_millis(500));
+            service_state() == ServiceState::Running
+        }
+    }
+}
+
+/// Stops the installed service, as closing the app does. Needs no administrator: installing
+/// lets the PC's users start and stop this one service.
+#[cfg(windows)]
+pub fn stop_for_app() {
+    use illum_win::{SERVICE_NAME, ServiceState, service_state};
+    if service_state() == ServiceState::Running {
+        let _ = tool("sc.exe", &["stop", SERVICE_NAME]);
+        wait_until(|| service_state() != ServiceState::Running);
+    }
+}
+
+/// Makes the app start with the person's sign-in, in the tray, or not.
+#[cfg(windows)]
+pub fn set_autostart(on: bool) {
+    const RUN: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let done = if on {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let exe = exe.display().to_string();
+        let exe = exe.strip_prefix(r"\\?\").unwrap_or(&exe).to_string();
+        let command = format!("\"{exe}\" --tray");
+        tool(
+            "reg.exe",
+            &[
+                "add",
+                RUN,
+                "/v",
+                "Illumination",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &command,
+                "/f",
+            ],
+        )
+    } else {
+        tool("reg.exe", &["delete", RUN, "/v", "Illumination", "/f"])
+    };
+    if let Err(e) = done {
+        tracing::warn!(target: "app", "Start on boot not set: {e:#}");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn start_for_app() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn stop_for_app() {}
+
+#[cfg(not(windows))]
+pub fn set_autostart(_on: bool) {}
 
 /// Windows' own name for "not allowed": the command needs an administrator.
 #[cfg(windows)]
@@ -585,6 +702,19 @@ pub fn install(home: &Path) -> Result<()> {
         // Not fatal: everything else works without.
         println!("Ctrl+Alt+Del from a controller will not work: {why:#}");
     }
+    // The PC's users may start and stop this service (and nothing else about it): closing
+    // the app stops it and opening the app starts it, without an administrator's prompt.
+    // (IU: whoever is signed in at the PC. RP start, WP stop, added to what users have.)
+    must(
+        "letting users start and stop the service",
+        "sc.exe",
+        &[
+            "sdset",
+            SERVICE_NAME,
+            "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)\
+             (A;;CCLCSWRPWPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)",
+        ],
+    )?;
     must("starting the service", "sc.exe", &["start", SERVICE_NAME])?;
     wait_until(|| service_state() == ServiceState::Running);
     println!(

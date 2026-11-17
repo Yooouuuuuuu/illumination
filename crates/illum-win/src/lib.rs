@@ -14,6 +14,8 @@ mod gdi;
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
+mod instance;
+#[cfg(windows)]
 mod obstacle;
 #[cfg(windows)]
 mod pipe;
@@ -38,6 +40,8 @@ pub use input::{
     own_keyboard_layout,
 };
 #[cfg(windows)]
+pub use instance::only_app;
+#[cfg(windows)]
 pub use obstacle::input_obstacle;
 #[cfg(windows)]
 pub use pipe::{PipeSecurity, own_user_sid, pipe_client_session, session_user_sid};
@@ -48,7 +52,7 @@ pub use sas::{SasGate, request as request_sas, send as send_sas};
 #[cfg(windows)]
 pub use service::{
     SERVICE_NAME, ServiceState, SessionProcess, console_session, own_session, run_as_service,
-    runs_as_system, service_state, start_as_session_user, start_in_session,
+    runs_as_system, service_start_args, service_state, start_as_session_user, start_in_session,
 };
 
 #[cfg(windows)]

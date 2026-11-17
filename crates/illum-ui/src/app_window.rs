@@ -6,6 +6,7 @@
 
 use crate::app::{AppState, Command, HomeUi, apply_style};
 use crate::gpu::Gpu;
+use crate::tray::{Tray, TrayAction};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -102,23 +103,46 @@ impl Painter {
     }
 }
 
-/// Wakes the window from any thread after the [`AppState`] changed.
+/// Why the window's loop is woken from outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    /// The [`AppState`] changed.
+    Redraw,
+    /// A question is waiting for the person.
+    Attention,
+    /// Bring the window up: the app was opened again while it runs.
+    Show,
+    /// Something was chosen at the tray icon.
+    Tray(TrayAction),
+}
+
+/// Wakes the window from any thread.
 #[derive(Clone)]
-pub struct AppWaker(Arc<Mutex<EventLoopProxy<bool>>>);
+pub struct AppWaker(Arc<Mutex<EventLoopProxy<Wake>>>);
 
 impl AppWaker {
+    fn send(&self, wake: Wake) {
+        let _ = self.0.lock().expect("app waker").send_event(wake);
+    }
+
+    /// After the [`AppState`] changed.
     pub fn wake(&self) {
-        let _ = self.0.lock().expect("app waker").send_event(false);
+        self.send(Wake::Redraw);
     }
 
     /// Wakes the window and asks the person to look at it (a question is waiting).
     pub fn attention(&self) {
-        let _ = self.0.lock().expect("app waker").send_event(true);
+        self.send(Wake::Attention);
+    }
+
+    /// Brings the window up from the tray.
+    pub fn show(&self) {
+        self.send(Wake::Show);
     }
 }
 
 pub struct AppWindow {
-    event_loop: EventLoop<bool>,
+    event_loop: EventLoop<Wake>,
 }
 
 impl AppWindow {
@@ -134,14 +158,16 @@ impl AppWindow {
         AppWaker(Arc::new(Mutex::new(self.event_loop.create_proxy())))
     }
 
-    /// Runs until the window is closed. `on_command` is called on this thread for each thing
-    /// the person asked for; it must not block.
+    /// Runs the app until it is closed (not until its window is: that only goes to the
+    /// tray). `on_command` is called on this thread for each thing the person asked for; it
+    /// must not block. With `in_tray` the window starts hidden, as after a start on boot.
     pub fn run(
         self,
         state: Arc<Mutex<AppState>>,
         on_command: impl FnMut(Command) + 'static,
+        in_tray: bool,
     ) -> Result<(), String> {
-        self.run_as(state, on_command, false)
+        self.run_as(state, on_command, false, in_tray)
     }
 
     /// Runs a small window that shows only the first waiting question, until it is closed.
@@ -151,7 +177,7 @@ impl AppWindow {
         state: Arc<Mutex<AppState>>,
         on_command: impl FnMut(Command) + 'static,
     ) -> Result<(), String> {
-        self.run_as(state, on_command, true)
+        self.run_as(state, on_command, true, false)
     }
 
     fn run_as(
@@ -159,11 +185,16 @@ impl AppWindow {
         state: Arc<Mutex<AppState>>,
         on_command: impl FnMut(Command) + 'static,
         question_only: bool,
+        in_tray: bool,
     ) -> Result<(), String> {
         let mut app = App {
             state,
             on_command: Box::new(on_command),
             question_only,
+            in_tray,
+            waker: self.waker(),
+            tray: None,
+            exit: false,
             home: HomeUi::default(),
             ctx: egui::Context::default(),
             shown: None,
@@ -197,6 +228,13 @@ struct App {
     on_command: Box<dyn FnMut(Command)>,
     /// The small window of `illum ask`: one question and nothing else.
     question_only: bool,
+    /// Start with the window hidden, the app in the tray.
+    in_tray: bool,
+    waker: AppWaker,
+    /// The tray icon, where there is one. Without it the window cannot hide.
+    tray: Option<Tray>,
+    /// The app was closed: the loop ends after this event.
+    exit: bool,
     home: HomeUi,
     ctx: egui::Context,
     shown: Option<Shown>,
@@ -218,6 +256,7 @@ impl App {
             attrs
                 .with_inner_size(LogicalSize::new(1120.0, 760.0))
                 .with_min_inner_size(LogicalSize::new(420.0, 520.0))
+                .with_visible(!self.in_tray)
         };
         let window = Arc::new(
             event_loop
@@ -346,12 +385,62 @@ impl App {
             self.redraw_at = Some(self.redraw_at.map_or(at, |old| old.min(at)));
         }
         for command in commands {
-            (self.on_command)(command);
+            match command {
+                Command::Hide => self.hide(),
+                Command::Quit => self.quit(),
+                other => (self.on_command)(other),
+            }
+        }
+    }
+
+    /// Brings the window up, from the tray or from behind others.
+    fn show(&mut self) {
+        if let Some(shown) = &self.shown {
+            shown.window.set_visible(true);
+            shown.window.set_minimized(false);
+            shown.window.focus_window();
+            shown.window.request_redraw();
+        }
+    }
+
+    /// Sends the window to the tray; without a tray icon, to the taskbar.
+    fn hide(&mut self) {
+        if let Some(shown) = &self.shown {
+            if self.tray.is_some() {
+                shown.window.set_visible(false);
+            } else {
+                shown.window.set_minimized(true);
+            }
+        }
+    }
+
+    /// Closes the app: the rest of the program ends every connection, then the loop ends.
+    fn quit(&mut self) {
+        (self.on_command)(Command::Quit);
+        self.exit = true;
+    }
+
+    /// The person asked to close (the window's X, or Quit at the tray). With something
+    /// connected the window asks first.
+    fn close_requested(&mut self) {
+        let state = self.state.lock().expect("app state").clone();
+        if self.home.ask_close(&state) {
+            self.quit();
+        } else {
+            self.show();
+        }
+    }
+
+    /// The tray icon says how many desks are connected here.
+    fn tell_tray(&mut self) {
+        if let Some(tray) = &mut self.tray {
+            let count = self.state.lock().expect("app state").sessions.len();
+            tray.set_connected(count);
         }
     }
 }
 
-impl ApplicationHandler<bool> for App {
+impl ApplicationHandler<Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.shown.is_some() {
             return;
@@ -360,6 +449,14 @@ impl ApplicationHandler<bool> for App {
             Ok(shown) => {
                 shown.window.request_redraw();
                 self.shown = Some(shown);
+                if !self.question_only {
+                    let waker = self.waker.clone();
+                    self.tray = Tray::new(move |action| waker.send(Wake::Tray(action)));
+                    if self.tray.is_none() && self.in_tray {
+                        // Nowhere to hide: the window is the app.
+                        self.show();
+                    }
+                }
             }
             Err(why) => {
                 self.failed = Some(why);
@@ -368,16 +465,31 @@ impl ApplicationHandler<bool> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, attention: bool) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, wake: Wake) {
+        match wake {
+            Wake::Redraw => {}
+            Wake::Attention => {
+                // A question is waiting: come up from the tray, and flash the taskbar button.
+                self.show();
+                if let Some(shown) = &self.shown {
+                    shown.window.request_user_attention(Some(
+                        winit::window::UserAttentionType::Informational,
+                    ));
+                }
+            }
+            Wake::Show | Wake::Tray(TrayAction::Open) => self.show(),
+            Wake::Tray(TrayAction::Connected) => {
+                self.home.show_connected();
+                self.show();
+            }
+            Wake::Tray(TrayAction::Quit) => self.close_requested(),
+        }
+        self.tell_tray();
         if let Some(shown) = &self.shown {
             shown.window.request_redraw();
-            if attention {
-                // A question is waiting: flash the taskbar button and come back from minimized.
-                shown.window.set_minimized(false);
-                shown
-                    .window
-                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
-            }
+        }
+        if self.exit {
+            event_loop.exit();
         }
     }
 
@@ -386,12 +498,32 @@ impl ApplicationHandler<bool> for App {
             return;
         };
         match &event {
-            WindowEvent::CloseRequested => {
+            WindowEvent::CloseRequested if self.question_only => {
                 event_loop.exit();
+                return;
+            }
+            WindowEvent::CloseRequested => {
+                self.close_requested();
+                if self.exit {
+                    event_loop.exit();
+                }
                 return;
             }
             WindowEvent::RedrawRequested => {
                 self.draw();
+                if self.exit {
+                    event_loop.exit();
+                }
+                return;
+            }
+            // Minimized: to the tray, so the app does not sit in the taskbar.
+            WindowEvent::Resized(_)
+                if !self.question_only
+                    && self.tray.is_some()
+                    && shown.window.is_minimized() == Some(true) =>
+            {
+                shown.window.set_minimized(false);
+                shown.window.set_visible(false);
                 return;
             }
             _ => {}
@@ -531,15 +663,35 @@ mod tests {
             os: "Windows 11".into(),
         });
         let mut connected = sample_state();
-        connected.sessions = vec!["studio-laptop".into()];
+        connected.sessions = vec!["Laptop".into(), "render-box".into()];
+        connected.guests = vec![
+            crate::app::Guest {
+                name: "Laptop".into(),
+                address: "100.64.0.20".into(),
+                since: connected.now - 760,
+            },
+            crate::app::Guest {
+                name: "render-box".into(),
+                address: "100.64.0.31".into(),
+                since: connected.now - 3_795,
+            },
+        ];
+        connected.outgoing = 1;
         let screens = [
             ("home", HomeUi::default(), sample_state(), (1120.0, 760.0)),
             (
                 "home-connected",
                 HomeUi::default(),
-                connected,
+                connected.clone(),
                 (1120.0, 760.0),
             ),
+            (
+                "connected-here",
+                HomeUi::connected(),
+                connected.clone(),
+                (1120.0, 760.0),
+            ),
+            ("close", HomeUi::closing(), connected, (1120.0, 760.0)),
             (
                 "home-narrow",
                 HomeUi::default(),

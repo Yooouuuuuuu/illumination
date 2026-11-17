@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use illum_core::protocol::{ControlMsg, DEFAULT_PORT};
 use illum_net::session::{connect, normalize_target};
 use illum_net::{Answer, Endpoint, Prompt, PromptRequest, bind};
-use illum_ui::app::{AppState, Command, Desk, Dial, Incoming, Question, Settings, Verdict};
+use illum_ui::app::{AppState, Command, Desk, Dial, Guest, Incoming, Question, Settings, Verdict};
 use illum_ui::app_window::AppWindow;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -182,6 +182,8 @@ struct Backend {
     sessions: Sessions,
     /// Rung when the list of desks changed, so the new one's "online" is looked at now.
     desks_changed: tokio::sync::Notify,
+    /// The session windows this app opened, to end them when it closes.
+    opened: Mutex<Vec<Arc<Mutex<std::process::Child>>>>,
 }
 
 /// The command line of a session: `view <target> <flags>`, then `--home` when this app was
@@ -256,7 +258,20 @@ impl Backend {
                 let lists = this.clone();
                 this.runtime
                     .spawn(async move { lists.refresh_desks().await });
-                this.update(|s| s.sessions = names);
+                let guests = this
+                    .sessions
+                    .guests()
+                    .into_iter()
+                    .map(|(name, address, since)| Guest {
+                        name,
+                        address,
+                        since,
+                    })
+                    .collect();
+                this.update(|s| {
+                    s.sessions = names;
+                    s.guests = guests;
+                });
             });
             Backend {
                 home: home.to_path_buf(),
@@ -270,6 +285,7 @@ impl Backend {
                 listening: Mutex::new(None),
                 sessions,
                 desks_changed: tokio::sync::Notify::new(),
+                opened: Mutex::new(Vec::new()),
             }
         })
     }
@@ -281,6 +297,19 @@ impl Backend {
             .spawn(async move { this.refresh_desks().await });
         let this = self.clone();
         self.runtime.spawn(async move { this.watch_desks().await });
+        // "Connected for 12:40" counts on while a desk is connected.
+        let this = self.clone();
+        self.runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if !this.state.lock().expect("app state").guests.is_empty() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    this.update(|s| s.now = now);
+                }
+            }
+        });
         // An open app listens: whether a desk gets in is its permission's matter, and not
         // being reachable at all is closing the app (architecture §14).
         self.set_incoming(true);
@@ -372,6 +401,7 @@ impl Backend {
             }
             Command::SaveSettings(settings) => {
                 let was = self.state.lock().expect("app state").settings.clone();
+                let settings_start_on_boot = settings.start_on_boot;
                 let saved = match &self.hosting.control {
                     Some(pipe) => crate::control::ask(
                         pipe,
@@ -409,7 +439,13 @@ impl Backend {
                 if offer_changed {
                     self.set_incoming(true);
                 }
+                if settings_start_on_boot != was.start_on_boot && self.hosting.service {
+                    crate::installed::set_autostart(settings_start_on_boot);
+                }
             }
+            // Handled by the window itself; nothing for the rest of the app to do.
+            Command::Hide => {}
+            Command::Quit => self.quit(),
             Command::EndSession(name) => match &self.hosting.control {
                 Some(pipe) => {
                     let pipe = pipe.clone();
@@ -574,8 +610,20 @@ impl Backend {
                             // A desk may have been accepted a moment ago: show it as trusted.
                             self.refresh_desks().await;
                             sessions = Some(status.sessions.clone());
-                            let now = status.sessions.clone();
-                            self.update(|s| s.sessions = now);
+                            let names = status.sessions.clone();
+                            let guests = status
+                                .guests
+                                .iter()
+                                .map(|g| Guest {
+                                    name: g.name.clone(),
+                                    address: g.address.clone(),
+                                    since: g.since,
+                                })
+                                .collect();
+                            self.update(|s| {
+                                s.sessions = names;
+                                s.guests = guests;
+                            });
                         }
                         match status.incoming.as_str() {
                             "listening" => Incoming::Listening,
@@ -644,16 +692,67 @@ impl Backend {
         self.update(|s| s.dial = outcome);
     }
 
+    /// Closing the app: every connection ends, and on an installed desk the service stops,
+    /// so nothing of Illumination is left running and this desk cannot be reached until the
+    /// app is opened again (architecture §14).
+    fn quit(self: &Arc<Self>) {
+        tracing::info!(target: "app", "Closing: ending every connection.");
+        for child in self.opened.lock().expect("opened sessions").drain(..) {
+            let _ = child.lock().expect("session window").kill();
+        }
+        let names = self.state.lock().expect("app state").sessions.clone();
+        match &self.hosting.control {
+            Some(pipe) => {
+                // Told goodbye first, so the desks do not take it for a dropped link.
+                for name in names {
+                    let _ =
+                        crate::control::ask(pipe, &crate::control::Request::EndSession { name });
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                crate::installed::stop_for_app();
+            }
+            None => {
+                for name in names {
+                    self.sessions.end(&name);
+                }
+                // A moment for the goodbyes to leave before the process does.
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        }
+    }
+
     /// Says so in the window if a session ends with an error within its first moments (it could
     /// not open its window, or the host refused it after all). Its own log has the details.
-    fn watch_session(self: &Arc<Self>, mut child: std::process::Child, shown: String) {
+    fn watch_session(self: &Arc<Self>, child: std::process::Child, shown: String) {
         let this = self.clone();
         let started = std::time::Instant::now();
         let log = crate::own_folder(&self.home)
             .join("logs")
             .join("viewer.log");
+        // Kept where closing the app finds it, and looked at instead of waited on, so that
+        // closing can end it.
+        let child = Arc::new(Mutex::new(child));
+        {
+            let mut opened = self.opened.lock().expect("opened sessions");
+            opened.push(child.clone());
+            let count = opened.len();
+            self.update(|s| s.outgoing = count);
+        }
         self.runtime.spawn_blocking(move || {
-            let status = child.wait();
+            let status = loop {
+                match child.lock().expect("session window").try_wait() {
+                    Ok(None) => {}
+                    Ok(Some(status)) => break Ok(status),
+                    Err(e) => break Err(e),
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            };
+            {
+                let mut opened = this.opened.lock().expect("opened sessions");
+                opened.retain(|other| !Arc::ptr_eq(other, &child));
+                let count = opened.len();
+                this.update(|s| s.outgoing = count);
+            }
             let early = started.elapsed() < Duration::from_secs(20);
             if early && !status.as_ref().is_ok_and(|s| s.success()) {
                 this.update(|s| {
@@ -754,6 +853,7 @@ pub fn run_app(
     runtime: &tokio::runtime::Runtime,
     home: &Path,
     home_flag: Option<PathBuf>,
+    in_tray: bool,
 ) -> Result<()> {
     #[cfg(windows)]
     {
@@ -763,6 +863,21 @@ pub fn run_app(
     }
     let window = AppWindow::new().map_err(anyhow::Error::msg)?;
     let window_waker = window.waker();
+    let usual = crate::is_usual_home(home);
+    #[cfg(windows)]
+    if usual {
+        // One app per person: opened again, the running one shows its window.
+        let again = window.waker();
+        if !illum_win::only_app(move || again.show()) {
+            return Ok(());
+        }
+    }
+    if usual {
+        // An installed desk's service was stopped when the app was closed: opening the app
+        // starts it again. And the app starts with the sign-in, or not, as Settings say.
+        crate::installed::start_for_app();
+        crate::installed::set_autostart(load_settings(home).start_on_boot);
+    }
     let waker: Wake = Arc::new(move |attention| {
         if attention {
             window_waker.attention();
@@ -779,7 +894,7 @@ pub fn run_app(
             listen_on: Vec::new(),
             port: DEFAULT_PORT,
             test_pattern: false,
-            service: true,
+            service: usual,
             control: crate::installed::control_pipe(home),
         },
         session_process(home_flag),
@@ -788,7 +903,7 @@ pub fn run_app(
     tracing::info!(target: "app", "Illumination {} app window.", env!("CARGO_PKG_VERSION"));
     let state = backend.state.clone();
     window
-        .run(state, move |command| backend.command(command))
+        .run(state, move |command| backend.command(command), in_tray)
         .map_err(anyhow::Error::msg)
 }
 

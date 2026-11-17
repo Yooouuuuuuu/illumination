@@ -21,3 +21,6 @@ softbuffer = "0.4.8"
 tracing = "0.1.44"
 wgpu = "30"
 winit = "0.30.13"
+
+[target."cfg(any(windows, target_os = \"macos\"))".dependencies]
+tray-icon = "0.26.1"
