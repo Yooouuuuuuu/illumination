@@ -99,6 +99,17 @@ fn answer(home: &Path, end: &EndSessions, line: &str) -> Reply {
         Request::Trust {
             change: Change::ForgetPeer { .. },
         } => "forget a trusted desk".to_string(),
+        Request::Trust {
+            change: Change::ConnectedTo { address, .. },
+        } => format!("note a connection to {address}"),
+        Request::Trust { change } => match change {
+            Change::SetPermission { permission, .. } => {
+                format!("set a desk's permission to {permission:?}")
+            }
+            Change::Rename { .. } => "rename a desk".to_string(),
+            Change::Favorite { .. } => "star a desk".to_string(),
+            _ => "forget a desk".to_string(),
+        },
         Request::Settings { settings } => format!(
             "save the settings (incoming {})",
             if settings.allow_incoming { "on" } else { "off" }

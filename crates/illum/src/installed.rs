@@ -33,12 +33,15 @@ pub const ASK_ACCEPTED: u8 = 0;
 pub const ASK_DECLINED: u8 = 1;
 /// Accepted for this time only.
 pub const ASK_ONCE: u8 = 2;
+/// Declined, and never to be asked about again.
+pub const ASK_NEVER: u8 = 3;
 
 /// What `illum ask` said by how it ended. Anything unexpected (closed, crashed) is a no.
 fn answer_of(code: Option<i64>) -> Answer {
     match code {
         Some(c) if c == i64::from(ASK_ACCEPTED) => Answer::Always,
         Some(c) if c == i64::from(ASK_ONCE) => Answer::Once,
+        Some(c) if c == i64::from(ASK_NEVER) => Answer::Never,
         _ => Answer::No,
     }
 }
@@ -96,12 +99,18 @@ impl Told {
 
 /// What a connected desk may do besides seeing the screen, as the settings say: control,
 /// sound, clipboard. A change here makes the host listen anew, offering what is left.
-fn offered(settings: &illum_ui::app::Settings) -> (bool, bool, bool) {
+fn offered(settings: &illum_ui::app::Settings) -> (bool, bool, bool, u32) {
     (
         settings.let_control,
         settings.let_sound,
         settings.let_clipboard,
+        settings.idle_minutes,
     )
+}
+
+/// The idle rule as the settings say it.
+pub(crate) fn idle_limit(minutes: u32) -> Option<Duration> {
+    (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// The host of an installed desk: listens while the settings allow it, on the tailnet
@@ -163,13 +172,17 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         }
         let offer = offered(&settings);
         // Probing the encoders can take a moment the first time; not on the async threads.
-        let (control, sound, clipboard) = offer;
+        let (control, sound, clipboard, idle_minutes) = offer;
+        base.store.lock().await.set_refuse_new(settings.refuse_new);
         let probed = tokio::task::spawn_blocking(move || {
             host_config_with(false, !sound, !clipboard, !control)
         })
         .await;
         let config = match probed {
-            Ok(config) => config,
+            Ok(mut config) => {
+                config.idle = idle_limit(idle_minutes);
+                config
+            }
             Err(e) => {
                 told.change(|s| {
                     s.incoming = "failed".into();
@@ -209,6 +222,8 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         loop {
             tokio::time::sleep(HOST_LOOK).await;
             let now = crate::app::load_settings(home);
+            // Who is asked about takes effect at once, without listening anew.
+            base.store.lock().await.set_refuse_new(now.refuse_new);
             if accepting.is_finished()
                 || !now.allow_incoming
                 || offered(&now) != offer
@@ -286,6 +301,10 @@ fn ask(req: &PromptRequest, home_flag: Option<&Path>, gave_up: &AtomicBool) -> A
         "--fingerprint".to_string(),
         req.fingerprint.as_str().to_string(),
     ];
+    if !req.os.is_empty() {
+        args.push("--os".to_string());
+        args.push(req.os.clone());
+    }
     if let Some(home) = home_flag {
         args.push("--home".to_string());
         args.push(home.display().to_string());
@@ -296,6 +315,7 @@ fn ask(req: &PromptRequest, home_flag: Option<&Path>, gave_up: &AtomicBool) -> A
         Some(Answer::Always) => "accepted",
         Some(Answer::Once) => "accepted for this time",
         Some(Answer::No) => "declined",
+        Some(Answer::Never) => "declined for good",
         None => "nobody could be asked",
     });
     answer.unwrap_or(Answer::No)
@@ -816,8 +836,9 @@ mod tests {
         assert_eq!(answer_of(Some(0)), Answer::Always);
         assert_eq!(answer_of(Some(2)), Answer::Once);
         assert_eq!(answer_of(Some(1)), Answer::No);
+        assert_eq!(answer_of(Some(3)), Answer::Never);
         // Closed from the title bar, ended by the task manager, crashed.
-        for other in [None, Some(-1), Some(3), Some(0xC000_0005)] {
+        for other in [None, Some(-1), Some(4), Some(0xC000_0005)] {
             assert_eq!(answer_of(other), Answer::No);
         }
     }

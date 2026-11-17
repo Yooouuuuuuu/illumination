@@ -529,6 +529,7 @@ mod tests {
             name: "studio-laptop".into(),
             address: "100.64.0.20".into(),
             fingerprint: with_question.desks[0].fingerprint.clone(),
+            os: "Windows 11".into(),
         });
         let mut first_time = sample_state();
         first_time.questions.push_back(Question {
@@ -537,6 +538,7 @@ mod tests {
             name: "render-box".into(),
             address: "100.64.0.31:28326".into(),
             fingerprint: first_time.desks[1].fingerprint.clone(),
+            os: String::new(),
         });
         let mut connected = sample_state();
         connected.sessions = vec!["studio-laptop".into()];

@@ -8,7 +8,7 @@ use crate::media::{MediaHub, MediaKeys};
 use crate::tls::{self, SERVER_NAME};
 use crate::{NetError, Result};
 use illum_core::protocol::{ControlMsg, DEFAULT_PORT, Hello, PROTOCOL_VERSION};
-use illum_core::store::TrustStore;
+use illum_core::store::{Permission, TrustStore};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -56,6 +56,8 @@ pub struct PromptRequest {
     /// The peer's device name (from its hello, if already received).
     pub name: String,
     pub address: String,
+    /// The peer's system as it said ("Windows 11"); empty if it did not.
+    pub os: String,
 }
 
 /// What the person said to a prompt.
@@ -67,6 +69,8 @@ pub enum Answer {
     Once,
     /// Yes, and remembered.
     Always,
+    /// No, and remembered: this desk is refused from now on without asking.
+    Never,
 }
 
 impl From<bool> for Answer {
@@ -207,21 +211,10 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
                 got: fingerprint,
             });
         }
-        None => {
-            let request = PromptRequest {
-                kind: PromptKind::TrustHost,
-                fingerprint: fingerprint.clone(),
-                name: String::new(),
-                address: address.clone(),
-            };
-            let trusted = tokio::time::timeout(t.prompt, (ep.prompt)(request))
-                .await
-                .unwrap_or(Answer::No);
-            if trusted == Answer::No {
-                return Err(NetError::NotTrusted);
-            }
-            true
-        }
+        // First connection: its key is remembered without a question (as SSH can be set
+        // to). On a tailnet the address already says which machine this is, and what a
+        // question would guard against, a different key later, is refused above.
+        None => true,
     };
 
     let mut conn = Connection::new(stream, fingerprint.clone(), socket_addr, local);
@@ -242,11 +235,18 @@ pub async fn connect(ep: &Endpoint, target: &str) -> Result<Connection> {
             )));
         }
     }
-    if newly_trusted {
-        ep.store
-            .lock()
-            .await
-            .pin_host(&address, fingerprint.as_str(), &hello.device_name)?;
+    {
+        let mut store = ep.store.lock().await;
+        if newly_trusted {
+            store.pin_host(&address, fingerprint.as_str(), &hello.device_name)?;
+        }
+        // For the list of desks: when, and what it said it is. Not worth failing over.
+        let _ = store.connected_to(
+            fingerprint.as_str(),
+            &hello.device_name,
+            &hello.os,
+            &socket_addr.ip().to_string(),
+        );
     }
     conn.peer_hello = Some(hello);
     Ok(conn)
@@ -290,40 +290,78 @@ pub async fn accept(
     conn.send_control(&ControlMsg::Hello(ep.hello()));
 
     let address = peer.to_string();
-    let paired = {
+    let ip = peer.ip().to_string();
+    let key = fingerprint.as_str();
+    /// What the desk's permission, or the setting for all desks, says.
+    enum Door {
+        Open,
+        Ask,
+        Shut,
+    }
+    let door = {
         let mut store = ep.store.lock().await;
         store.refresh();
-        let known = store.paired_peer(fingerprint.as_str()).is_some();
-        if known {
-            store.touch_peer(fingerprint.as_str(), &address)?;
+        match store.permission(key) {
+            Some(Permission::Always) => {
+                store.touch_peer(key, &address)?;
+                Door::Open
+            }
+            Some(Permission::Never) => Door::Shut,
+            // Accepted for this time, and still here or just gone: not asked again.
+            _ if store.guest_allowed(key) => Door::Open,
+            Some(Permission::Ask) => Door::Ask,
+            None if store.refuses_new() => Door::Shut,
+            None => Door::Ask,
         }
-        // Or accepted for this time, and still here or just gone.
-        known || store.guest_allowed(fingerprint.as_str())
     };
-    if !paired {
-        let request = PromptRequest {
-            kind: PromptKind::PairPeer,
-            fingerprint: fingerprint.clone(),
-            name: hello.device_name.clone(),
-            address: address.clone(),
-        };
-        let accepted = tokio::time::timeout(t.prompt, (ep.prompt)(request))
-            .await
-            .unwrap_or(Answer::No);
-        if accepted == Answer::No {
-            let reason = "not accepted by the person at the host".to_string();
-            conn.send_control(&ControlMsg::Denied {
-                reason: reason.clone(),
-            });
-            conn.close(t.hello).await;
-            return Err(NetError::Denied(reason));
+    let let_in = match door {
+        Door::Open => true,
+        Door::Shut => false,
+        Door::Ask => {
+            let request = PromptRequest {
+                kind: PromptKind::PairPeer,
+                fingerprint: fingerprint.clone(),
+                name: hello.device_name.clone(),
+                address: ip.clone(),
+                os: illum_core::os::clean(&hello.os),
+            };
+            let answer = tokio::time::timeout(t.prompt, (ep.prompt)(request))
+                .await
+                .unwrap_or(Answer::No);
+            let mut store = ep.store.lock().await;
+            match answer {
+                Answer::No => false,
+                Answer::Once => {
+                    store.admit_guest(key);
+                    true
+                }
+                Answer::Always => {
+                    store.pair(key, &hello.device_name, &address)?;
+                    true
+                }
+                Answer::Never => {
+                    store.apply(&illum_core::store::Change::SetPermission {
+                        fingerprint: key.to_string(),
+                        permission: Some(Permission::Never),
+                    })?;
+                    false
+                }
+            }
         }
-        let mut store = ep.store.lock().await;
-        if accepted == Answer::Once {
-            store.admit_guest(fingerprint.as_str());
-        } else {
-            store.pair(fingerprint.as_str(), &hello.device_name, &address)?;
-        }
+    };
+    // For the list of desks: who came, and whether it got in. Not worth failing over.
+    let _ = ep
+        .store
+        .lock()
+        .await
+        .came_in(key, &hello.device_name, &hello.os, &ip, let_in);
+    if !let_in {
+        let reason = "not accepted at the host".to_string();
+        conn.send_control(&ControlMsg::Denied {
+            reason: reason.clone(),
+        });
+        conn.close(t.hello).await;
+        return Err(NetError::Denied(reason));
     }
     conn.send_control(&ControlMsg::Accepted);
     conn.peer_hello = Some(hello);

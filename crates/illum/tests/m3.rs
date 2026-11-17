@@ -89,6 +89,7 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
             asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
+        idle: None,
     };
 
     let host = endpoint("host");

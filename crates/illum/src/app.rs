@@ -17,7 +17,7 @@ use illum_core::protocol::{ControlMsg, DEFAULT_PORT};
 use illum_net::session::{connect, normalize_target};
 use illum_net::{Answer, Endpoint, Prompt, PromptKind, PromptRequest, bind};
 use illum_ui::app::{
-    AppState, Command, Desk, Dial, Incoming, Question, QuestionKind, Settings, TrustedDesk,
+    AppState, Command, Desk, Dial, Incoming, Question, QuestionKind, Settings, TrustedDesk, Verdict,
 };
 use illum_ui::app_window::AppWindow;
 use std::collections::HashMap;
@@ -140,6 +140,7 @@ fn window_prompt(state: Shared, answers: Answers, waker: Wake) -> Prompt {
                     },
                     address: req.address.clone(),
                     fingerprint: req.fingerprint.as_str().to_string(),
+                    os: req.os.clone(),
                 });
             waker(true);
             let _on_screen = Asked {
@@ -348,12 +349,13 @@ impl Backend {
                     .spawn(async move { this.dial(target, view_only, mute).await });
             }
             Command::DismissDial => self.update(|s| s.dial = Dial::Idle),
-            Command::Answer { id, accept, once } => {
+            Command::Answer { id, verdict } => {
                 if let Some(answer) = self.answers.lock().expect("answers").remove(&id) {
-                    let _ = answer.send(match (accept, once) {
-                        (false, _) => Answer::No,
-                        (true, true) => Answer::Once,
-                        (true, false) => Answer::Always,
+                    let _ = answer.send(match verdict {
+                        Verdict::No => Answer::No,
+                        Verdict::Once => Answer::Once,
+                        Verdict::Always => Answer::Always,
+                        Verdict::Never => Answer::Never,
                     });
                 }
             }
@@ -395,7 +397,20 @@ impl Backend {
                     settings.let_control,
                     settings.let_sound,
                     settings.let_clipboard,
-                ) != (was.let_control, was.let_sound, was.let_clipboard);
+                    settings.idle_minutes,
+                ) != (
+                    was.let_control,
+                    was.let_sound,
+                    was.let_clipboard,
+                    was.idle_minutes,
+                );
+                // Who is asked about takes effect at once.
+                {
+                    let (this, refuse) = (self.clone(), settings.refuse_new);
+                    self.runtime.spawn(async move {
+                        this.ep.store.lock().await.set_refuse_new(refuse);
+                    });
+                }
                 self.update(|s| s.settings = settings);
                 if incoming != was.allow_incoming || (incoming && offer_changed) {
                     self.set_incoming(incoming);
@@ -480,12 +495,14 @@ impl Backend {
         }
         let this = self.clone();
         let test_pattern = self.hosting.test_pattern;
-        let (control, sound, clipboard) = {
+        let (control, sound, clipboard, idle_minutes, refuse_new) = {
             let state = self.state.lock().expect("app state");
             (
                 state.settings.let_control,
                 state.settings.let_sound,
                 state.settings.let_clipboard,
+                state.settings.idle_minutes,
+                state.settings.refuse_new,
             )
         };
         *listening = Some(self.runtime.spawn(async move {
@@ -494,12 +511,16 @@ impl Backend {
                 let _ = before.await;
             }
             // Probing the encoders can take a moment; not on the async threads.
+            this.ep.store.lock().await.set_refuse_new(refuse_new);
             let config = match tokio::task::spawn_blocking(move || {
                 host_config_with(test_pattern, !sound, !clipboard, !control)
             })
             .await
             {
-                Ok(config) => config,
+                Ok(mut config) => {
+                    config.idle = crate::installed::idle_limit(idle_minutes);
+                    config
+                }
                 Err(e) => {
                     this.update(|s| s.incoming = Incoming::Failed(e.to_string()));
                     return;
@@ -579,6 +600,16 @@ impl Backend {
     async fn dial(self: Arc<Self>, target: String, view_only: bool, mute: bool) {
         let address = normalize_target(&target);
         let shown = illum_ui::app::shown_address(&address).to_string();
+        // Desks are reached by address (architecture §4.1): a name is not looked up.
+        if address.parse::<std::net::SocketAddr>().is_err() {
+            self.update(|s| {
+                s.dial = Dial::Failed {
+                    target: target.trim().to_string(),
+                    message: "Type the desk's IP address, like 100.100.101.2.".to_string(),
+                }
+            });
+            return;
+        }
         {
             let mut state = self.state.lock().expect("app state");
             if matches!(state.dial, Dial::Dialing(_)) {
@@ -610,7 +641,7 @@ impl Backend {
                     Err(e) => failed(format!("The session window could not be opened: {e:#}")),
                 }
             }
-            Err(e) => failed(describe(&e)),
+            Err(e) => failed(no_answer(&e, &shown).unwrap_or_else(|| describe(&e))),
         };
         self.update(|s| s.dial = outcome);
     }
@@ -641,6 +672,17 @@ impl Backend {
             }
         });
     }
+}
+
+/// The plain words for a desk that did not answer at all: off, asleep, not accepting, or
+/// not there. `None` for every other failure, which has words of its own.
+fn no_answer(err: &illum_net::NetError, shown: &str) -> Option<String> {
+    use illum_net::NetError;
+    matches!(
+        err,
+        NetError::Unreachable { .. } | NetError::Timeout("TCP connect" | "name lookup")
+    )
+    .then(|| format!("No answer from {shown}. It may be off, or not accepting connections."))
 }
 
 /// Opens the app window and runs until it is closed.
@@ -688,8 +730,8 @@ pub fn run_app(
 
 /// The window of `illum ask`: one question about a new desk, for the person at this desk. The
 /// installed host starts it and reads the answer from how it ends.
-pub fn run_ask(name: &str, address: &str, fingerprint: &str) -> std::process::ExitCode {
-    use crate::installed::{ASK_ACCEPTED, ASK_DECLINED, ASK_ONCE};
+pub fn run_ask(name: &str, address: &str, fingerprint: &str, os: &str) -> std::process::ExitCode {
+    use crate::installed::{ASK_ACCEPTED, ASK_DECLINED, ASK_NEVER, ASK_ONCE};
     #[cfg(windows)]
     illum_win::leave_own_console();
     let declined = std::process::ExitCode::from(ASK_DECLINED);
@@ -703,14 +745,16 @@ pub fn run_ask(name: &str, address: &str, fingerprint: &str) -> std::process::Ex
         name: name.to_string(),
         address: address.to_string(),
         fingerprint: fingerprint.to_string(),
+        os: os.to_string(),
     });
     let answered = window.run_question(Arc::new(Mutex::new(state)), |command| {
-        if let Command::Answer { accept, once, .. } = command {
+        if let Command::Answer { verdict, .. } = command {
             // The answer is the exit code; nothing else is left to do here.
-            std::process::exit(i32::from(match (accept, once) {
-                (false, _) => ASK_DECLINED,
-                (true, true) => ASK_ONCE,
-                (true, false) => ASK_ACCEPTED,
+            std::process::exit(i32::from(match verdict {
+                Verdict::No => ASK_DECLINED,
+                Verdict::Once => ASK_ONCE,
+                Verdict::Always => ASK_ACCEPTED,
+                Verdict::Never => ASK_NEVER,
             }));
         }
     });
@@ -797,6 +841,8 @@ mod tests {
             let_control: false,
             let_sound: false,
             let_clipboard: false,
+            refuse_new: true,
+            idle_minutes: 10,
         };
         let home = Path::new("C:\\Program Data\\Illumination");
         for (settings, home) in [(Settings::default(), None), (all, Some(home))] {
@@ -910,22 +956,9 @@ mod tests {
         });
         let target = format!("127.0.0.1:{port}");
 
-        // First connection: the viewer checks the host's key, the host accepts the viewer.
+        // First connection: the viewer is asked nothing (the host's key is remembered as it
+        // is met); the host is asked whether to let the viewer in.
         connect_to(&viewer, &target);
-        let asked = wait("the viewer is asked about the host's key", &viewer, |s| {
-            s.questions.front().cloned()
-        });
-        assert_eq!(asked.kind, QuestionKind::TrustHost);
-        assert_eq!(asked.fingerprint, host.state.lock().unwrap().fingerprint);
-        assert!(matches!(
-            viewer.state.lock().unwrap().dial,
-            Dial::Dialing(_)
-        ));
-        viewer.command(Command::Answer {
-            id: asked.id,
-            accept: true,
-            once: false,
-        });
         let asked = wait("the host is asked to accept the viewer", &host, |s| {
             s.questions.front().cloned()
         });
@@ -934,8 +967,7 @@ mod tests {
         assert_eq!(asked.fingerprint, viewer.state.lock().unwrap().fingerprint);
         host.command(Command::Answer {
             id: asked.id,
-            accept: true,
-            once: false,
+            verdict: Verdict::Always,
         });
         wait("the session is opened", &viewer, |s| {
             (s.dial == Dial::Idle && !launches.lock().unwrap().is_empty()).then_some(())
@@ -982,7 +1014,15 @@ mod tests {
             Dial::Failed { message, .. } => Some(message.clone()),
             _ => None,
         });
-        assert!(!message.is_empty());
+        assert!(message.starts_with("No answer from 127.0.0.1"), "{message}");
+        viewer.command(Command::DismissDial);
+        // A name is not an address.
+        connect_to(&viewer, "laptop");
+        let message = wait("a name is turned down", &viewer, |s| match &s.dial {
+            Dial::Failed { message, .. } => Some(message.clone()),
+            _ => None,
+        });
+        assert!(message.contains("IP address"), "{message}");
         viewer.command(Command::DismissDial);
         assert_eq!(viewer.state.lock().unwrap().dial, Dial::Idle);
         assert_eq!(
@@ -1002,8 +1042,7 @@ mod tests {
         });
         host.command(Command::Answer {
             id: asked.id,
-            accept: false,
-            once: false,
+            verdict: Verdict::No,
         });
         wait("the refusal is shown to the viewer", &viewer, |s| {
             matches!(s.dial, Dial::Failed { .. }).then_some(())
@@ -1066,8 +1105,7 @@ mod tests {
             let asked = wait("the host is asked", host, |s| s.questions.front().cloned());
             host.command(Command::Answer {
                 id: asked.id,
-                accept: true,
-                once: true,
+                verdict: Verdict::Once,
             });
         };
 

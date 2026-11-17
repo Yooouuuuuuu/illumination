@@ -236,6 +236,8 @@ pub struct ViewState {
     /// Why the host is not taking input, while it is not (its lock screen, an administrator's
     /// window): shown where the notice is, when nothing more urgent is.
     pub input_notice: Option<String>,
+    /// The host is about to end the session for lack of input: said until input comes.
+    pub idle_notice: Option<String>,
     /// The host's displays, each in a few words, and the one being shown. Empty until the
     /// host said (an older host never does).
     pub displays: Vec<String>,
@@ -275,6 +277,7 @@ impl Default for ViewState {
             status: None,
             notice: None,
             input_notice: None,
+            idle_notice: None,
             displays: Vec::new(),
             display: 0,
             host_layout: None,
@@ -831,6 +834,7 @@ impl App {
         let notice_now = state
             .status
             .clone()
+            .or_else(|| state.idle_notice.clone())
             .or_else(|| state.notice.clone())
             .or_else(|| state.input_notice.clone());
         if state.stats.summary != self.last_summary {

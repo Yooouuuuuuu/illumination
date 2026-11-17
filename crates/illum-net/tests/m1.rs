@@ -79,8 +79,8 @@ async fn pair_once_then_reconnect_without_prompts() {
 
     assert_eq!(
         ctl.prompts.load(Ordering::SeqCst),
-        1,
-        "controller asked to trust once"
+        0,
+        "the controller is asked nothing: the host's key is remembered as it is met"
     );
     assert_eq!(
         host.prompts.load(Ordering::SeqCst),
@@ -97,11 +97,7 @@ async fn pair_once_then_reconnect_without_prompts() {
 
     let conn = connect(&ctl.ep, &addr.to_string()).await.unwrap();
     conn.close(Duration::from_secs(1)).await;
-    assert_eq!(
-        ctl.prompts.load(Ordering::SeqCst),
-        1,
-        "no second trust prompt"
-    );
+    assert_eq!(ctl.prompts.load(Ordering::SeqCst), 0);
     assert_eq!(
         host.prompts.load(Ordering::SeqCst),
         1,
@@ -129,19 +125,75 @@ async fn host_can_refuse_an_unknown_device() {
     assert!(host.ep.store.lock().await.paired_peers().next().is_none());
 }
 
+/// A first connection asks the controller nothing, whatever it would have answered: the
+/// host's key is remembered, and the host goes into the list of desks with what it said.
 #[tokio::test]
-async fn controller_can_refuse_an_unknown_host_key() {
+async fn a_first_connection_remembers_the_host_without_asking() {
     let host = side("host-c", true, Timeouts::default());
     let ctl = side("ctl-c", false, Timeouts::default());
     let addr = start_host(&host).await;
 
-    let err = connect(&ctl.ep, &addr.to_string()).await.err().unwrap();
-    assert!(matches!(err, NetError::NotTrusted), "{err}");
+    let conn = connect(&ctl.ep, &addr.to_string()).await.unwrap();
+    conn.close(Duration::from_secs(1)).await;
+    assert_eq!(ctl.prompts.load(Ordering::SeqCst), 0);
+    let store = ctl.ep.store.lock().await;
+    let pinned = store.known_host(&addr.to_string()).expect("remembered");
+    assert_eq!(pinned.fingerprint, host.ep.identity.fingerprint.as_str());
+    let desk = store
+        .desk(host.ep.identity.fingerprint.as_str())
+        .expect("in the list of desks");
+    assert_eq!(desk.machine, "host-c");
+    assert_eq!(desk.address, "127.0.0.1", "no port");
+    assert!(!desk.os.is_empty() && desk.last_out > 0);
+}
+
+/// Who gets in: a desk's own permission first, then the setting for all desks.
+#[tokio::test]
+async fn permissions_decide_who_is_asked_about() {
+    use illum_core::store::Permission;
+    let host = side("host-p", true, Timeouts::default());
+    let ctl = side("ctl-p", true, Timeouts::default());
+    let addr = start_host(&host).await.to_string();
+    let key = ctl.ep.identity.fingerprint.as_str().to_string();
+    let asked = || host.prompts.load(Ordering::SeqCst);
+    // The host task holds a clone of the endpoint; what is shared with it is the store.
+    let store = host.ep.store.clone();
+
+    // Never: refused, and nobody is asked.
+    store
+        .lock()
+        .await
+        .set_permission(&key, Some(Permission::Never))
+        .unwrap();
+    let refused = connect(&ctl.ep, &addr).await.err().unwrap();
+    assert!(matches!(refused, NetError::Denied(_)), "{refused}");
+    assert_eq!(asked(), 0);
+    assert!(store.lock().await.desk(&key).unwrap().tried_in > 0, "noted");
+
+    // Ask: the person is asked. This host answers "always", so that is the desk's
+    // permission from then on and the next connection asks nobody.
+    store
+        .lock()
+        .await
+        .set_permission(&key, Some(Permission::Ask))
+        .unwrap();
+    for _ in 0..2 {
+        let conn = connect(&ctl.ep, &addr).await.unwrap();
+        conn.close(Duration::from_secs(1)).await;
+        assert_eq!(asked(), 1, "asked once");
+    }
     assert_eq!(
-        host.prompts.load(Ordering::SeqCst),
-        0,
-        "host never asked: the controller sent nothing"
+        store.lock().await.permission(&key),
+        Some(Permission::Always)
     );
+
+    // No permission of its own, and the setting says refuse: not asked.
+    store.lock().await.set_permission(&key, None).unwrap();
+    store.lock().await.set_refuse_new(true);
+    let before = asked();
+    assert!(connect(&ctl.ep, &addr).await.is_err());
+    assert_eq!(asked(), before);
+    store.lock().await.set_refuse_new(false);
 }
 
 #[tokio::test]
@@ -243,25 +295,25 @@ async fn idle_session_is_closed_by_the_host() {
 
 #[tokio::test]
 async fn prompts_carry_the_right_details() {
-    let host = side("host-i", true, Timeouts::default());
-    let addr = start_host(&host).await;
+    // The one question left is the host's, about a desk it does not know.
+    let mut host = side("host-i", true, Timeouts::default());
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut ctl = side("ctl-i", true, Timeouts::default());
     let s = seen.clone();
-    ctl.ep.prompt = Arc::new(move |req| {
+    host.ep.prompt = Arc::new(move |req| {
         s.lock().unwrap().push(req);
         Box::pin(async { illum_net::Answer::Always })
     });
+    let addr = start_host(&host).await;
+    let ctl = side("ctl-i", true, Timeouts::default());
     let conn = connect(&ctl.ep, &addr.to_string()).await.unwrap();
     conn.close(Duration::from_secs(1)).await;
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].kind, PromptKind::TrustHost);
-    assert_eq!(seen[0].fingerprint, host.ep.identity.fingerprint);
-    assert_eq!(
-        seen[0].address,
-        session::normalize_target(&addr.to_string())
-    );
+    assert_eq!(seen[0].kind, PromptKind::PairPeer);
+    assert_eq!(seen[0].fingerprint, ctl.ep.identity.fingerprint);
+    assert_eq!(seen[0].name, "ctl-i");
+    assert_eq!(seen[0].address, "127.0.0.1", "the address without its port");
+    assert!(!seen[0].os.is_empty(), "the desk's system comes with it");
 }
 
 #[tokio::test]

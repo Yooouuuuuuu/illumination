@@ -593,3 +593,59 @@ async fn the_pointers_kind_reaches_a_viewer_that_knows_kinds() {
         session.abort();
     }
 }
+
+/// A session with no input from the controller is ended by the host after the time set
+/// there: the controller is warned first, then told goodbye, so it does not come back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_session_is_warned_and_then_ended() {
+    let ep = endpoint("host-idle");
+    let mut listener = Listener::bind(&ep, &[IpAddr::V4(Ipv4Addr::LOCALHOST)], 0)
+        .await
+        .unwrap();
+    let addr = listener.local_addrs()[0];
+    tokio::spawn(async move {
+        while let Some((tcp, peer)) = listener.next().await {
+            let (ep, acceptor, media) = (ep.clone(), listener.acceptor(), listener.media());
+            tokio::spawn(async move {
+                if let Ok(conn) = accept(&ep, &acceptor, tcp, peer).await {
+                    let config = HostConfig {
+                        screen: Some(pattern_factory()),
+                        // Shorter than the warning's lead: warned at once, ended at two seconds.
+                        idle: Some(Duration::from_secs(2)),
+                        ..HostConfig::default()
+                    };
+                    let _ = serve_session(
+                        conn,
+                        config,
+                        Duration::from_secs(30),
+                        media,
+                        Default::default(),
+                    )
+                    .await;
+                }
+            });
+        }
+    });
+    let conn = connect(&endpoint("ctl-idle"), &addr.to_string())
+        .await
+        .unwrap();
+    let shared: Shared = Arc::default();
+    let began = Instant::now();
+    let session = tokio::spawn(run_viewer_session(
+        conn,
+        params(None),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&shared, "the warning", |s| s.idle_notice.is_some()).await;
+    let ended = tokio::time::timeout(Duration::from_secs(10), session)
+        .await
+        .expect("the host ends it")
+        .unwrap();
+    assert!(ended.is_ok(), "a goodbye, not a dropped link: {ended:?}");
+    let took = began.elapsed();
+    assert!(
+        took >= Duration::from_millis(1800) && took < Duration::from_secs(8),
+        "{took:?}"
+    );
+}

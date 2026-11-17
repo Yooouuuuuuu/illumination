@@ -11,6 +11,36 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-18
+
+Not released. The first of four steps of the 0.14 redesign: the rules. The windows still
+look as before; the new ones come in 0.14.1 to 0.14.3.
+
+### Added
+
+- **A session with no input ends by itself.** The host disconnects a desk that
+  has sent no keyboard or mouse for 30 minutes, after a one-minute warning in
+  its session window. Settings, "When another desk connects here": 10 or 30
+  minutes, 1 or 2 hours, or never. A view-only session counts the same.
+- **"Never" for a desk.** The question about a desk now has four answers: No,
+  This time, Always, and "Never for this desk", which refuses it from then on
+  without asking.
+- **Refuse desks that are not known.** Settings: a desk without a permission of
+  its own is asked about, as before, or refused without a question.
+- Each desk now tells the other what system it runs ("Windows 11"); the
+  question about a new desk shows it.
+
+### Changed
+
+- **No question on your first connection to a desk.** Its key is remembered as
+  it is met. A desk whose key later changes is still refused.
+- **The app connects to IP addresses only.** A name is turned down with a hint.
+- A desk that does not answer now says "No answer from 100.100.101.2. It may be
+  off, or not accepting connections." instead of "timed out during TCP connect".
+- The question's buttons read No / This time / Always.
+
+Verified with cargo fmt, cargo clippy and cargo test.
+
 ## [0.13.8] - 2026-11-17
 
 Not released.

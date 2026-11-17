@@ -214,6 +214,8 @@ enum Command {
         address: String,
         #[arg(long)]
         fingerprint: String,
+        #[arg(long, default_value = "")]
+        os: String,
     },
     /// Show this device's key fingerprint.
     Fingerprint,
@@ -452,8 +454,9 @@ fn main() -> std::process::ExitCode {
             name,
             address,
             fingerprint,
+            os,
         }) if cli.role() == Role::Frontend => {
-            return app::run_ask(name, address, fingerprint);
+            return app::run_ask(name, address, fingerprint, os);
         }
         // Windows runs the service on threads of its own choosing.
         Some(Command::Service {
@@ -658,6 +661,7 @@ fn host_config_with(
         clipboard: !test_pattern && !no_clipboard,
         displays: display_names(test_pattern),
         sas: secure_attention(test_pattern || no_input),
+        idle: None,
     }
 }
 

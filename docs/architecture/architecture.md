@@ -1129,6 +1129,36 @@ that reach it.
   does not take it for a dropped link and come back. A desk in for this time is asked about
   again at once; a trusted desk can simply connect again (forget it to stop that).
 
+*v0.14.0, the rules as rebuilt* (decided with the user, 2026-11-17 and 18; the windows for
+them follow in 0.14.1 to 0.14.3, drawn on the design canvas named in §14).
+- **A desk is one entry**, kept by its key (`DeskInfo` in the trust store): what it calls
+  itself, its system as it said ("Windows 11", `illum_core::os`, sent in the hello), where
+  it was last seen, when this desk last connected to it, when it last connected here or
+  tried to, the person's own name for it, and a star. Whichever way two desks met, there is
+  one entry.
+- **Permission** is whether a desk may connect here, and has three values: always, ask,
+  never. A desk has one of its own or none. With none, the setting for all desks applies,
+  which has two values: ask (the default) or refuse. A desk's own permission always wins.
+  "Always" is what being a paired peer was and is stored as that, so files from before
+  read unchanged.
+- **The question about a desk** has four answers: no, this time, always, never. "This
+  time" is the guest of v0.13.2. "Always" and "never" set the desk's permission, so "never"
+  stops a known machine from asking again. A desk is known by its key: a new key is a new
+  desk, so this is a courtesy among known machines, not a wall.
+- **No question on a first connection out.** The controller used to be asked whether the
+  host's key is really its key. On a tailnet the address already says which machine
+  answers, and the question was clicked through. The key is now remembered as it is met;
+  what the question guarded against, the key changing later, is still refused. Someone who
+  listens on an ordinary network with `--bind` has no such guarantee and no question
+  either.
+- **Addresses only.** The app connects to an IP address and turns a name down, instead of
+  looking it up.
+- **Idle sessions end.** A session with no keyboard or mouse from the controller for the
+  time set on the host (30 minutes by default; 10, 60, 120 or never) is ended by the host:
+  the controller is warned a minute before (`ControlMsg::IdleWarning`, to one that lists
+  `idle-warning`) and then told goodbye, so it does not reconnect. A view-only session,
+  which never sends input, ends by the same rule.
+
 ## 10. Session policy
 
 - **One controller at a time.** Further connections are view-only, and the host always shows who

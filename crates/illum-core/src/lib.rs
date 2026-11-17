@@ -4,6 +4,7 @@
 pub mod clipboard;
 pub mod input;
 pub mod keymap;
+pub mod os;
 pub mod protocol;
 pub mod store;
 

@@ -67,6 +67,10 @@ pub struct Settings {
     pub let_control: bool,
     pub let_sound: bool,
     pub let_clipboard: bool,
+    /// Desks without a permission of their own are refused instead of asked about.
+    pub refuse_new: bool,
+    /// A connected desk is disconnected after this long without input from it; 0: never.
+    pub idle_minutes: u32,
 }
 
 impl Default for Settings {
@@ -85,6 +89,8 @@ impl Default for Settings {
             let_control: true,
             let_sound: true,
             let_clipboard: true,
+            refuse_new: false,
+            idle_minutes: 30,
         }
     }
 }
@@ -145,6 +151,20 @@ pub struct Question {
     pub address: String,
     /// 64 hex digits.
     pub fingerprint: String,
+    /// The desk's system as it said ("Windows 11"); empty if it did not.
+    pub os: String,
+}
+
+/// The person's answer to a question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    No,
+    /// Yes, this time; nothing is remembered.
+    Once,
+    /// Yes, and from now on without asking.
+    Always,
+    /// No, and from now on without asking.
+    Never,
 }
 
 /// Everything the window shows that it does not own.
@@ -180,9 +200,7 @@ pub enum Command {
     DismissDial,
     Answer {
         id: u64,
-        accept: bool,
-        /// Accepted for this time only: nothing is remembered.
-        once: bool,
+        verdict: Verdict,
     },
     ForgetDesk(String),
     ForgetTrusted(String),
@@ -1078,6 +1096,39 @@ fn settings(ui: &mut Ui, state: &AppState, out: &mut Vec<Command>) {
         ui.checkbox(&mut s.let_control, "It may use the keyboard and mouse");
         ui.checkbox(&mut s.let_sound, "It may hear this desk's sound");
         ui.checkbox(&mut s.let_clipboard, "It may share the clipboard");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("A desk that is not known here").font(semibold(14.0)));
+            let name = |refuse: bool| {
+                if refuse {
+                    "is refused"
+                } else {
+                    "is asked about"
+                }
+            };
+            egui::ComboBox::from_id_salt("refuse-new")
+                .selected_text(name(s.refuse_new))
+                .show_ui(ui, |ui| {
+                    for refuse in [false, true] {
+                        ui.selectable_value(&mut s.refuse_new, refuse, name(refuse));
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Disconnect it when idle for").font(semibold(14.0)));
+            let name = |minutes: u32| match minutes {
+                0 => "never".to_string(),
+                60 => "1 hour".to_string(),
+                120 => "2 hours".to_string(),
+                m => format!("{m} minutes"),
+            };
+            egui::ComboBox::from_id_salt("idle")
+                .selected_text(name(s.idle_minutes))
+                .show_ui(ui, |ui| {
+                    for minutes in [10, 30, 60, 120, 0] {
+                        ui.selectable_value(&mut s.idle_minutes, minutes, name(minutes));
+                    }
+                });
+        });
     });
     card(ui, WHITE, |ui| {
         ui.set_width(ui.available_width());
@@ -1177,7 +1228,14 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
                     ui.spacing_mut().item_spacing.y = 6.0;
                     ui.label(caps(small));
                     ui.label(RichText::new(title).font(heading(24.0)));
-                    ui.label(RichText::new(format!("at {}", q.address)).font(mono(14.0)));
+                    ui.label(
+                        RichText::new(if q.os.is_empty() {
+                            format!("at {}", q.address)
+                        } else {
+                            format!("{} at {}", q.os, q.address)
+                        })
+                        .font(mono(14.0)),
+                    );
                 });
             let line = head.response.rect;
             ui.painter().line_segment(
@@ -1190,12 +1248,10 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
                 let (lead, check, yes, no) = match q.kind {
                     QuestionKind::AcceptDesk => (
                         "It shows this key:",
-                        "It should match the key on that desk's own screen. Accepting lets it \
-                         see this screen and, as far as this desk's settings allow, use the \
-                         keyboard and mouse, share the clipboard and hear its sound. \
-                         \"Accept and trust\" also lets it in next time without asking.",
-                        "Accept and trust",
-                        "Decline",
+                        "It should match that desk's own key. \"Always\" lets it in from now on \
+                         without asking; \"This time\" only now.",
+                        "Always",
+                        "No",
                     ),
                     QuestionKind::TrustHost => (
                         "You have not connected to it before. It shows this key:",
@@ -1219,42 +1275,51 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
                 );
                 ui.label(muted(check));
                 ui.add_space(4.0);
+                let mut answer = |verdict| out.push(Command::Answer { id: q.id, verdict });
                 ui.horizontal(|ui| {
                     let w = ui.available_width();
-                    let once = q.kind == QuestionKind::AcceptDesk;
-                    let no_width = if once { w * 0.24 } else { w * 0.34 };
-                    if ui
-                        .add(button(no, WHITE, 48.0).min_size(vec2(no_width, 48.0)))
-                        .clicked()
-                    {
-                        out.push(Command::Answer {
-                            id: q.id,
-                            accept: false,
-                            once: false,
-                        });
-                    }
-                    if once
-                        && ui
-                            .add(button("This time", WHITE, 48.0).min_size(vec2(w * 0.26, 48.0)))
+                    if q.kind == QuestionKind::AcceptDesk {
+                        let each = (w - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+                        if ui
+                            .add(button("No", WHITE, 48.0).min_size(vec2(each, 48.0)))
                             .clicked()
-                    {
-                        out.push(Command::Answer {
-                            id: q.id,
-                            accept: true,
-                            once: true,
-                        });
-                    }
-                    if ui
-                        .add(primary(yes).min_size(vec2(ui.available_width(), 48.0)))
-                        .clicked()
-                    {
-                        out.push(Command::Answer {
-                            id: q.id,
-                            accept: true,
-                            once: false,
-                        });
+                        {
+                            answer(Verdict::No);
+                        }
+                        if ui
+                            .add(button("This time", WHITE, 48.0).min_size(vec2(each, 48.0)))
+                            .clicked()
+                        {
+                            answer(Verdict::Once);
+                        }
+                        if ui
+                            .add(primary("Always").min_size(vec2(each, 48.0)))
+                            .clicked()
+                        {
+                            answer(Verdict::Always);
+                        }
+                    } else {
+                        if ui
+                            .add(button(no, WHITE, 48.0).min_size(vec2(w * 0.34, 48.0)))
+                            .clicked()
+                        {
+                            answer(Verdict::No);
+                        }
+                        if ui
+                            .add(primary(yes).min_size(vec2(ui.available_width(), 48.0)))
+                            .clicked()
+                        {
+                            answer(Verdict::Always);
+                        }
                     }
                 });
+                if q.kind == QuestionKind::AcceptDesk
+                    && ui
+                        .link(RichText::new("Never for this desk").size(14.0))
+                        .clicked()
+                {
+                    answer(Verdict::Never);
+                }
             });
         });
 }

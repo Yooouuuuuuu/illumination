@@ -22,6 +22,7 @@ pub const CAPABILITIES: &[&str] = &[
     "displays",
     "sas",
     "cursor-kind",
+    "idle-warning",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
@@ -73,6 +74,10 @@ pub struct Hello {
     pub app_version: String,
     pub device_name: String,
     pub capabilities: Vec<String>,
+    /// The system the desk runs, for the other side's eye: "Windows 11" (`crate::os`).
+    /// Empty from a desk older than 0.14.0.
+    #[serde(default)]
+    pub os: String,
 }
 
 impl Hello {
@@ -82,6 +87,7 @@ impl Hello {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             device_name: device_name.into(),
             capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            os: crate::os::name().to_string(),
         }
     }
 
@@ -247,6 +253,12 @@ pub enum ControlMsg {
     /// real keyboard only, so they cannot be typed like the others. Sent only to a host
     /// that lists the `sas` capability: an installed one (architecture §7).
     SecureAttention,
+    /// Host → controller: nothing has come from the controller's keyboard or mouse for a
+    /// long while, and the host will end the session in `seconds`. Zero: input came, the
+    /// session goes on. Sent only to a controller that lists `idle-warning`.
+    IdleWarning {
+        seconds: u32,
+    },
     /// Orderly end of session.
     Bye,
 }

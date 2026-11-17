@@ -36,7 +36,7 @@ use illum_media::{Frame, MediaError};
 use illum_net::media::{HEADER_LEN, MAX_PAYLOAD, TAG_LEN};
 use illum_net::{Connection, MediaHub, MediaKeys, MediaStream, NetError, Sender};
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -186,6 +186,9 @@ pub struct HostConfig {
     pub displays: Option<DisplaysFn>,
     /// Shows the Ctrl+Alt+Del screen; only an installed host can (§7).
     pub sas: Option<SasFn>,
+    /// A session with no input from the controller for this long is ended (§10); `None`:
+    /// never.
+    pub idle: Option<Duration>,
 }
 
 /// Asks the system for the Ctrl+Alt+Del screen.
@@ -244,6 +247,8 @@ struct InputWorker {
     /// into the same channel for as long as the media path lives.
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// When input last came from the controller (`now_us`), for the idle rule.
+    touched: Arc<AtomicU64>,
 }
 
 /// Moves from the UDP path are acknowledged at most this often.
@@ -257,10 +262,11 @@ enum Arrived {
 
 /// Hands moves from the UDP path to the input thread (held by the media-in thread).
 #[derive(Clone)]
-struct InputFeed(mpsc::Sender<Arrived>);
+struct InputFeed(mpsc::Sender<Arrived>, Arc<AtomicU64>);
 
 impl InputFeed {
     fn unreliable(&self, ev: InputEvent) {
+        self.1.store(now_us(), Ordering::Relaxed);
         let _ = self.0.send(Arrived::Unreliable(ev));
     }
 }
@@ -272,6 +278,7 @@ impl InputWorker {
         obstacle: Option<ObstacleFn>,
         tell_viewer: bool,
         sender: Sender,
+        touched: Arc<AtomicU64>,
     ) -> InputWorker {
         let (tx, rx) = mpsc::channel::<Arrived>();
         let stop = Arc::new(AtomicBool::new(false));
@@ -353,17 +360,20 @@ impl InputWorker {
             tx: Some(tx),
             stop,
             thread: Some(thread),
+            touched,
         }
     }
 
     fn send(&self, ev: InputEvent) {
+        self.touched.store(now_us(), Ordering::Relaxed);
         if let Some(tx) = &self.tx {
             let _ = tx.send(Arrived::Reliable(ev));
         }
     }
 
     fn feed(&self) -> Option<InputFeed> {
-        self.tx.clone().map(InputFeed)
+        let touched = self.touched.clone();
+        self.tx.clone().map(|tx| InputFeed(tx, touched))
     }
 }
 
@@ -1023,9 +1033,41 @@ pub async fn serve_session(
     } else {
         None
     };
+    // The idle rule (§10): no keyboard or mouse from the controller for `config.idle` ends
+    // the session, with a warning a minute before to a controller that can show one.
+    const IDLE_WARNING: Duration = Duration::from_secs(60);
+    let touched = Arc::new(AtomicU64::new(now_us()));
+    let warns = conn
+        .peer_hello
+        .as_ref()
+        .is_some_and(|h| h.capabilities.iter().any(|c| c == "idle-warning"));
+    let mut warned = false;
+    let mut look = tokio::time::interval(Duration::from_secs(1));
+    look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         let received = tokio::select! {
             received = tokio::time::timeout(idle, conn.recv()) => received,
+            _ = look.tick() => {
+                let Some(limit) = config.idle else {
+                    continue;
+                };
+                let quiet = Duration::from_micros(
+                    now_us().saturating_sub(touched.load(Ordering::Relaxed)),
+                );
+                if quiet >= limit {
+                    tracing::info!(target: "session", "No input for {} minutes; ending the session.", limit.as_secs() / 60);
+                    conn.send_control(&ControlMsg::Bye);
+                    break Ok(());
+                }
+                let close = quiet + IDLE_WARNING >= limit;
+                if warns && close != warned {
+                    warned = close;
+                    conn.send_control(&ControlMsg::IdleWarning {
+                        seconds: if close { (limit - quiet).as_secs() as u32 } else { 0 },
+                    });
+                }
+                continue;
+            }
             () = end.notified() => {
                 conn.send_control(&ControlMsg::Bye);
                 break Ok(());
@@ -1096,6 +1138,7 @@ pub async fn serve_session(
                                     h.capabilities.iter().any(|c| c == "input-notice")
                                 }),
                                 conn.sender(),
+                                touched.clone(),
                             ))
                         }
                         Err(e) => tracing::warn!(target: "session", "Input unavailable: {e}"),

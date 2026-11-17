@@ -42,6 +42,55 @@ pub struct PairedPeer {
     pub last_address: String,
 }
 
+/// Whether a desk may connect to this one. A desk without one of its own follows the
+/// setting for all desks (ask, or refuse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Permission {
+    /// It connects without anyone being asked.
+    Always,
+    /// The person at this desk is asked each time.
+    Ask,
+    /// It is refused, and nobody is asked.
+    Never,
+}
+
+/// What this desk knows about another one, whichever way they met. Kept by the other
+/// desk's key, so a desk is one entry whether it was connected to, connected here, or both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeskInfo {
+    /// The person's own name for it. Empty: the machine's name is shown.
+    pub name: String,
+    /// What the desk calls itself.
+    pub machine: String,
+    /// Its system, as it said: "Windows 11".
+    pub os: String,
+    /// Where it was last seen, without a port.
+    pub address: String,
+    /// `Ask` or `Never`, when set for this desk. `Always` is not kept here: it is being
+    /// among the paired peers, as it was before desks had entries.
+    pub permission: Option<Permission>,
+    pub favorite: bool,
+    /// Unix seconds of the last connection from here to it; 0: never.
+    pub last_out: u64,
+    /// Of its last connection to here that was let in.
+    pub last_in: u64,
+    /// Of its last try that was not let in.
+    pub tried_in: u64,
+}
+
+impl DeskInfo {
+    /// The name to show: the person's own, else the machine's.
+    pub fn shown_name(&self) -> &str {
+        if self.name.is_empty() {
+            &self.machine
+        } else {
+            &self.name
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TrustData {
     version: u32,
@@ -49,6 +98,9 @@ struct TrustData {
     known_hosts: BTreeMap<String, KnownHost>,
     /// Keyed by the peer's certificate fingerprint.
     paired_peers: BTreeMap<String, PairedPeer>,
+    /// Keyed by the desk's certificate fingerprint. Absent in files written before 0.14.0.
+    #[serde(default)]
+    desks: BTreeMap<String, DeskInfo>,
 }
 
 /// One change to the store that a person's program makes. On an installed desk the store
@@ -65,6 +117,31 @@ pub enum Change {
         address: String,
     },
     ForgetPeer {
+        fingerprint: String,
+    },
+    /// The person's rule for one desk; `None` puts it back on the setting for all desks.
+    SetPermission {
+        fingerprint: String,
+        permission: Option<Permission>,
+    },
+    /// The person's own name for a desk; empty gives it its machine name back.
+    Rename {
+        fingerprint: String,
+        name: String,
+    },
+    Favorite {
+        fingerprint: String,
+        on: bool,
+    },
+    /// This desk just connected to that one.
+    ConnectedTo {
+        fingerprint: String,
+        machine: String,
+        os: String,
+        address: String,
+    },
+    /// Everything about one desk goes: its key as a host, its permission, its entry.
+    ForgetDesk {
         fingerprint: String,
     },
 }
@@ -96,6 +173,9 @@ pub struct TrustStore {
     /// Set when this process may not write the file itself.
     through: Option<Through>,
     guests: HashMap<String, Guest>,
+    /// The setting for desks without a permission of their own: refuse them (true) or ask
+    /// (false). Told by the host from the settings; not part of this file.
+    refuse_new: bool,
 }
 
 impl std::fmt::Debug for TrustStore {
@@ -151,6 +231,7 @@ impl TrustStore {
             seen,
             through: None,
             guests: HashMap::new(),
+            refuse_new: false,
         })
     }
 
@@ -211,6 +292,68 @@ impl TrustStore {
             Change::ForgetPeer { fingerprint } => {
                 self.data.paired_peers.remove(fingerprint).is_some()
             }
+            Change::SetPermission {
+                fingerprint,
+                permission,
+            } => {
+                let before = self.permission(fingerprint);
+                let desk = self.data.desks.entry(fingerprint.clone()).or_default();
+                match permission {
+                    Some(Permission::Always) => {
+                        desk.permission = None;
+                        let (name, last_address) = (desk.machine.clone(), desk.address.clone());
+                        self.data
+                            .paired_peers
+                            .entry(fingerprint.clone())
+                            .or_insert(PairedPeer {
+                                name,
+                                first_seen: now(),
+                                last_address,
+                            });
+                    }
+                    other => {
+                        desk.permission = *other;
+                        self.data.paired_peers.remove(fingerprint);
+                    }
+                }
+                before != *permission
+            }
+            Change::Rename { fingerprint, name } => {
+                let desk = self.data.desks.entry(fingerprint.clone()).or_default();
+                let name = name.trim().chars().take(64).collect::<String>();
+                let changed = desk.name != name;
+                desk.name = name;
+                changed
+            }
+            Change::Favorite { fingerprint, on } => {
+                let desk = self.data.desks.entry(fingerprint.clone()).or_default();
+                let changed = desk.favorite != *on;
+                desk.favorite = *on;
+                changed
+            }
+            Change::ConnectedTo {
+                fingerprint,
+                machine,
+                os,
+                address,
+            } => {
+                let desk = self.data.desks.entry(fingerprint.clone()).or_default();
+                desk.machine = machine.clone();
+                desk.os = crate::os::clean(os);
+                desk.address = address.clone();
+                desk.last_out = now();
+                true
+            }
+            Change::ForgetDesk { fingerprint } => {
+                let hosts = self.data.known_hosts.len();
+                self.data
+                    .known_hosts
+                    .retain(|_, host| host.fingerprint != *fingerprint);
+                let was_host = self.data.known_hosts.len() != hosts;
+                let was_peer = self.data.paired_peers.remove(fingerprint).is_some();
+                let was_desk = self.data.desks.remove(fingerprint).is_some();
+                was_host || was_peer || was_desk
+            }
         };
         if changed {
             self.save()?;
@@ -260,6 +403,9 @@ impl TrustStore {
     pub fn pair(&mut self, fingerprint: &str, name: &str, address: &str) -> Result<(), StoreError> {
         let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
         self.refresh();
+        if let Some(desk) = self.data.desks.get_mut(fingerprint) {
+            desk.permission = None;
+        }
         self.data.paired_peers.insert(
             fingerprint.to_string(),
             PairedPeer {
@@ -321,6 +467,107 @@ impl TrustStore {
     /// The person ended a guest's session: it is asked about again at once.
     pub fn dismiss_guest(&mut self, fingerprint: &str) {
         self.guests.remove(fingerprint);
+    }
+
+    /// The desks this one knows, by key.
+    pub fn desks(&self) -> impl Iterator<Item = (&String, &DeskInfo)> {
+        self.data.desks.iter()
+    }
+
+    pub fn desk(&self, fingerprint: &str) -> Option<&DeskInfo> {
+        self.data.desks.get(fingerprint)
+    }
+
+    /// The person's rule for this desk, if it has one of its own.
+    pub fn permission(&self, fingerprint: &str) -> Option<Permission> {
+        if self.data.paired_peers.contains_key(fingerprint) {
+            return Some(Permission::Always);
+        }
+        self.data.desks.get(fingerprint).and_then(|d| d.permission)
+    }
+
+    pub fn set_permission(
+        &mut self,
+        fingerprint: &str,
+        permission: Option<Permission>,
+    ) -> Result<bool, StoreError> {
+        self.change(Change::SetPermission {
+            fingerprint: fingerprint.to_string(),
+            permission,
+        })
+    }
+
+    pub fn rename(&mut self, fingerprint: &str, name: &str) -> Result<bool, StoreError> {
+        self.change(Change::Rename {
+            fingerprint: fingerprint.to_string(),
+            name: name.to_string(),
+        })
+    }
+
+    pub fn set_favorite(&mut self, fingerprint: &str, on: bool) -> Result<bool, StoreError> {
+        self.change(Change::Favorite {
+            fingerprint: fingerprint.to_string(),
+            on,
+        })
+    }
+
+    pub fn forget_desk(&mut self, fingerprint: &str) -> Result<bool, StoreError> {
+        self.change(Change::ForgetDesk {
+            fingerprint: fingerprint.to_string(),
+        })
+    }
+
+    /// This desk just connected to that one: when, and what it said it is.
+    pub fn connected_to(
+        &mut self,
+        fingerprint: &str,
+        machine: &str,
+        os: &str,
+        address: &str,
+    ) -> Result<(), StoreError> {
+        self.change(Change::ConnectedTo {
+            fingerprint: fingerprint.to_string(),
+            machine: machine.to_string(),
+            os: os.to_string(),
+            address: address.to_string(),
+        })
+        .map(|_| ())
+    }
+
+    /// That desk just connected here, or tried to. Written by the host, which owns the file.
+    pub fn came_in(
+        &mut self,
+        fingerprint: &str,
+        machine: &str,
+        os: &str,
+        address: &str,
+        let_in: bool,
+    ) -> Result<(), StoreError> {
+        let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        self.refresh();
+        let desk = self.data.desks.entry(fingerprint.to_string()).or_default();
+        desk.machine = machine
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
+        desk.os = crate::os::clean(os);
+        desk.address = address.to_string();
+        if let_in {
+            desk.last_in = now();
+        } else {
+            desk.tried_in = now();
+        }
+        self.save()
+    }
+
+    /// Whether desks without a permission of their own are refused instead of asked about.
+    pub fn refuses_new(&self) -> bool {
+        self.refuse_new
+    }
+
+    pub fn set_refuse_new(&mut self, refuse: bool) {
+        self.refuse_new = refuse;
     }
 
     pub fn paired_peers(&self) -> impl Iterator<Item = (&String, &PairedPeer)> {
@@ -466,5 +713,105 @@ mod through_tests {
             Err(StoreError::Service(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod desk_tests {
+    use super::*;
+
+    fn store(name: &str) -> (TrustStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("illum-desks-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (TrustStore::load(dir.join("trust.json")).unwrap(), dir)
+    }
+
+    /// A desk is one entry however it was met, and its permission has four states: none of
+    /// its own, always, ask, never.
+    #[test]
+    fn a_desk_has_one_entry_and_a_permission() {
+        let (mut store, dir) = store("permission");
+        assert_eq!(store.permission("aa"), None);
+        store
+            .came_in("aa", "LAPTOP\n", "Windows 11", "100.64.0.2", false)
+            .unwrap();
+        store
+            .connected_to("aa", "LAPTOP", "Windows 11", "100.64.0.2")
+            .unwrap();
+        assert_eq!(store.desks().count(), 1);
+        let desk = store.desk("aa").unwrap().clone();
+        assert_eq!(
+            (desk.machine.as_str(), desk.os.as_str()),
+            ("LAPTOP", "Windows 11")
+        );
+        assert!(desk.tried_in > 0 && desk.last_out > 0 && desk.last_in == 0);
+
+        assert!(
+            store
+                .set_permission("aa", Some(Permission::Always))
+                .unwrap()
+        );
+        assert!(store.paired_peer("aa").is_some(), "always is being paired");
+        assert_eq!(store.permission("aa"), Some(Permission::Always));
+        assert!(store.set_permission("aa", Some(Permission::Never)).unwrap());
+        assert!(store.paired_peer("aa").is_none());
+        assert_eq!(store.permission("aa"), Some(Permission::Never));
+        assert!(
+            !store.set_permission("aa", Some(Permission::Never)).unwrap(),
+            "no change"
+        );
+        // Accepting it for good in the question overrides a rule of its own.
+        store.set_permission("aa", Some(Permission::Ask)).unwrap();
+        store.pair("aa", "LAPTOP", "100.64.0.2").unwrap();
+        assert_eq!(store.permission("aa"), Some(Permission::Always));
+        assert!(store.set_permission("aa", None).unwrap());
+        assert_eq!(store.permission("aa"), None);
+
+        // All of it survives the file.
+        store.rename("aa", "  Laptop  ").unwrap();
+        store.set_favorite("aa", true).unwrap();
+        let read = TrustStore::load(store.path()).unwrap();
+        let desk = read.desk("aa").unwrap();
+        assert_eq!(desk.shown_name(), "Laptop");
+        assert!(desk.favorite);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn forgetting_a_desk_removes_every_trace() {
+        let (mut store, dir) = store("forget");
+        store.pin_host("100.64.0.2:28326", "aa", "LAPTOP").unwrap();
+        store.pin_host("100.64.0.3:28326", "bb", "OTHER").unwrap();
+        store.pair("aa", "LAPTOP", "100.64.0.2").unwrap();
+        store
+            .connected_to("aa", "LAPTOP", "", "100.64.0.2")
+            .unwrap();
+        assert!(store.forget_desk("aa").unwrap());
+        assert!(store.known_host("100.64.0.2:28326").is_none());
+        assert!(store.paired_peer("aa").is_none() && store.desk("aa").is_none());
+        assert!(
+            store.known_host("100.64.0.3:28326").is_some(),
+            "others stay"
+        );
+        assert!(!store.forget_desk("aa").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file from before 0.14.0 has no desks; it reads, and nothing is lost on writing.
+    #[test]
+    fn an_older_file_reads() {
+        let (_, dir) = store("older");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trust.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"known_hosts":{},"paired_peers":{"aa":{"name":"L","first_seen":1,"last_address":"1.2.3.4:5"}}}"#,
+        )
+        .unwrap();
+        let mut store = TrustStore::load(&path).unwrap();
+        assert_eq!(store.permission("aa"), Some(Permission::Always));
+        store.set_favorite("aa", true).unwrap();
+        assert!(TrustStore::load(&path).unwrap().paired_peer("aa").is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

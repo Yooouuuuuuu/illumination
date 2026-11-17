@@ -789,6 +789,12 @@ pub async fn run_viewer_session_sharing_media(
                     }
                     notify();
                 }
+                Ok(ControlMsg::IdleWarning { seconds }) => {
+                    shared.lock().expect("view state lock").idle_notice = (seconds > 0).then(|| {
+                        format!("no input for a while: the host disconnects in {seconds} s unless you move the mouse")
+                    });
+                    notify();
+                }
                 Ok(ControlMsg::InputBlocked { reason }) => {
                     let reason = (!reason.is_empty()).then_some(reason);
                     match &reason {
