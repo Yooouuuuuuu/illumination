@@ -530,6 +530,53 @@ async fn the_other_display_is_shown_when_asked_for() {
     session.abort();
 }
 
+/// A viewer that shows a display small (one of several in its window) gets it at that
+/// size, and at its own again when it asks.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_display_comes_at_the_size_asked_for() {
+    use illum::viewer::MediaFlags;
+    use illum_media::picture::Picture;
+    use std::sync::atomic::Ordering::Relaxed;
+    fn width(state: &ViewState) -> Option<u32> {
+        state.frame.as_deref().map(|picture| match picture {
+            Picture::Bgra(frame) => frame.width,
+            Picture::Yuv(yuv) => yuv.width,
+        })
+    }
+    let addr = start_host("host-sized", Some(pattern_factory())).await;
+    let conn = connect(&endpoint("ctl-sized"), &addr.to_string())
+        .await
+        .unwrap();
+    let sender = conn.sender();
+    let shared: Shared = Arc::default();
+    let view = params(None);
+    let session = tokio::spawn(run_viewer_session(
+        conn,
+        view.clone(),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    wait_for(&shared, "the display at its own size", |s| {
+        width(s) == Some(W)
+    })
+    .await;
+    let flags = MediaFlags::default();
+    flags.scale.store(50, Relaxed);
+    sender.send_control(&flags.screen_start(&view));
+    let half = (W * 50 / 100) & !1;
+    wait_for(&shared, "the display at half size", |s| {
+        width(s) == Some(half)
+    })
+    .await;
+    flags.scale.store(0, Relaxed);
+    sender.send_control(&flags.screen_start(&view));
+    wait_for(&shared, "the display at its own size again", |s| {
+        width(s) == Some(W)
+    })
+    .await;
+    session.abort();
+}
+
 /// The test pattern with a text pointer over it, as a host showing an editor would have.
 struct WithTextPointer {
     screen: PatternSource,

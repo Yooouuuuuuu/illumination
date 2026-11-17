@@ -1309,7 +1309,30 @@ app is one thing that is either running, with an icon in the tray, or not runnin
   watches for the main one being gone, should that end badly. On the host the desk is
   still one desk: it is listed once, and the idle rule counts input from any of its
   sessions.
-- Not built: all displays in one window (planned as tiles, each display its own stream).
+- **All displays in one window (v0.14.5).** "All" in the Display row shows the host's
+  displays as tiles: two side by side, three or four in a two-by-two grid, four at most.
+  Every tile starts the same size, whatever the displays' own sizes are.
+  - *Each display is a stream of its own*, as a popped-out one is: the session's own
+    display stays on its session, and each other one gets a session in the same process
+    (no sound, no clipboard, the same permission). Nothing joins the displays on the host,
+    so no encoder meets a picture wider than a display.
+  - *Each is asked for at the size its tile shows it*: `ScreenStart.scale_percent` now
+    counts in an ordinary session too (it did only in measurement runs), and the host
+    lowers the top bitrate with it. The window asks in a few steps (25 to 100 percent)
+    and anew once the tiles have kept still for a moment, so moving a line does not
+    restart the stream at every pixel. A display's own size is read from the words the
+    host lists it with, which begin with it ("2560 × 1440").
+  - *The mouse belongs to the display it is on*: its events go to that display's session,
+    in that display's pixels (a picture that comes smaller is mapped back). The keyboard
+    stays on the main session; the host has one keyboard, whichever session it comes by.
+  - *"Control | Arrange"* in the bar says whose the mouse is. In Arrange nothing goes to
+    the host (the grabbed keys neither): a press on a tile moves it onto another, which
+    swaps them, and a press near a line between tiles moves the line. The tiles show their
+    displays' numbers meanwhile. One mode, not two: the middle of a tile and the line
+    between two never ask for the same thing.
+  - *The arrangement is kept per desk*, by the host's key, in `layouts.json` among the
+    person's own files, and used again if the host still has the same displays.
+  - Only with the GPU presenter, and not in a popped-out window or a measurement run.
 
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads

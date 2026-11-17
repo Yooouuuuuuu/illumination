@@ -440,6 +440,19 @@ impl Renderer {
         placement: Option<Placement>,
         cursor: Option<CursorPosition>,
     ) {
+        self.render_onto(target, viewport, placement, cursor, true);
+    }
+
+    /// As [`Renderer::render`]; with `clear` false what is in `target` already stays, so
+    /// several pictures (each with a renderer of its own) share one frame.
+    pub fn render_onto(
+        &mut self,
+        target: &wgpu::TextureView,
+        viewport: (u32, u32),
+        placement: Option<Placement>,
+        cursor: Option<CursorPosition>,
+        clear: bool,
+    ) {
         let viewport_f = [viewport.0 as f32, viewport.1 as f32];
         let picture = self.picture.as_ref().zip(placement);
         if let Some((t, p)) = picture {
@@ -505,12 +518,16 @@ impl Renderer {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.125,
-                            g: 0.125,
-                            b: 0.125,
-                            a: 1.0,
-                        }),
+                        load: if clear {
+                            wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.125,
+                                g: 0.125,
+                                b: 0.125,
+                                a: 1.0,
+                            })
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -545,6 +562,8 @@ pub struct WindowPresenter {
     /// then scales it to the window) so an over-large window never fails to configure.
     max_dim: u32,
     renderer: Renderer,
+    /// One more renderer per display while several are shown as tiles.
+    tiles: Vec<Renderer>,
     overlay: Option<Overlay>,
 }
 
@@ -614,6 +633,7 @@ impl WindowPresenter {
             view_format,
             max_dim,
             renderer,
+            tiles: Vec::new(),
             overlay: None,
         })
     }
@@ -670,6 +690,65 @@ impl WindowPresenter {
             ..Default::default()
         });
         self.renderer.render(&view, want, placement, cursor);
+        if let Some(overlay) = &self.overlay {
+            overlay.draw(&self.gpu, &view);
+        }
+        self.gpu.queue.present(frame);
+        true
+    }
+
+    /// The renderer of tile `index` (several displays in one window), made when first asked
+    /// for.
+    pub fn tile(&mut self, index: usize) -> &mut Renderer {
+        while self.tiles.len() <= index {
+            self.tiles
+                .push(Renderer::new(self.gpu.clone(), self.view_format));
+        }
+        &mut self.tiles[index]
+    }
+
+    /// The tiles are no longer shown: their pictures are let go.
+    pub fn drop_tiles(&mut self) {
+        self.tiles.clear();
+    }
+
+    /// Draws one frame of tiles: tile `i` at `placed[i]`, with its cursor. Returns false
+    /// when nothing reached the screen, as [`WindowPresenter::present`] does.
+    pub fn present_tiles(
+        &mut self,
+        size: (u32, u32),
+        placed: &[(Option<Placement>, Option<CursorPosition>)],
+    ) -> bool {
+        let want = (size.0.clamp(1, self.max_dim), size.1.clamp(1, self.max_dim));
+        if want != (self.config.width, self.config.height) {
+            self.config.width = want.0;
+            self.config.height = want.1;
+            self.surface.configure(&self.gpu.device, &self.config);
+        }
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return false;
+            }
+            other => {
+                tracing::debug!(target: "viewer", "swap chain: {other:?}; rebuilding");
+                self.surface.configure(&self.gpu.device, &self.config);
+                return false;
+            }
+        };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.view_format),
+            ..Default::default()
+        });
+        // The first clears the frame (also when it has nothing to show yet).
+        self.tile(placed.len().max(1) - 1);
+        for (i, (placement, cursor)) in placed.iter().enumerate() {
+            self.tiles[i].render_onto(&view, want, *placement, *cursor, i == 0);
+        }
+        if placed.is_empty() {
+            self.tiles[0].render_onto(&view, want, None, None, true);
+        }
         if let Some(overlay) = &self.overlay {
             overlay.draw(&self.gpu, &view);
         }
@@ -921,6 +1000,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Several displays in one window: each picture has a renderer of its own, and the
+    /// later ones leave what the earlier drew.
+    #[test]
+    fn two_pictures_share_a_frame() {
+        let Some(gpu) = gpu() else { return };
+        let (w, h) = (128u32, 64u32);
+        let plain = |colour| {
+            let mut frame = Frame::new(32, 32);
+            frame.fill_rect(0, 0, 32, 32, colour);
+            Picture::Bgra(frame)
+        };
+        let (red, blue) = (Bgra::rgb(200, 0, 0), Bgra::rgb(0, 0, 200));
+        let mut left = Renderer::new(gpu.clone(), wgpu::TextureFormat::Bgra8Unorm);
+        let mut right = Renderer::new(gpu.clone(), wgpu::TextureFormat::Bgra8Unorm);
+        left.upload_picture(&plain(red));
+        right.upload_picture(&plain(blue));
+        let tex = target(&gpu, w, h);
+        let view = tex.create_view(&Default::default());
+        // Each fills a half of the frame: made larger, as a tile does with a small stream.
+        let place = |x| Placement {
+            x,
+            y: 0,
+            w: 64,
+            h: 64,
+            scale: 2.0,
+            src_x: 0,
+            src_y: 0,
+        };
+        left.render_onto(&view, (w, h), Some(place(0)), None, true);
+        right.render_onto(&view, (w, h), Some(place(64)), None, false);
+        let out = read_back(&gpu, &tex);
+        assert!(
+            distance(pixel(&out, w, 20, 30), red) < 6.0,
+            "the left one stayed"
+        );
+        assert!(distance(pixel(&out, w, 100, 30), blue) < 6.0);
     }
 
     #[test]

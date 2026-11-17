@@ -519,10 +519,17 @@ impl MediaLink {
         let stop = Arc::new(AtomicBool::new(false));
         let want_keyframe = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
+        // The viewer shows this display small (one of several in its window): it is sent
+        // at that size, with as much less to spend. A measurement run has its own rule.
+        let base_scale = if settings.fixed {
+            100
+        } else {
+            settings.scale_percent.clamp(25, 100)
+        };
         let peer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
         let adapter = Adapter::new(
             Limits {
-                max_bitrate_bps: settings.max_bitrate_bps,
+                max_bitrate_bps: settings.max_bitrate_bps * u64::from(base_scale) / 100,
                 max_fps: settings.max_fps,
                 scale_rungs: settings.scale_rungs,
             },
@@ -781,8 +788,9 @@ impl MediaLink {
                         }
                         due_us = due_us.max(captured_us.saturating_sub(period_us / 2)) + period_us;
                         // Resolution rungs.
-                        let frame = if current.rung.scale_percent < 100 {
-                            let (w, h) = scaled_size(frame.width, frame.height, current.rung.scale_percent);
+                        let scale = current.rung.scale_percent * base_scale / 100;
+                        let frame = if scale < 100 {
+                            let (w, h) = scaled_size(frame.width, frame.height, scale.max(10));
                             downscale(&frame, w, h)
                         } else {
                             frame

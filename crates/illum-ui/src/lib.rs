@@ -14,6 +14,7 @@ pub mod icon;
 pub mod input;
 pub mod measure;
 pub mod session_bar;
+pub mod tiles;
 pub mod tray;
 pub mod workload;
 
@@ -494,6 +495,8 @@ pub struct ViewerOptions {
     pub on_pop_out: Box<dyn Fn(u32)>,
     /// This window is such a popped-out display: the picture alone, with a tab that closes it.
     pub popped_out: bool,
+    /// What showing several of the host's displays at once needs; `None`: not offered.
+    pub all: Option<AllDisplays>,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Being in front is reported by [`UiEvent::Front`] (the keyboard grab asks the system
@@ -508,6 +511,93 @@ pub struct ViewerOptions {
     /// Called when the keyboard mode is changed in the window. Returns whether the keyboard is
     /// grabbed in that mode.
     pub on_keyboard: Box<dyn Fn(KeyboardMode) -> bool>,
+}
+
+/// What the window needs from the session to show several displays as tiles (§14). Each
+/// display but the one the session shows already is a session of its own.
+pub struct AllDisplays {
+    /// Starts showing a display, asked for at a size (percent of its own).
+    pub open: Box<dyn Fn(u32, u32) -> ExtraView>,
+    /// Asks for the session's own display at a size (percent; 0: as its settings say).
+    /// With `restart` false it is only noted: a request for another display follows.
+    pub on_scale: Box<dyn Fn(u32, bool)>,
+    /// The arrangement kept for this desk, and the call that keeps a new one.
+    pub layout: Option<tiles::Layout>,
+    pub on_layout: Box<dyn Fn(&tiles::Layout)>,
+    /// The tiles are being arranged (true): nothing goes to the host meanwhile.
+    pub on_arrange: Box<dyn Fn(bool)>,
+}
+
+/// One more of the host's displays, shown as a tile.
+pub struct ExtraView {
+    pub shared: Shared,
+    pub on_presented: Box<dyn Fn(u64)>,
+    /// `None` for view-only.
+    pub input: Option<Arc<InputOut>>,
+    /// Asks for it at another size.
+    pub on_scale: Box<dyn Fn(u32)>,
+    /// Ends it.
+    pub close: Box<dyn Fn()>,
+}
+
+/// A display among the tiles.
+struct TileView {
+    display: u32,
+    /// `None`: the session's own display.
+    extra: Option<ExtraView>,
+    uploaded: Option<Arc<Picture>>,
+    last_acked: Option<u64>,
+    /// The size it was last asked for at.
+    asked: u32,
+    /// Where it was drawn last, and host pixels per picture pixel (it comes smaller than
+    /// the display is).
+    placement: Option<Placement>,
+    ratio: (f64, f64),
+}
+
+/// What is being moved while arranging.
+#[derive(Clone, Copy)]
+enum Drag {
+    Edge(tiles::Edge),
+    /// The tile at this place.
+    Tile(usize),
+}
+
+/// Several displays in the window.
+struct AllView {
+    layout: tiles::Layout,
+    /// One per display shown; the renderer of each has the same index.
+    tiles: Vec<TileView>,
+    area: tiles::Area,
+    arrange: bool,
+    drag: Option<Drag>,
+    /// The sizes are asked for anew once the tiles have kept still until then.
+    settle_at: Option<Instant>,
+    /// The tile the mouse was last on.
+    over: Option<usize>,
+}
+
+/// How long the tiles keep still before their displays are asked for at the new sizes.
+const SETTLE: Duration = Duration::from_millis(400);
+/// How near a line between tiles the mouse takes hold of it, in pixels.
+const GRIP: f64 = 8.0;
+
+/// A picture fitted into a tile, made larger too (a display asked for small is shown at the
+/// tile's size until it comes at the new one).
+fn fit_in(width: u32, height: u32, tile: tiles::Area) -> Placement {
+    let scale = (f64::from(tile.w) / f64::from(width.max(1)))
+        .min(f64::from(tile.h) / f64::from(height.max(1)));
+    let w = ((f64::from(width) * scale).round() as u32).clamp(1, tile.w.max(1));
+    let h = ((f64::from(height) * scale).round() as u32).clamp(1, tile.h.max(1));
+    Placement {
+        x: tile.x + (tile.w.max(1) - w) / 2,
+        y: tile.y + (tile.h.max(1) - h) / 2,
+        w,
+        h,
+        scale,
+        src_x: 0,
+        src_y: 0,
+    }
 }
 
 pub struct ViewerWindow {
@@ -571,6 +661,7 @@ impl ViewerWindow {
             } else {
                 session_bar::WindowMode::Detail
             },
+            all: None,
             icon_announced: false,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
@@ -634,6 +725,8 @@ struct App {
     mode: session_bar::WindowMode,
     /// The taskbar was told the icon after the first frame.
     icon_announced: bool,
+    /// Several of the host's displays are shown as tiles.
+    all: Option<AllView>,
 }
 
 impl App {
@@ -762,7 +855,7 @@ impl App {
         } else {
             host_cursor
         };
-        if self.options.input.is_some() {
+        if self.options.input.is_some() && self.all.is_none() {
             let shape = host_cursor
                 .visible
                 .then_some(cursor_shape.as_ref())
@@ -771,45 +864,53 @@ impl App {
             let shape = shape.filter(|_| !self.over_bar);
             self.wear(event_loop, shape);
         }
+        let tiles_shown = self
+            .all
+            .is_some()
+            .then(|| self.present_all(event_loop, (w.get(), h.get()), top, area_h));
         let Some(s) = self.window.as_mut() else {
             return;
         };
-        let shown = match &mut s.backend {
-            Backend::Gpu(presenter) => {
-                if let Some(pic) = &picture {
-                    let same = self.uploaded.as_ref().is_some_and(|u| Arc::ptr_eq(u, pic));
-                    if !same {
-                        presenter.renderer().upload_picture(pic);
-                        self.uploaded = Some(pic.clone());
-                    }
-                }
-                presenter.renderer().upload_cursor(cursor_shape.as_ref());
-                presenter.present((w.get(), h.get()), place, Some(cursor))
-            }
-            Backend::Cpu(surface) => {
-                // CPU fallback: convert, scale and blend here, then one copy to the window.
-                if surface.resize(w, h).is_err() {
-                    return;
-                }
-                let Ok(mut buffer) = surface.buffer_mut() else {
-                    return;
-                };
-                match (&picture, place) {
-                    (Some(pic), Some(p)) => {
-                        let bgra = pic.to_bgra();
-                        match self.view_mode {
-                            ViewMode::Fit => blit_fit(&bgra, &mut buffer, w.get(), h.get()),
-                            ViewMode::Original => {
-                                blit_original(&bgra, &mut buffer, w.get(), h.get(), pan)
-                            }
-                        };
-                        if let Some(shape) = &cursor_shape {
-                            draw_cursor(&mut buffer, w.get(), h.get(), p, cursor, shape);
+        let shown = if let Some(shown) = tiles_shown {
+            shown
+        } else {
+            match &mut s.backend {
+                Backend::Gpu(presenter) => {
+                    if let Some(pic) = &picture {
+                        let same = self.uploaded.as_ref().is_some_and(|u| Arc::ptr_eq(u, pic));
+                        if !same {
+                            presenter.renderer().upload_picture(pic);
+                            self.uploaded = Some(pic.clone());
                         }
                     }
-                    _ => buffer.fill(0x0020_2020),
+                    presenter.renderer().upload_cursor(cursor_shape.as_ref());
+                    presenter.present((w.get(), h.get()), place, Some(cursor))
                 }
-                buffer.present().is_ok()
+                Backend::Cpu(surface) => {
+                    // CPU fallback: convert, scale and blend here, then one copy to the window.
+                    if surface.resize(w, h).is_err() {
+                        return;
+                    }
+                    let Ok(mut buffer) = surface.buffer_mut() else {
+                        return;
+                    };
+                    match (&picture, place) {
+                        (Some(pic), Some(p)) => {
+                            let bgra = pic.to_bgra();
+                            match self.view_mode {
+                                ViewMode::Fit => blit_fit(&bgra, &mut buffer, w.get(), h.get()),
+                                ViewMode::Original => {
+                                    blit_original(&bgra, &mut buffer, w.get(), h.get(), pan)
+                                }
+                            };
+                            if let Some(shape) = &cursor_shape {
+                                draw_cursor(&mut buffer, w.get(), h.get(), p, cursor, shape);
+                            }
+                        }
+                        _ => buffer.fill(0x0020_2020),
+                    }
+                    buffer.present().is_ok()
+                }
             }
         };
         if !shown {
@@ -910,8 +1011,30 @@ impl App {
     }
 
     /// Window pixels → host pixels, if the point is on the picture.
-    fn to_host(&self, x: f64, y: f64) -> Option<(i32, i32)> {
-        self.placement?.to_frame(x, y)
+    fn host_point(&mut self, x: f64, y: f64) -> Option<(i32, i32)> {
+        let Some(all) = self.all.as_mut() else {
+            return self.placement?.to_frame(x, y);
+        };
+        // Among tiles: the display the point is on, in that display's own pixels.
+        for (i, tile) in all.tiles.iter().enumerate() {
+            if let Some((fx, fy)) = tile.placement.and_then(|p| p.to_frame(x, y)) {
+                all.over = Some(i);
+                return Some((
+                    (f64::from(fx) * tile.ratio.0) as i32,
+                    (f64::from(fy) * tile.ratio.1) as i32,
+                ));
+            }
+        }
+        None
+    }
+
+    /// Where the mouse's events go: the session of the display it is on.
+    fn mouse_out(&self) -> Option<Arc<InputOut>> {
+        let tile = self.all.as_ref().and_then(|all| all.tiles.get(all.over?));
+        match tile.and_then(|t| t.extra.as_ref()) {
+            Some(extra) => extra.input.clone(),
+            None => self.options.input.clone(),
+        }
     }
 
     /// Viewer hotkeys use AnyDesk's Ctrl+Alt+Shift pattern and are never sent to the host.
@@ -1002,8 +1125,10 @@ impl App {
             }
             WindowEvent::Ime(Ime::Disabled) => self.composing = false,
             WindowEvent::CursorMoved { .. } => {
-                if let Some((x, y)) = self.local_mouse {
-                    input.send_move(x, y);
+                if let Some((x, y)) = self.local_mouse
+                    && let Some(mouse) = self.mouse_out()
+                {
+                    mouse.send_move(x, y);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1023,8 +1148,10 @@ impl App {
                 } else {
                     self.local_mouse.or(self.last_on_picture)
                 };
-                if let Some((x, y)) = position {
-                    input.send(InputMsg::MouseButton { button, down, x, y });
+                if let Some((x, y)) = position
+                    && let Some(mouse) = self.mouse_out()
+                {
+                    mouse.send(InputMsg::MouseButton { button, down, x, y });
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1032,8 +1159,10 @@ impl App {
                     MouseScrollDelta::LineDelta(x, y) => ((x * 120.0) as i32, (y * 120.0) as i32),
                     MouseScrollDelta::PixelDelta(p) => (p.x as i32, p.y as i32),
                 };
-                if let Some((x, y)) = self.local_mouse {
-                    input.send(InputMsg::Wheel { dx, dy, x, y });
+                if let Some((x, y)) = self.local_mouse
+                    && let Some(mouse) = self.mouse_out()
+                {
+                    mouse.send(InputMsg::Wheel { dx, dy, x, y });
                 }
             }
             _ => {}
@@ -1192,12 +1321,20 @@ impl App {
             // or on the tab itself.
             reveal: self.mode != session_bar::WindowMode::Detail && self.over_bar,
             status: self.status_line.clone(),
-            notice: self.bar_notice.clone(),
+            notice: if self.all.as_ref().is_some_and(|all| all.arrange) {
+                Some("Arranging: nothing is sent to the host".into())
+            } else {
+                self.bar_notice.clone()
+            },
             displays: self.displays.clone(),
             display: self.display,
             can_sas: self.options.can_sas && self.options.input.is_some(),
             can_lock: self.options.can_lock && self.options.input.is_some(),
             popped_out: self.options.popped_out,
+            can_all: self.options.all.is_some() && self.displays.len() > 1,
+            all: self.all.is_some(),
+            arrange: self.all.as_ref().is_some_and(|all| all.arrange),
+            tiles: self.arrange_marks(),
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1253,6 +1390,8 @@ impl App {
         use session_bar::BarAction;
         match action {
             BarAction::View(view) => self.view_mode = view,
+            BarAction::All => self.enter_all(),
+            BarAction::Arrange(on) => self.set_arrange(on),
             BarAction::Keyboard(mode) => {
                 // Nothing stays held on the host across the change.
                 if let Some(input) = &self.options.input {
@@ -1280,12 +1419,24 @@ impl App {
                         full.then_some(winit::window::Fullscreen::Borderless(None)),
                     );
                 }
+                // The arranging switch is in the bar: without the bar there is none.
+                if mode != session_bar::WindowMode::Detail {
+                    self.set_arrange(false);
+                }
                 self.mode = mode;
             }
             BarAction::Display(display) => {
                 // Nothing stays held on the display that is left.
                 if let Some(input) = &self.options.input {
                     input.release_all();
+                }
+                if self.all.is_some() {
+                    // Out of the tiles, to this display alone and at its full size.
+                    let stays = display == self.display;
+                    self.leave_all(stays);
+                    if stays {
+                        return;
+                    }
                 }
                 (self.options.on_display)(display);
             }
@@ -1294,6 +1445,413 @@ impl App {
             BarAction::PopOut(display) => (self.options.on_pop_out)(display),
             BarAction::Disconnect => event_loop.exit(),
         }
+    }
+}
+
+impl App {
+    /// The part of the window the picture has, as the bars were last laid out.
+    fn picture_area(&self) -> tiles::Area {
+        let size = self
+            .window
+            .as_ref()
+            .map(|s| s.window.inner_size())
+            .unwrap_or_default();
+        let (top, bottom) = self.bars.as_ref().map_or((0, 0), |b| b.space);
+        tiles::Area {
+            x: 0,
+            y: top,
+            w: size.width.max(1),
+            h: size.height.saturating_sub(top + bottom).max(1),
+        }
+    }
+
+    /// A display's own size, read from what the host said of it.
+    fn native_of(&self, display: u32) -> Option<(u32, u32)> {
+        self.displays
+            .get(display as usize)
+            .and_then(|name| tiles::size_in(name))
+    }
+
+    /// Shows the host's displays (four at most) as tiles.
+    fn enter_all(&mut self) {
+        if self.all.is_some() || self.displays.len() < 2 {
+            return;
+        }
+        let gpu = matches!(
+            self.window.as_ref().map(|s| &s.backend),
+            Some(Backend::Gpu(_))
+        );
+        if !gpu {
+            return;
+        }
+        let Some(options) = self.options.all.as_ref() else {
+            return;
+        };
+        if let Some(input) = &self.options.input {
+            input.release_all();
+        }
+        let layout =
+            tiles::Layout::for_displays(self.displays.len(), self.display, options.layout.as_ref());
+        let area = self.picture_area();
+        let mut views = Vec::new();
+        for (display, tile) in layout.tiles(area) {
+            // A display whose size is not known is asked for at half, and stays there.
+            let asked = self
+                .native_of(display)
+                .map_or(50, |native| tiles::scale_step(tile, native));
+            let extra = if display == self.display {
+                (options.on_scale)(asked, true);
+                None
+            } else {
+                Some((options.open)(display, asked))
+            };
+            views.push(TileView {
+                display,
+                extra,
+                uploaded: None,
+                last_acked: None,
+                asked,
+                placement: None,
+                ratio: (1.0, 1.0),
+            });
+        }
+        self.view_mode = ViewMode::Fit;
+        self.local_mouse = None;
+        self.all = Some(AllView {
+            layout,
+            tiles: views,
+            area,
+            arrange: false,
+            drag: None,
+            settle_at: None,
+            over: None,
+        });
+        self.request_redraw();
+    }
+
+    /// Back to one display. `restart`: ask for the session's own display at full size now
+    /// (false when a request for another display follows).
+    fn leave_all(&mut self, restart: bool) {
+        let Some(all) = self.all.take() else {
+            return;
+        };
+        for tile in all.tiles {
+            if let Some(extra) = tile.extra {
+                if let Some(input) = &extra.input {
+                    input.release_all();
+                }
+                (extra.close)();
+            }
+        }
+        if let Some(options) = self.options.all.as_ref() {
+            if all.arrange {
+                (options.on_arrange)(false);
+            }
+            (options.on_scale)(0, restart);
+        }
+        if let Some(s) = self.window.as_mut() {
+            if let Backend::Gpu(presenter) = &mut s.backend {
+                presenter.drop_tiles();
+            }
+            s.window.set_cursor(CursorIcon::Default);
+        }
+        self.uploaded = None;
+        self.worn = None;
+        self.local_mouse = None;
+        self.request_redraw();
+    }
+
+    /// Arranging on or off. While on, the mouse moves tiles and lines and nothing goes to
+    /// the host.
+    fn set_arrange(&mut self, on: bool) {
+        let Some(all) = self.all.as_mut() else {
+            return;
+        };
+        if all.arrange == on {
+            return;
+        }
+        all.arrange = on;
+        all.drag = None;
+        if on {
+            // Nothing stays held on the host while it hears nothing.
+            if let Some(input) = &self.options.input {
+                input.release_all();
+            }
+            for tile in &all.tiles {
+                if let Some(input) = tile.extra.as_ref().and_then(|e| e.input.as_ref()) {
+                    input.release_all();
+                }
+            }
+            self.texted.clear();
+            self.composing = false;
+        }
+        if let Some(options) = self.options.all.as_ref() {
+            (options.on_arrange)(on);
+        }
+        self.worn = None;
+        if let Some(s) = &self.window {
+            s.window.set_cursor(CursorIcon::Default);
+        }
+        self.request_redraw();
+    }
+
+    /// While arranging: each tile with its display's number, for the bars to mark.
+    fn arrange_marks(&self) -> Vec<session_bar::TileMark> {
+        let Some(all) = self.all.as_ref().filter(|all| all.arrange) else {
+            return Vec::new();
+        };
+        let held = match all.drag {
+            Some(Drag::Tile(place)) => all.layout.order.get(place).copied(),
+            _ => None,
+        };
+        all.layout
+            .tiles(all.area)
+            .into_iter()
+            .map(|(display, t)| session_bar::TileMark {
+                display,
+                rect: [t.x as f32, t.y as f32, t.w as f32, t.h as f32],
+                held: held == Some(display),
+            })
+            .collect()
+    }
+
+    /// While arranging, the mouse and the keys are the window's. Returns true for an event
+    /// that must not reach the host.
+    fn arrange_event(&mut self, event: &WindowEvent) -> bool {
+        let mouse = self.window_mouse;
+        let over_bar = self.over_bar;
+        let Some(all) = self.all.as_mut().filter(|all| all.arrange) else {
+            return false;
+        };
+        let icon_of = |edge| match edge {
+            tiles::Edge::Upright => CursorIcon::EwResize,
+            tiles::Edge::Level => CursorIcon::NsResize,
+            tiles::Edge::Both => CursorIcon::Move,
+        };
+        let mut keep = None;
+        let taken = match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x, position.y);
+                if let Some(Drag::Edge(edge)) = all.drag {
+                    all.layout.move_edge(all.area, edge, x, y);
+                    all.settle_at = Some(Instant::now() + SETTLE);
+                }
+                let icon = match all.drag {
+                    Some(Drag::Edge(edge)) => icon_of(edge),
+                    Some(Drag::Tile(_)) => CursorIcon::Grabbing,
+                    None if over_bar => CursorIcon::Default,
+                    None => match all.layout.edge_at(all.area, x, y, GRIP) {
+                        Some(edge) => icon_of(edge),
+                        None if all.layout.place_at(all.area, x, y).is_some() => CursorIcon::Grab,
+                        None => CursorIcon::Default,
+                    },
+                };
+                if let Some(s) = &self.window {
+                    s.window.set_cursor(icon);
+                }
+                true
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                if let Some((x, y)) = mouse {
+                    all.drag = all
+                        .layout
+                        .edge_at(all.area, x, y, GRIP)
+                        .map(Drag::Edge)
+                        .or_else(|| all.layout.place_at(all.area, x, y).map(Drag::Tile));
+                }
+                true
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                let drag = all.drag.take();
+                if let (Some(Drag::Tile(from)), Some((x, y))) = (drag, mouse)
+                    && let Some(to) = all.layout.place_at(all.area, x, y)
+                    && to != from
+                {
+                    all.layout.swap(from, to);
+                }
+                if drag.is_some() {
+                    all.settle_at = Some(Instant::now() + SETTLE);
+                    keep = Some(all.layout.clone());
+                }
+                true
+            }
+            WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::Ime(_) => true,
+            _ => false,
+        };
+        // Kept for the desk, to be found again the next time.
+        if let (Some(layout), Some(options)) = (keep, self.options.all.as_mut()) {
+            (options.on_layout)(&layout);
+            options.layout = Some(layout);
+        }
+        if taken {
+            if let Some(bars) = self.bars.as_mut() {
+                bars.dirty = true;
+            }
+            self.request_redraw();
+        }
+        taken
+    }
+
+    /// Draws the tiles: every display's newest picture in its place. Returns whether the
+    /// frame reached the screen.
+    fn present_all(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        size: (u32, u32),
+        top: u32,
+        area_h: u32,
+    ) -> bool {
+        let Some(mut all) = self.all.take() else {
+            return false;
+        };
+        let area = tiles::Area {
+            x: 0,
+            y: top,
+            w: size.0,
+            h: area_h,
+        };
+        if all.area != area {
+            all.area = area;
+            all.settle_at = Some(Instant::now() + SETTLE);
+        }
+        let placed = all.layout.tiles(area);
+        let natives: Vec<Option<(u32, u32)>> = all
+            .tiles
+            .iter()
+            .map(|tile| self.native_of(tile.display))
+            .collect();
+        let controlling =
+            self.options.input.is_some() && self.hovering && !self.over_bar && !all.arrange;
+        let mut draws = Vec::with_capacity(all.tiles.len());
+        // What our own pointer wears: the host's shape on the display it is over.
+        let mut wear: Option<CursorShape> = None;
+        let shown = {
+            let Some(s) = self.window.as_mut() else {
+                self.all = Some(all);
+                return false;
+            };
+            let Backend::Gpu(presenter) = &mut s.backend else {
+                self.all = Some(all);
+                return false;
+            };
+            for (i, tile) in all.tiles.iter_mut().enumerate() {
+                let rect = placed
+                    .iter()
+                    .find(|(display, _)| *display == tile.display)
+                    .map(|(_, rect)| *rect);
+                let shared = tile.extra.as_ref().map_or(&self.shared, |e| &e.shared);
+                let (picture, cursor, shape) = {
+                    let state = shared.lock().expect("view state lock");
+                    (
+                        state.frame.clone(),
+                        state.cursor,
+                        state.cursor_shape.clone(),
+                    )
+                };
+                let (Some(rect), Some(pic)) = (rect, picture) else {
+                    tile.placement = None;
+                    draws.push((None, None));
+                    continue;
+                };
+                let native = natives[i].unwrap_or((pic.width(), pic.height()));
+                let place = fit_in(pic.width(), pic.height(), rect);
+                tile.placement = Some(place);
+                tile.ratio = (
+                    f64::from(native.0) / f64::from(pic.width().max(1)),
+                    f64::from(native.1) / f64::from(pic.height().max(1)),
+                );
+                if !tile.uploaded.as_ref().is_some_and(|u| Arc::ptr_eq(u, &pic)) {
+                    presenter.tile(i).upload_picture(&pic);
+                    tile.uploaded = Some(pic.clone());
+                }
+                presenter.tile(i).upload_cursor(shape.as_ref());
+                // The host's pointer is drawn on the display it is on, unless ours stands
+                // for it there.
+                let on_it = cursor.visible
+                    && cursor.x >= 0
+                    && cursor.y >= 0
+                    && (cursor.x as u32) < native.0
+                    && (cursor.y as u32) < native.1;
+                let drawn = (on_it && !controlling).then(|| CursorPosition {
+                    visible: true,
+                    x: (f64::from(cursor.x) / tile.ratio.0) as i32,
+                    y: (f64::from(cursor.y) / tile.ratio.1) as i32,
+                });
+                if controlling && all.over == Some(i) && cursor.visible {
+                    wear = shape;
+                }
+                draws.push((Some(place), drawn));
+            }
+            let shown = presenter.present_tiles(size, &draws);
+            if !all.arrange
+                && all.drag.is_none()
+                && all.settle_at.is_some_and(|at| at > Instant::now())
+            {
+                s.window.request_redraw(); // until the tiles have kept still long enough
+            }
+            shown
+        };
+        if self.options.input.is_some() && !all.arrange {
+            self.wear(event_loop, wear.as_ref());
+        }
+        if shown {
+            // The other displays' frames reached the screen: say so to their sessions.
+            for tile in all.tiles.iter_mut() {
+                let Some(extra) = &tile.extra else {
+                    continue;
+                };
+                let mut state = extra.shared.lock().expect("view state lock");
+                let rtt = state.clock.last_rtt;
+                state.stats.tick(rtt);
+                let newest = state.frame.as_ref().and(state.latest);
+                if let Some((seq, capture_us)) = newest
+                    && tile.last_acked != Some(seq)
+                    && tile.uploaded.is_some()
+                {
+                    let latency_ms = state
+                        .clock
+                        .host_now_us()
+                        .map(|host_now| (host_now - capture_us as i64) as f64 / 1000.0);
+                    state.mark_presented(latency_ms);
+                    drop(state);
+                    tile.last_acked = Some(seq);
+                    (extra.on_presented)(seq);
+                }
+            }
+        }
+        // Each display is asked for at the size its tile shows it, once the tiles keep still.
+        if all.drag.is_none() && all.settle_at.is_some_and(|at| at <= Instant::now()) {
+            all.settle_at = None;
+            for (i, tile) in all.tiles.iter_mut().enumerate() {
+                let rect = placed.iter().find(|(display, _)| *display == tile.display);
+                let (Some((_, rect)), Some(native)) = (rect, natives[i]) else {
+                    continue;
+                };
+                let step = tiles::scale_step(*rect, native);
+                if step == tile.asked {
+                    continue;
+                }
+                tile.asked = step;
+                match (&tile.extra, self.options.all.as_ref()) {
+                    (Some(extra), _) => (extra.on_scale)(step),
+                    (None, Some(options)) => (options.on_scale)(step, true),
+                    (None, None) => {}
+                }
+            }
+        }
+        self.all = Some(all);
+        shown
     }
 }
 
@@ -1347,6 +1905,11 @@ impl ApplicationHandler<UiEvent> for App {
         self.sync_ime(mode);
     }
 
+    /// The window is closing: the sessions of the other displays say goodbye too.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.leave_all(false);
+    }
+
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UiEvent) {
         match event {
             UiEvent::Redraw => self.request_redraw(),
@@ -1395,7 +1958,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.window_mouse = Some((position.x, position.y));
-                self.local_mouse = self.to_host(position.x, position.y);
+                self.local_mouse = self.host_point(position.x, position.y);
                 if self.local_mouse.is_some() {
                     self.last_on_picture = self.local_mouse;
                 }
@@ -1404,6 +1967,9 @@ impl ApplicationHandler<UiEvent> for App {
             _ => {}
         }
         if self.bar_event(&event) {
+            return;
+        }
+        if self.arrange_event(&event) {
             return;
         }
         if self.hotkey(&event) {
@@ -1415,11 +1981,22 @@ impl ApplicationHandler<UiEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Pending mouse moves and, while keys or buttons are held, heartbeats so the host knows
         // we're still here.
-        let next = self
+        let mut next = self
             .options
             .input
             .as_ref()
             .and_then(|input| input.service());
+        for tile in self.all.iter().flat_map(|all| &all.tiles) {
+            let theirs = tile
+                .extra
+                .as_ref()
+                .and_then(|e| e.input.as_ref())
+                .and_then(|input| input.service());
+            next = match (next, theirs) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
         event_loop.set_control_flow(match next {
             Some(when) => ControlFlow::WaitUntil(when),
             None => ControlFlow::Wait,

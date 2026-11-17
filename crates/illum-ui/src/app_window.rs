@@ -761,6 +761,28 @@ mod tests {
                 (1280.0, 300.0),
             ),
             (
+                "session-arrange",
+                crate::session_bar::BarState {
+                    all: true,
+                    arrange: true,
+                    tiles: vec![
+                        crate::session_bar::TileMark {
+                            display: 1,
+                            rect: [0.0, 35.0, 639.0, 458.0],
+                            held: true,
+                        },
+                        crate::session_bar::TileMark {
+                            display: 0,
+                            rect: [641.0, 35.0, 639.0, 458.0],
+                            held: false,
+                        },
+                    ],
+                    notice: Some("Arranging: nothing is sent to the host".into()),
+                    ..crate::session_bar::sample()
+                },
+                (1280.0, 520.0),
+            ),
+            (
                 "session-view-only",
                 crate::session_bar::BarState {
                     controlling: false,
@@ -775,9 +797,12 @@ mod tests {
             own.more = name == "session";
             let (pixels, width, height) = snapshot_ui(points, 1.0, |ui| {
                 crate::session_bar::draw(ui, &state, &mut own);
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x20, 0x20, 0x20)))
-                    .show(ui, |_| {});
+                // (Not under the marks of the tiles, which are drawn on the same layer.)
+                if !state.arrange {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x20, 0x20, 0x20)))
+                        .show(ui, |_| {});
+                }
             })
             .unwrap();
             write_png(&dir.join(format!("{name}.png")), &pixels, width, height).unwrap();

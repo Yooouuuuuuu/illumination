@@ -39,6 +39,28 @@ pub struct MediaFlags {
     /// Which of the host's displays is asked for: `ViewParams::display` at first, another once
     /// the person chose one in the window. Read whenever the screen is (re)started.
     pub display: std::sync::atomic::AtomicU32,
+    /// The size the screen is asked for, in percent of the display's own; 0: as the
+    /// session's settings say. Set while the window shows several displays as tiles.
+    pub scale: std::sync::atomic::AtomicU32,
+}
+
+impl MediaFlags {
+    /// The request for the screen as it is wanted now: the display chosen in the window,
+    /// at the size the window shows it.
+    pub fn screen_start(&self, params: &ViewParams) -> ControlMsg {
+        let mut start = params.screen_start(self.display.load(Ordering::Relaxed));
+        let wanted = self.scale.load(Ordering::Relaxed);
+        if let ControlMsg::ScreenStart {
+            scale_percent,
+            fixed: false,
+            ..
+        } = &mut start
+            && wanted > 0
+        {
+            *scale_percent = wanted;
+        }
+        start
+    }
 }
 
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
@@ -514,8 +536,18 @@ fn media_loop(
                 tracing::warn!(target: "media", "No video for {} s though the host is sending; rebuilding the media path.", RECONNECT_AFTER.as_secs());
                 // For the display asked for now, which may not be the one it began with.
                 let mut again = reconnect.clone();
-                if let ControlMsg::ScreenStart { display, .. } = &mut again {
+                let wanted = flags.scale.load(Ordering::Relaxed);
+                if let ControlMsg::ScreenStart {
+                    display,
+                    scale_percent,
+                    fixed,
+                    ..
+                } = &mut again
+                {
                     *display = flags.display.load(Ordering::Relaxed);
+                    if wanted > 0 && !*fixed {
+                        *scale_percent = wanted;
+                    }
                 }
                 sender.send_control(&again);
             }
@@ -630,7 +662,7 @@ pub async fn run_viewer_session_sharing_media(
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
     }
     // Kept so the media loop can re-send it to rebuild a stuck media path (§5.5).
-    let screen_start = params.screen_start(flags.display.load(Ordering::Relaxed));
+    let screen_start = flags.screen_start(&params);
     conn.send_control(&screen_start);
 
     // Clock probes once a second; they also keep the session from idling out on a still screen.

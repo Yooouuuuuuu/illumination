@@ -54,6 +54,22 @@ pub struct BarState {
     pub can_lock: bool,
     /// This window is a popped-out display: it has no bars, and its tab closes it.
     pub popped_out: bool,
+    /// Several displays can be shown at once, and are; and the tiles are being arranged.
+    pub can_all: bool,
+    pub all: bool,
+    pub arrange: bool,
+    /// While arranging: the tiles, to mark each with its display's number.
+    pub tiles: Vec<TileMark>,
+}
+
+/// A tile as the bars mark it while the tiles are arranged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileMark {
+    pub display: u32,
+    /// Left, top, width and height in the window's pixels.
+    pub rect: [f32; 4],
+    /// It is the one being moved.
+    pub held: bool,
 }
 
 /// What the person asked for.
@@ -71,6 +87,10 @@ pub enum BarAction {
     Lock,
     /// Open another of the host's displays in a window of its own.
     PopOut(u32),
+    /// Show the host's displays together, as tiles.
+    All,
+    /// Arrange the tiles (true), or go back to controlling the host.
+    Arrange(bool),
     Disconnect,
 }
 
@@ -90,6 +110,45 @@ pub struct BarSpace {
     pub top: f32,
     pub bottom: f32,
     pub claims: Vec<Rect>,
+}
+
+/// While the tiles are arranged: each with a frame and its display's number, so it is
+/// plain what is moved and that the host is not being touched.
+fn tile_marks(ui: &mut Ui, state: &BarState) {
+    if !state.arrange {
+        return;
+    }
+    let scale = ui.ctx().pixels_per_point();
+    let painter = ui.ctx().layer_painter(egui::LayerId::background());
+    for tile in &state.tiles {
+        let [x, y, w, h] = tile.rect.map(|v| v / scale);
+        let rect = Rect::from_min_size(pos2(x, y), vec2(w, h));
+        painter.rect_stroke(
+            rect.shrink(1.5),
+            CornerRadius::ZERO,
+            Stroke::new(3.0, if tile.held { YELLOW } else { SOFT }),
+            egui::StrokeKind::Inside,
+        );
+        let badge = Rect::from_center_size(rect.center(), vec2(64.0, 64.0));
+        painter.rect_filled(
+            badge,
+            CornerRadius::same(14),
+            if tile.held { YELLOW } else { CREAM },
+        );
+        painter.rect_stroke(
+            badge,
+            CornerRadius::same(14),
+            Stroke::new(1.0, EDGE),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            (tile.display + 1).to_string(),
+            semibold(34.0),
+            NAVY,
+        );
+    }
 }
 
 fn semibold(size: f32) -> FontId {
@@ -214,16 +273,31 @@ pub fn draw(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, 
             ui.horizontal_wrapped(|ui| {
                 if state.displays.len() > 1 {
                     ui.label(RichText::new("Display").size(13.0).color(MUTED));
-                    let numbers: Vec<(u32, String)> = (0..state.displays.len() as u32)
-                        .map(|i| (i, (i + 1).to_string()))
+                    // `None` is "All": the displays together.
+                    let mut numbers: Vec<(Option<u32>, String)> = (0..state.displays.len() as u32)
+                        .map(|i| (Some(i), (i + 1).to_string()))
                         .collect();
-                    let choices: Vec<(u32, &str)> =
+                    if state.can_all {
+                        numbers.push((None, "All".to_string()));
+                    }
+                    let choices: Vec<(Option<u32>, &str)> =
                         numbers.iter().map(|(i, n)| (*i, n.as_str())).collect();
-                    if let Some(display) = segments(ui, state.display, &choices) {
-                        out.push(BarAction::Display(display));
+                    let chosen = (!state.all).then_some(state.display);
+                    match segments(ui, chosen, &choices) {
+                        Some(Some(display)) => out.push(BarAction::Display(display)),
+                        Some(None) => out.push(BarAction::All),
+                        None => {}
                     }
                 }
-                if let Some(view) = segments(
+                if state.all {
+                    // Together they are always fitted; what is chosen instead is whose the
+                    // mouse is: the host's, or the tiles'.
+                    if let Some(arrange) =
+                        segments(ui, state.arrange, &[(false, "Control"), (true, "Arrange")])
+                    {
+                        out.push(BarAction::Arrange(arrange));
+                    }
+                } else if let Some(view) = segments(
                     ui,
                     state.view,
                     &[(ViewMode::Fit, "Fit"), (ViewMode::Original, "Original")],
@@ -253,6 +327,7 @@ pub fn draw(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, 
                 });
             });
         });
+    tile_marks(ui, state);
     let rect = top.response.rect;
     ui.painter().line_segment(
         [
@@ -497,5 +572,9 @@ pub fn sample() -> BarState {
         can_sas: true,
         can_lock: true,
         popped_out: false,
+        can_all: true,
+        all: false,
+        arrange: false,
+        tiles: Vec::new(),
     }
 }

@@ -11,6 +11,32 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-11-19
+
+Not released.
+
+### Added
+
+- **All displays in one window.** With a host that has several displays, the
+  Display row has "All": the displays are shown as tiles, two side by side,
+  three or four in a grid (four at most). Each display is sent at about the
+  size it is shown, so this costs about as much as one display.
+- **Control | Arrange**, next to it. In Arrange the mouse is the window's: drag
+  a tile onto another to swap them, drag the line between tiles to give one
+  more room. Nothing is sent to the host meanwhile. The arrangement is
+  remembered for that desk.
+
+### Changed
+
+- A host sends a display smaller when the controller asks for it so (it did
+  only in measurement runs). Both desks need this version for "All" to save
+  anything; with an older host the displays come at full size.
+
+Verified with cargo fmt, cargo clippy and cargo test (the tile layout, a
+display sent at the size asked for, two pictures in one frame) and by a
+picture of the bar while arranging. Not yet tried with a real host that has
+two displays.
+
 ## [0.14.4] - 2026-11-18
 
 Not released.

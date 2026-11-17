@@ -1134,6 +1134,155 @@ fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::Os
     line
 }
 
+/// Where the arrangements of tiles are kept, one per desk (a person's own choice, so it is
+/// with their own files).
+fn layouts_file(home: &Path) -> PathBuf {
+    own_folder(home).join("layouts.json")
+}
+
+fn kept_layouts(home: &Path) -> std::collections::HashMap<String, illum_ui::tiles::Layout> {
+    std::fs::read(layouts_file(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Keeps the arrangement of a desk's displays for the next time.
+fn keep_layout(home: &Path, desk: &str, layout: &illum_ui::tiles::Layout) {
+    let mut all = kept_layouts(home);
+    all.insert(desk.to_string(), layout.clone());
+    let written = serde_json::to_vec_pretty(&all)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| std::fs::write(layouts_file(home), bytes).map_err(|e| e.to_string()));
+    if let Err(e) = written {
+        tracing::warn!(target: "session", "The arrangement of the displays was not kept: {e}");
+    }
+}
+
+/// What a session of one more display needs, to be started when the window asks.
+#[derive(Clone)]
+struct ExtraSetup {
+    handle: tokio::runtime::Handle,
+    ep: Endpoint,
+    target: String,
+    params: ViewParams,
+    waker: illum_ui::Waker,
+    with_input: bool,
+}
+
+/// Starts a session of its own for another of the host's displays, shown as a tile in this
+/// window (§14): the same limits and permission, no sound and no clipboard. It reconnects
+/// by itself, as the main one does, until it is closed.
+fn open_extra(setup: &ExtraSetup, display: u32, scale: u32) -> illum_ui::ExtraView {
+    let number = display + 1;
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut params = setup.params.clone();
+    params.display = display;
+    params.audio = false;
+    params.clipboard = false;
+    params.record = false;
+    let shared: Shared = Arc::default();
+    let live = illum::viewer::LiveSender::default();
+    let media_slot = MediaSlot::default();
+    let flags = Arc::new(illum::viewer::MediaFlags::default());
+    flags.display.store(display, Relaxed);
+    flags.scale.store(scale, Relaxed);
+    let task = {
+        let (shared, live, media_slot, flags, params) = (
+            shared.clone(),
+            live.clone(),
+            media_slot.clone(),
+            flags.clone(),
+            params.clone(),
+        );
+        let (ep, target, waker) = (setup.ep.clone(), setup.target.clone(), setup.waker.clone());
+        let notify: Notify = Arc::new(move || waker.wake(UiEvent::Redraw));
+        setup.handle.spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                match connect(&ep, &target).await {
+                    Ok(conn) => {
+                        backoff = Duration::from_secs(1);
+                        live.set(Some(conn.sender()));
+                        let ended = run_viewer_session_sharing_media(
+                            conn,
+                            params.clone(),
+                            shared.clone(),
+                            notify.clone(),
+                            media_slot.clone(),
+                            None,
+                            flags.clone(),
+                        )
+                        .await;
+                        live.set(None);
+                        *media_slot.lock().expect("media slot") = None;
+                        match ended {
+                            Ok(()) => break, // the host said goodbye
+                            Err(e) => {
+                                tracing::warn!(target: "media", "Display {number}: connection ended ({e}); reconnecting.")
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "session", "Display {number} is not shown yet: {e}")
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(10));
+            }
+        })
+    };
+    let input = setup.with_input.then(|| {
+        let (input_live, sent) = (live.clone(), shared.clone());
+        let out = Arc::new(InputOut::new(move |ev| {
+            sent.lock()
+                .expect("view state lock")
+                .input_sent(false, ev.seq);
+            input_live.send(Channel::Input, ev.encode());
+        }));
+        let (sent, media_slot) = (shared.clone(), media_slot.clone());
+        out.set_unreliable(Some(Box::new(move |ev| {
+            match media_slot.lock().expect("media slot").as_ref() {
+                Some(client) => {
+                    sent.lock()
+                        .expect("view state lock")
+                        .input_sent(true, ev.seq);
+                    client.send_input(&ev.encode());
+                    true
+                }
+                None => false,
+            }
+        })));
+        out
+    });
+    let (abort, handle) = (task.abort_handle(), setup.handle.clone());
+    illum_ui::ExtraView {
+        shared,
+        on_presented: {
+            let live = live.clone();
+            Box::new(move |seq| live.send_control(&ControlMsg::VideoAck { seq }))
+        },
+        input,
+        on_scale: {
+            let (live, flags) = (live.clone(), flags.clone());
+            Box::new(move |percent| {
+                flags.scale.store(percent, Relaxed);
+                live.send_control(&flags.screen_start(&params));
+            })
+        },
+        close: Box::new(move || {
+            live.send_control(&ControlMsg::ScreenStop);
+            live.send_control(&ControlMsg::Bye);
+            // A moment for the goodbye to leave, then the session is ended.
+            let abort = abort.clone();
+            handle.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                abort.abort();
+            });
+        }),
+    }
+}
+
 /// Connects, then shows the host's screen in a window until it is closed.
 fn run_view(
     runtime: &tokio::runtime::Runtime,
@@ -1164,6 +1313,7 @@ fn run_view(
     println!("Connecting to {}…", normalize_target(target));
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));
+    let desk_key = conn.peer_fingerprint.to_string();
     if !hello.capabilities.iter().any(|c| c == "screen") {
         bail!(
             "\"{}\" does not offer screen sharing (it may run an older version)",
@@ -1345,13 +1495,21 @@ fn run_view(
     // The keyboard goes to the host while the viewer has focus: a hook on its own thread takes
     // every key (remote mode) or the ones Windows keeps for itself (Win, Alt+Tab, …) (§6).
     let hotkeys = Arc::new(illum_ui::GrabHotkeys::default());
+    // Set while the tiles of several displays are being arranged: nothing goes to the host.
+    let arranging = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)]
+    let arranging_keys = arranging.clone();
     #[cfg(windows)]
     let _hook = match &input {
         Some(input) => {
             let (input, hotkeys, waker) = (input.clone(), hotkeys.clone(), waker.clone());
             let front_waker = waker.clone();
             let forward = move |key, down| match hotkeys.key(key, down) {
-                illum_ui::Grabbed::Host => input.key(key, down),
+                illum_ui::Grabbed::Host => {
+                    if !arranging_keys.load(std::sync::atomic::Ordering::Relaxed) {
+                        input.key(key, down)
+                    }
+                }
                 illum_ui::Grabbed::ToggleView => waker.wake(UiEvent::ToggleView),
                 illum_ui::Grabbed::Viewer => {}
             };
@@ -1395,6 +1553,14 @@ fn run_view(
         env!("CARGO_PKG_VERSION")
     );
     tracing::info!(target: "input", "Illumination {}; keyboard: {keyboard_note}.", env!("CARGO_PKG_VERSION"));
+    let extra_setup = ExtraSetup {
+        handle: runtime.handle().clone(),
+        ep: ep.clone(),
+        target: target.to_string(),
+        params: args.params.clone(),
+        waker: waker.clone(),
+        with_input,
+    };
     let ack = live.clone();
     let mode = if with_input { "" } else { " (view only)" };
     let state_for_report = shared.clone();
@@ -1507,9 +1673,35 @@ fn run_view(
                         flags
                             .display
                             .store(display, std::sync::atomic::Ordering::Relaxed);
-                        live.send_control(&params.screen_start(display));
+                        live.send_control(&flags.screen_start(&params));
                     })
                 },
+                // The displays together, as tiles: each other one a session of its own.
+                // Not in a popped-out window, a measurement run or without the GPU.
+                all: (!args.popout
+                    && args.gpu
+                    && !args.params.fixed
+                    && hello.capabilities.iter().any(|c| c == "displays"))
+                .then(|| {
+                    let (live, flags, params) = (live.clone(), flags.clone(), args.params.clone());
+                    let (keep_home, keep_desk) = (home.to_path_buf(), desk_key.clone());
+                    illum_ui::AllDisplays {
+                        open: Box::new(move |display, scale| open_extra(&extra_setup, display, scale)),
+                        on_scale: Box::new(move |percent, restart| {
+                            flags
+                                .scale
+                                .store(percent, std::sync::atomic::Ordering::Relaxed);
+                            if restart {
+                                live.send_control(&flags.screen_start(&params));
+                            }
+                        }),
+                        layout: kept_layouts(home).remove(&desk_key),
+                        on_layout: Box::new(move |layout| keep_layout(&keep_home, &keep_desk, layout)),
+                        on_arrange: Box::new(move |on| {
+                            arranging.store(on, std::sync::atomic::Ordering::Relaxed)
+                        }),
+                    }
+                }),
                 gpu: args.gpu,
             },
         )

@@ -243,7 +243,8 @@ pub enum ControlMsg {
         reason: String,
     },
     /// Host → controller, when the screen starts: the host's displays, in the order
-    /// `ScreenStart` counts them, each in a few words ("2560 × 1440, main"), and the one
+    /// `ScreenStart` counts them, each in a few words that begin with its size ("2560 × 1440, main": a controller
+    /// showing several at once reads the size from there), and the one
     /// being streamed. Sent only to a controller that lists the `displays` capability; it
     /// switches by sending `ScreenStart` for another one (architecture §5.1).
     Displays {
