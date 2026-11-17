@@ -1276,6 +1276,32 @@ app is one thing that is either running, with an icon in the tray, or not runnin
   windows of their own, and the list does not yet show what a desk may do or how long it
   has been idle.
 
+*The session window (v0.14.3).*
+- **A thin top bar** holds what is changed often: the host's displays by number, Fit or
+  Original, a "More" menu, and at the right the window's mode. **More** holds the rest:
+  keyboard (Remote, Local, Auto), pointer (this desk's, the host's), "Send Ctrl+Alt+Del"
+  and "Lock" where the host offers them, and Disconnect. The **bottom line** is quiet: the
+  host's name and address and the numbers of the last second; something that needs the
+  person (the idle warning, a dropped link) shows there as a yellow note.
+- **Three modes**: Detail (both bars), Focus (the picture alone, in the window) and Full
+  screen (the picture alone, over the screen). With the bars hidden a small "Exit" tab
+  shows at the top edge while the mouse is there; a click brings the bars back, and it can
+  be slid sideways. It sits in the middle because the corners are where the host's own
+  close button, menus and clock are (Windows' Remote Desktop puts its bar there for the
+  same reason). Notes that need the person show over the picture in these modes.
+- **The mouse is the bars' in more places than the two bars** now: the open menu and the
+  tab. The bars report those areas (`BarSpace::claims`) and the window keeps what happens
+  inside them from the host. A press anywhere else closes the menu and goes to the host.
+- **Lock** exists because Win+L, like Ctrl+Alt+Del, is taken by the controller's own
+  Windows and never reaches the host (seen 2026-11-17). The controller asks
+  (`ControlMsg::LockHost`, to a host that lists `lock`) and the host calls
+  `LockWorkStation`. Like Ctrl+Alt+Del it is only done for a controller that has the
+  keyboard there.
+- **Colours**: the window's own bar (title, minimize, close) is the icon's pale yellow
+  where the system lets a program choose (Windows 11), on the app's window too; the two
+  bars inside are paler still, with thin lines. The strong yellow is kept for a warning.
+- Not built: several displays at once (all in one picture, or one in a window of its own).
+
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads
 "Offline". The app knocks on each desk's port every twenty seconds, and at once when the

@@ -11,6 +11,32 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-11-18
+
+Not released. Step four of the 0.14 redesign: the session window.
+
+### Added
+
+- **Three window modes**, at the right of the session bar: Detail (both bars),
+  Focus (the picture alone) and Full screen. With the bars hidden, move the
+  mouse to the top edge for a small "Exit" tab; it can be slid sideways.
+- **Lock the host**, under More. Win+L pressed while controlling locks your own
+  PC, so this is the way to lock the other one. Both desks need this version.
+- A warning (the host is about to disconnect, the link dropped) now also shows
+  when the bars are hidden, as a small note over the picture.
+
+### Changed
+
+- **The session bar is thinner and holds less**: displays, Fit / Original,
+  More, and the window mode. Keyboard, pointer, Send Ctrl+Alt+Del, Lock and
+  Disconnect are under More. The bottom line shows the host's name and address
+  with the numbers.
+- The bars are pale cream with thin lines, and on Windows 11 the window's own
+  title bar is the icon's pale yellow, on the app's window too.
+
+Verified with cargo fmt, cargo clippy and cargo test, and by pictures of the
+bar, the open menu and the Exit tab. Not yet used in a real session.
+
 ## [0.14.2] - 2026-11-18
 
 Not released. Step three of the 0.14 redesign: running, hidden, closed.

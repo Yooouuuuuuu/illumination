@@ -186,6 +186,8 @@ pub struct HostConfig {
     pub displays: Option<DisplaysFn>,
     /// Shows the Ctrl+Alt+Del screen; only an installed host can (§7).
     pub sas: Option<SasFn>,
+    /// Locks this machine, as the person at it would.
+    pub lock: Option<SasFn>,
     /// A session with no input from the controller for this long is ended (§10); `None`:
     /// never.
     pub idle: Option<Duration>,
@@ -1223,6 +1225,18 @@ pub async fn serve_session(
                     _ => {
                         tracing::debug!(target: "input", "Ctrl+Alt+Del asked for; not offered here.")
                     }
+                }
+            }
+            ControlMsg::LockHost => {
+                // Only for a controller that has the keyboard here at all.
+                match (&config.lock, &input) {
+                    (Some(lock), Some(_)) => match lock() {
+                        Ok(()) => {
+                            tracing::info!(target: "input", "Locked at the controller's request.")
+                        }
+                        Err(why) => tracing::warn!(target: "input", "Not locked: {why}"),
+                    },
+                    _ => tracing::debug!(target: "input", "Lock asked for; not offered here."),
                 }
             }
             ControlMsg::ScreenPause { paused } => {

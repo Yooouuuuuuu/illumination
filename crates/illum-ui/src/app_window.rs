@@ -15,6 +15,20 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
+/// Gives a window's own bar (title, minimize, close) the pale yellow of the icon, where the
+/// system lets a program choose (Windows 11); elsewhere the bar stays the system's.
+pub fn in_app_colours(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::{Color, WindowAttributesExtWindows};
+        attrs
+            .with_title_background_color(Some(Color::from_rgb(0xFF, 0xF6, 0x8D)))
+            .with_title_text_color(Color::from_rgb(0x1E, 0x2A, 0x4A))
+    }
+    #[cfg(not(windows))]
+    attrs
+}
+
 /// Draws egui's output into a texture view.
 struct Painter {
     gpu: Arc<Gpu>,
@@ -245,7 +259,7 @@ struct App {
 
 impl App {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<Shown, String> {
-        let attrs = Window::default_attributes().with_title("Illumination");
+        let attrs = in_app_colours(Window::default_attributes().with_title("Illumination"));
         let attrs = if self.question_only {
             // In front of whatever is on screen: someone is waiting for the answer.
             attrs
@@ -736,19 +750,31 @@ mod tests {
         }
         // The session window's bars, over a stand-in for the picture.
         for (name, state, points) in [
-            ("session", crate::session_bar::sample(), (1280.0, 420.0)),
+            ("session", crate::session_bar::sample(), (1280.0, 520.0)),
+            (
+                "session-focus",
+                crate::session_bar::BarState {
+                    mode: crate::session_bar::WindowMode::Focus,
+                    reveal: true,
+                    ..crate::session_bar::sample()
+                },
+                (1280.0, 300.0),
+            ),
             (
                 "session-view-only",
                 crate::session_bar::BarState {
                     controlling: false,
+                    displays: Vec::new(),
                     notice: Some("connection lost; reconnecting…".into()),
                     ..crate::session_bar::sample()
                 },
                 (760.0, 360.0),
             ),
         ] {
+            let mut own = crate::session_bar::BarUi::default();
+            own.more = name == "session";
             let (pixels, width, height) = snapshot_ui(points, 1.0, |ui| {
-                crate::session_bar::draw(ui, &state);
+                crate::session_bar::draw(ui, &state, &mut own);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x20, 0x20, 0x20)))
                     .show(ui, |_| {});

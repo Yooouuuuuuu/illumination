@@ -76,6 +76,12 @@ pub fn send() -> Result<(), String> {
     }
 }
 
+/// Locks the machine, as Win+L does. Works for a program in the session at the screen.
+pub fn lock_workstation() -> Result<(), String> {
+    unsafe { windows::Win32::System::Shutdown::LockWorkStation() }
+        .map_err(|e| format!("Windows did not lock: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

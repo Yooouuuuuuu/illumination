@@ -48,7 +48,7 @@ pub use pipe::{PipeSecurity, own_user_sid, pipe_client_session, session_user_sid
 #[cfg(windows)]
 pub use power::KeepAwake;
 #[cfg(windows)]
-pub use sas::{SasGate, request as request_sas, send as send_sas};
+pub use sas::{SasGate, lock_workstation, request as request_sas, send as send_sas};
 #[cfg(windows)]
 pub use service::{
     SERVICE_NAME, ServiceState, SessionProcess, console_session, own_session, run_as_service,

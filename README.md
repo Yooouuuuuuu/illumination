@@ -125,7 +125,8 @@ right: **red, green, blue, cyan, magenta, yellow, white, black**.
 
 `--view-only` sends no input. In the default `remote` mode, while the viewer has focus the
 **whole keyboard** goes to the host — Win, Alt+Tab, shortcuts, everything; click another window
-to get your own keyboard back. (Ctrl+Alt+Del is reserved by Windows and comes later.)
+to get your own keyboard back. (Ctrl+Alt+Del and Win+L are taken by your own Windows: use "Send Ctrl+Alt+Del" and "Lock"
+under More in the session window.)
 
 **Pointer** (`illum view <host> --pointer …`):
 - `desk` (default): this desk's own pointers. The host says which kind it shows (arrow, text,

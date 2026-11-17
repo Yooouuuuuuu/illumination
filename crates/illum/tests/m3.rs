@@ -90,6 +90,7 @@ async fn input_reaches_the_host_and_a_drop_releases_held_keys() {
             Ok(())
         })),
         idle: None,
+        lock: None,
     };
 
     let host = endpoint("host");

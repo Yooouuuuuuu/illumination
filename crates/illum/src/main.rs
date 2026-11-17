@@ -665,7 +665,18 @@ fn host_config_with(
         displays: display_names(test_pattern),
         sas: secure_attention(test_pattern || no_input),
         idle: None,
+        lock: lock_host(test_pattern || no_input),
     }
+}
+
+/// Locking this machine for a controller that has the keyboard here.
+fn lock_host(off: bool) -> Option<illum::host::SasFn> {
+    #[cfg(windows)]
+    if !off {
+        return Some(Arc::new(illum_win::lock_workstation));
+    }
+    let _ = off;
+    None
 }
 
 /// Ctrl+Alt+Del for a controller: only the host an installed service started can ask for it
@@ -910,6 +921,7 @@ async fn open_listener(
         "audio" => config.audio.is_some(),
         "clipboard" => config.clipboard,
         "sas" => config.sas.is_some(),
+        "lock" => config.lock.is_some(),
         _ => true,
     });
     // "enc:av1" etc.: the viewer's hello says what it decodes, ours what we encode (§5.3).
@@ -1325,6 +1337,11 @@ fn run_view(
                     Box::new(move || live.send_control(&ControlMsg::SecureAttention))
                 },
                 can_sas: with_input && hello.capabilities.iter().any(|c| c == "sas"),
+                on_lock: {
+                    let live = live.clone();
+                    Box::new(move || live.send_control(&ControlMsg::LockHost))
+                },
+                can_lock: with_input && hello.capabilities.iter().any(|c| c == "lock"),
                 // Another of the host's displays: the screen is started anew for it, as it is
                 // for a stuck media path, and the choice outlives a reconnection.
                 on_display: {

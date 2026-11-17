@@ -487,6 +487,9 @@ pub struct ViewerOptions {
     /// Whether the host can show its Ctrl+Alt+Del screen for us, and the call that asks.
     pub can_sas: bool,
     pub on_sas: Box<dyn Fn()>,
+    /// Whether the host can lock itself for us, and the call that asks.
+    pub can_lock: bool,
+    pub on_lock: Box<dyn Fn()>,
     /// Called when the window gains or loses keyboard focus.
     pub on_focus: Box<dyn Fn(bool)>,
     /// Being in front is reported by [`UiEvent::Front`] (the keyboard grab asks the system
@@ -558,7 +561,7 @@ impl ViewerWindow {
             displays: Vec::new(),
             display: 0,
             focused: None,
-            fullscreen: false,
+            mode: session_bar::WindowMode::Detail,
             icon_announced: false,
         };
         self.event_loop.run_app(&mut app).map_err(|e| e.to_string())
@@ -619,7 +622,7 @@ struct App {
     display: u32,
     /// Whether the window is in front, once known.
     focused: Option<bool>,
-    fullscreen: bool,
+    mode: session_bar::WindowMode,
     /// The taskbar was told the icon after the first frame.
     icon_announced: bool,
 }
@@ -1041,6 +1044,10 @@ struct Bars {
     shown: Option<session_bar::BarState>,
     /// The room they take at the top and the bottom, in pixels.
     space: (u32, u32),
+    /// Where else the mouse is theirs (the open menu, the "Exit" tab), in pixels.
+    claims: Vec<egui::Rect>,
+    /// What they remember themselves: the open menu, where the tab was slid to.
+    own: session_bar::BarUi,
 }
 
 impl App {
@@ -1070,6 +1077,8 @@ impl App {
             redraw_at: None,
             shown: None,
             space: (0, 0),
+            claims: Vec::new(),
+            own: session_bar::BarUi::default(),
         });
     }
 
@@ -1099,9 +1108,29 @@ impl App {
         let height = f64::from(s.window.inner_size().height);
         let (top, bottom) = (f64::from(bars.space.0), f64::from(bars.space.1));
         let over = !matches!(event, WindowEvent::CursorLeft { .. })
-            && self
-                .window_mouse
-                .is_some_and(|(_, y)| y < top || y >= height - bottom);
+            && self.window_mouse.is_some_and(|(x, y)| {
+                y < top
+                    || y >= height - bottom
+                    || bars
+                        .claims
+                        .iter()
+                        .any(|c| c.contains(egui::pos2(x as f32, y as f32)))
+            });
+        // A press anywhere else closes the open menu, as menus do.
+        if !over
+            && bars.own.more
+            && matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                }
+            )
+        {
+            bars.own.more = false;
+            bars.dirty = true;
+            s.window.request_redraw();
+        }
         // Also the one event after leaving a bar, so what was highlighted lets go.
         if over || self.over_bar || self.bar_press || layout {
             let _ = bars.input.on_window_event(&s.window, event);
@@ -1149,12 +1178,16 @@ impl App {
             keyboard: self.options.keyboard,
             keyboard_grabbed: self.options.keyboard_grabbed,
             pointer: self.options.pointer,
-            fullscreen: self.fullscreen,
+            mode: self.mode,
+            // With the bars hidden, the "Exit" tab shows while the mouse is at the top edge
+            // or on the tab itself.
+            reveal: self.mode != session_bar::WindowMode::Detail && self.over_bar,
             status: self.status_line.clone(),
             notice: self.bar_notice.clone(),
             displays: self.displays.clone(),
             display: self.display,
             can_sas: self.options.can_sas && self.options.input.is_some(),
+            can_lock: self.options.can_lock && self.options.input.is_some(),
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1165,7 +1198,7 @@ impl App {
             let raw = bars.input.take_egui_input(&s.window);
             let mut space = session_bar::BarSpace::default();
             let output = bars.ctx.run_ui(raw, |ui| {
-                (actions, space) = session_bar::draw(ui, &state);
+                (actions, space) = session_bar::draw(ui, &state, &mut bars.own);
             });
             let scale = output.pixels_per_point;
             let delay = output
@@ -1179,6 +1212,16 @@ impl App {
                 (space.top * scale).ceil() as u32,
                 (space.bottom * scale).ceil() as u32,
             );
+            bars.claims = space
+                .claims
+                .iter()
+                .map(|c| {
+                    egui::Rect::from_min_max(
+                        (c.min.to_vec2() * scale).to_pos2(),
+                        (c.max.to_vec2() * scale).to_pos2(),
+                    )
+                })
+                .collect();
             bars.dirty = delay.is_zero();
             bars.redraw_at = (!delay.is_zero() && delay < Duration::from_secs(1))
                 .then(|| Instant::now() + delay);
@@ -1220,12 +1263,14 @@ impl App {
                     s.window.set_cursor(CursorIcon::Default);
                 }
             }
-            BarAction::Fullscreen(on) => {
+            BarAction::Mode(mode) => {
+                let full = mode == session_bar::WindowMode::FullScreen;
                 if let Some(s) = &self.window {
-                    s.window
-                        .set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                    s.window.set_fullscreen(
+                        full.then_some(winit::window::Fullscreen::Borderless(None)),
+                    );
                 }
-                self.fullscreen = on;
+                self.mode = mode;
             }
             BarAction::Display(display) => {
                 // Nothing stays held on the display that is left.
@@ -1235,6 +1280,7 @@ impl App {
                 (self.options.on_display)(display);
             }
             BarAction::SecureAttention => (self.options.on_sas)(),
+            BarAction::Lock => (self.options.on_lock)(),
             BarAction::Disconnect => event_loop.exit(),
         }
     }
@@ -1245,9 +1291,11 @@ impl ApplicationHandler<UiEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title(&self.options.title)
-            .with_inner_size(LogicalSize::new(1280.0, 720.0));
+        let attrs = app_window::in_app_colours(
+            Window::default_attributes()
+                .with_title(&self.options.title)
+                .with_inner_size(LogicalSize::new(1280.0, 720.0)),
+        );
         let attrs = icon::with_icon(attrs);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),

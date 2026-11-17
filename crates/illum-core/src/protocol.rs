@@ -23,6 +23,7 @@ pub const CAPABILITIES: &[&str] = &[
     "sas",
     "cursor-kind",
     "idle-warning",
+    "lock",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
@@ -259,6 +260,9 @@ pub enum ControlMsg {
     IdleWarning {
         seconds: u32,
     },
+    /// Controller → host: lock the host (what Win+L does there; pressed on the controller,
+    /// that key locks the controller). Sent only to a host that lists `lock`.
+    LockHost,
     /// Orderly end of session.
     Bye,
 }
