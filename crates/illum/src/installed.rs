@@ -162,14 +162,6 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
     };
     loop {
         let settings = crate::app::load_settings(home);
-        if !settings.allow_incoming {
-            told.change(|s| {
-                s.incoming = "off".into();
-                s.why.clear();
-            });
-            tokio::time::sleep(HOST_LOOK).await;
-            continue;
-        }
         let offer = offered(&settings);
         // Probing the encoders can take a moment the first time; not on the async threads.
         let (control, sound, clipboard, idle_minutes) = offer;
@@ -225,7 +217,6 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
             // Who is asked about takes effect at once, without listening anew.
             base.store.lock().await.set_refuse_new(now.refuse_new);
             if accepting.is_finished()
-                || !now.allow_incoming
                 || offered(&now) != offer
                 || listen_addresses(bind_to) != addresses
             {

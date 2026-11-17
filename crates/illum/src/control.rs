@@ -110,10 +110,7 @@ fn answer(home: &Path, end: &EndSessions, line: &str) -> Reply {
             Change::Favorite { .. } => "star a desk".to_string(),
             _ => "forget a desk".to_string(),
         },
-        Request::Settings { settings } => format!(
-            "save the settings (incoming {})",
-            if settings.allow_incoming { "on" } else { "off" }
-        ),
+        Request::Settings { .. } => "save the settings".to_string(),
         Request::EndSession { name } => format!("disconnect \"{name}\""),
     };
     tracing::info!(target: "service", "Asked by the app: {what}.");
@@ -331,7 +328,7 @@ mod tests {
         assert_eq!(on_disk.known_hosts().count(), 19);
 
         let settings = Settings {
-            allow_incoming: false,
+            refuse_new: true,
             max_fps: 60,
             ..Settings::default()
         };

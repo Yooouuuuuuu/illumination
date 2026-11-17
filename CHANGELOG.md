@@ -11,6 +11,31 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-18
+
+Not released. Step two of the 0.14 redesign: the app window.
+
+### Changed
+
+- **One list of desks, in three tabs**: Favorites, Recent, Came in. A desk is
+  one card whichever way you met it, showing its system, your name for it,
+  whether it is online, and its permission if it has one of its own.
+- **Edit a desk**: give it your own name, set its permission (default, always,
+  ask, never), star it, or forget it.
+- **Settings is rebuilt**: a menu of every setting on the left, and nothing
+  applies until you press Save in the top bar. Outgoing has "Reset to defaults".
+- **This desk's key moved to Settings.**
+- **Colours mean one thing each**: green is open or allowed, blue is waiting
+  for an answer, coral is closed or refused. The question about a new desk and
+  the state at the top right follow them.
+- "Allow incoming connections" is no longer a switch; an open app listens. Use
+  a desk's permission, or the default permission "Never", to keep desks out.
+- The "Trusted desks" list in Settings is gone: those desks are in "Came in"
+  with "Permission: always".
+
+Verified with cargo fmt, cargo clippy and cargo test, and by pictures of every
+screen.
+
 ## [0.14.0] - 2026-11-18
 
 Not released. The first of four steps of the 0.14 redesign: the rules. The windows still

@@ -512,7 +512,7 @@ pub fn write_png(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Question, QuestionKind, sample_state};
+    use crate::app::{Question, sample_state};
 
     /// Draws each screen off screen and keeps the pictures under `target/app-pictures`, so the
     /// interface can be looked at without a desktop. Fails only if drawing fails or comes out
@@ -525,20 +525,10 @@ mod tests {
         let mut with_question = sample_state();
         with_question.questions.push_back(Question {
             id: 1,
-            kind: QuestionKind::AcceptDesk,
-            name: "studio-laptop".into(),
+            name: "LAPTOP-AVOEN7VP".into(),
             address: "100.64.0.20".into(),
             fingerprint: with_question.desks[0].fingerprint.clone(),
             os: "Windows 11".into(),
-        });
-        let mut first_time = sample_state();
-        first_time.questions.push_back(Question {
-            id: 2,
-            kind: QuestionKind::TrustHost,
-            name: "render-box".into(),
-            address: "100.64.0.31:28326".into(),
-            fingerprint: first_time.desks[1].fingerprint.clone(),
-            os: String::new(),
         });
         let mut connected = sample_state();
         connected.sessions = vec!["studio-laptop".into()];
@@ -564,9 +554,15 @@ mod tests {
             ),
             ("accept", HomeUi::default(), with_question, (1120.0, 760.0)),
             (
-                "first-connection",
-                HomeUi::default(),
-                first_time,
+                "home-came-in",
+                HomeUi::on_came_in(),
+                sample_state(),
+                (1120.0, 760.0),
+            ),
+            (
+                "edit-desk",
+                HomeUi::editing(&sample_state().desks[0]),
+                sample_state(),
                 (1120.0, 760.0),
             ),
         ];

@@ -1222,6 +1222,27 @@ Crates are added only when a milestone needs them.
 
 ## 14. The app (v0.12.0)
 
+*The 0.14 window (v0.14.1), redrawn on the same design canvas, page "0.14.0 proposal".*
+- **Home** is three things: this desk's address, the address field for a desk to reach
+  (IP only, with "View only" and "Mute its sound" on its heading line), and **Desks**. This
+  desk's key is no longer here; it is in Settings.
+- **Desks is one list** in three tabs, and a desk can be under several: Favorites (the
+  starred ones), Recent (connected to, newest first), Came in (connected here or tried to).
+  It opens on Favorites when there are any, else on Recent. A card says the desk's system,
+  the person's name for it (or the machine's), online or offline, its address, when, and
+  its permission if it has one of its own. "Edit" opens a dialog for the name, the
+  permission (default, always, ask, never), the star, and Forget.
+- **Settings** has a menu on the left listing every setting under General, Incoming,
+  Outgoing and About; a click brings the setting into view and a dot marks one that is
+  changed and not saved. Nothing applies until **Save**, which sits with Discard in the
+  top bar, always in sight; leaving with changes asks. Outgoing has "Reset to defaults".
+- **Colours carry one meaning each**: green is open or allowed (ready, online, permission
+  always), blue is waiting for an answer (connecting, permission ask), coral is closed,
+  refused or broken (cannot be reached, permission never, Forget, No). The strong yellow
+  is the main button and what is active now (a desk is connected).
+- "Allow incoming connections" is gone as a switch: an open app listens. Whether a desk
+  gets in is its permission; not being reachable at all is closing the app (v0.14.2).
+
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads
 "Offline". The app knocks on each desk's port every twenty seconds, and at once when the

@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The app's home window: this desk, the remote desk to reach, the desks you know, settings,
-//! and the two questions about keys (architecture §14).
+//! The app's window: this desk, the desk to reach, the desks you know, settings, and the
+//! question about a desk that wants in (architecture §14).
 //!
 //! This module only draws and reports what the person did. [`AppState`] is what the rest of the
 //! program knows (written by `illum::app`), [`Command`] is what the person asked for. The look
-//! comes from the icon (`assets/icon`): a soft blue ground, navy outlines two pixels wide, the
-//! strong yellow for the main action and the pale yellow for what is yours.
+//! comes from the icon (`assets/icon`): a soft blue ground, navy outlines, the strong yellow
+//! for the main action and for what is active now. Three more colours each mean one thing
+//! wherever they appear: green is open or allowed, blue is waiting for an answer, coral is
+//! closed, refused or broken.
 
 use crate::{KeyboardMode, PointerMode};
 use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin, RichText, Sense,
     Stroke, StrokeKind, Ui, Vec2, vec2,
 };
+pub use illum_core::store::Permission;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -22,7 +25,15 @@ pub mod color {
     pub const NAVY: Color32 = Color32::from_rgb(0x1E, 0x2A, 0x4A);
     pub const YELLOW: Color32 = Color32::from_rgb(0xFF, 0xE0, 0x12);
     pub const SOFT: Color32 = Color32::from_rgb(0xFF, 0xF6, 0x8D);
+    /// Paler than `SOFT`: the bars inside a session window.
+    pub const CREAM: Color32 = Color32::from_rgb(0xFF, 0xFC, 0xE3);
     pub const WHITE: Color32 = Color32::WHITE;
+    /// Open, allowed: ready for connections, online, permission "always".
+    pub const GREEN: Color32 = Color32::from_rgb(0xB9, 0xEF, 0xB0);
+    /// Waiting for an answer: connecting, permission "ask".
+    pub const BLUE: Color32 = Color32::from_rgb(0xC9, 0xDB, 0xFF);
+    /// Closed, refused, broken: cannot be reached, permission "never", ending something.
+    pub const CORAL: Color32 = Color32::from_rgb(0xFF, 0xB9, 0xA8);
     /// Secondary text: navy lightened, still 8:1 on white.
     pub const MUTED: Color32 = Color32::from_rgb(0x44, 0x50, 0x6E);
     /// Quiet outlines inside a card.
@@ -47,11 +58,11 @@ fn outline() -> Stroke {
     Stroke::new(OUTLINE, NAVY)
 }
 
-/// What the person chose in Settings. Kept in `settings.json` in the home folder and applied to
-/// the next connection.
+/// What the person chose in Settings. Kept in `settings.json` in the home folder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    // Outgoing: when I connect to another desk.
     pub max_bitrate_mbps: f64,
     pub max_fps: u32,
     pub latency_limit_ms: u32,
@@ -61,16 +72,18 @@ pub struct Settings {
     pub pointer: PointerMode,
     pub sound: bool,
     pub clipboard: bool,
-    /// Listen for other desks while the app is open.
-    pub allow_incoming: bool,
-    /// What a desk connected to this one may do, besides seeing the screen.
+    // Incoming: when another desk connects here.
+    /// What a connected desk may do, besides seeing the screen.
     pub let_control: bool,
     pub let_sound: bool,
     pub let_clipboard: bool,
-    /// Desks without a permission of their own are refused instead of asked about.
+    /// The permission of a desk that has none of its own: refused (true) or asked about.
     pub refuse_new: bool,
     /// A connected desk is disconnected after this long without input from it; 0: never.
     pub idle_minutes: u32,
+    // General.
+    /// Start with the system, in the tray, so this desk can be reached after a restart.
+    pub start_on_boot: bool,
 }
 
 impl Default for Settings {
@@ -85,32 +98,63 @@ impl Default for Settings {
             pointer: PointerMode::Desk,
             sound: true,
             clipboard: true,
-            allow_incoming: true,
             let_control: true,
             let_sound: true,
             let_clipboard: true,
             refuse_new: false,
             idle_minutes: 30,
+            start_on_boot: true,
         }
     }
 }
 
-/// A desk this one has connected to (a pinned host key).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Desk {
-    pub address: String,
-    pub name: String,
-    pub fingerprint: String,
-    /// Unix seconds.
-    pub first_seen: u64,
+impl Settings {
+    /// The outgoing settings put back to what a new install has; the rest is kept.
+    pub fn with_outgoing_reset(&self) -> Settings {
+        let fresh = Settings::default();
+        Settings {
+            let_control: self.let_control,
+            let_sound: self.let_sound,
+            let_clipboard: self.let_clipboard,
+            refuse_new: self.refuse_new,
+            idle_minutes: self.idle_minutes,
+            start_on_boot: self.start_on_boot,
+            ..fresh
+        }
+    }
 }
 
-/// A desk that may connect to this one without asking (a paired device).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustedDesk {
+/// A desk this one knows: connected to, connected from, or both. One entry per machine.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Desk {
+    /// 64 hex digits; what the desk is known by.
     pub fingerprint: String,
+    /// The name to show: the person's own for it, else the machine's.
     pub name: String,
-    pub last_address: String,
+    /// The person's own name, empty when they gave none (for the edit dialog).
+    pub own_name: String,
+    /// Its system as it said ("Windows 11"); empty if it did not.
+    pub os: String,
+    /// Where it was last seen, without a port.
+    pub address: String,
+    /// What to dial to connect to it; `None` for a desk that only ever came here.
+    pub connect_to: Option<String>,
+    /// Its own permission; `None`: as in Settings.
+    pub permission: Option<Permission>,
+    pub favorite: bool,
+    /// Unix seconds; 0: never.
+    pub last_out: u64,
+    pub last_in: u64,
+    pub tried_in: u64,
+}
+
+/// A desk connected to this one right now.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Guest {
+    pub name: String,
+    pub address: String,
+    /// Unix seconds when it connected.
+    pub since: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -134,19 +178,10 @@ pub enum Dial {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuestionKind {
-    /// First connection to a desk: is the key it shows really its key?
-    TrustHost,
-    /// An unknown desk wants to connect to this one.
-    AcceptDesk,
-}
-
-/// A question about a key, waiting for an answer.
+/// A desk that wants to connect here, waiting for the person's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
     pub id: u64,
-    pub kind: QuestionKind,
     pub name: String,
     pub address: String,
     /// 64 hex digits.
@@ -180,12 +215,14 @@ pub struct AppState {
     /// Names of the desks connected to this one right now.
     pub sessions: Vec<String>,
     pub desks: Vec<Desk>,
-    /// Whether each of them answers right now, by address. Missing: not looked yet.
+    /// Whether each desk that can be dialled answers right now, by `connect_to`. Missing:
+    /// not looked yet.
     pub online: HashMap<String, bool>,
-    pub trusted: Vec<TrustedDesk>,
     pub dial: Dial,
     pub questions: VecDeque<Question>,
     pub settings: Settings,
+    /// Now, in Unix seconds, for "today" and "yesterday" on the cards.
+    pub now: u64,
 }
 
 /// What the person asked for.
@@ -202,8 +239,20 @@ pub enum Command {
         id: u64,
         verdict: Verdict,
     },
+    /// What the edit dialog was left with for one desk.
+    EditDesk {
+        fingerprint: String,
+        /// The person's own name for it; empty gives it its machine name back.
+        name: String,
+        permission: Option<Permission>,
+        favorite: bool,
+    },
+    Favorite {
+        fingerprint: String,
+        on: bool,
+    },
+    /// Forget everything about a desk.
     ForgetDesk(String),
-    ForgetTrusted(String),
     /// End the sessions of the desk of this name that is connected to this one.
     EndSession(String),
     SaveSettings(Settings),
@@ -487,11 +536,160 @@ fn logo(ui: &mut Ui, size: f32) {
     );
 }
 
+/// A selectable choice in a row of them: filled with its colour when it is the chosen one.
+fn choice(ui: &mut Ui, text: &str, chosen: bool, fill: Color32, size: Vec2) -> bool {
+    let button = egui::Button::new(
+        RichText::new(text.to_string())
+            .font(semibold(14.0))
+            .color(NAVY),
+    )
+    .fill(if chosen { fill } else { WHITE })
+    .stroke(Stroke::new(OUTLINE, if chosen { NAVY } else { LINE }))
+    .corner_radius(CornerRadius::same(12))
+    .min_size(size);
+    ui.add(button).clicked() && !chosen
+}
+
+/// A small tag: a desk's own permission, online or offline.
+fn tag(ui: &mut Ui, text: &str, fill: Color32, round: bool) {
+    Frame::new()
+        .fill(fill)
+        .stroke(outline())
+        .corner_radius(CornerRadius::same(if round { 255 } else { 8 }))
+        .inner_margin(Margin::symmetric(10, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text.to_string()).font(semibold(12.0)));
+        });
+}
+
+/// The words and the colour of a permission.
+pub fn permission_look(permission: Permission) -> (&'static str, Color32) {
+    match permission {
+        Permission::Always => ("Always", GREEN),
+        Permission::Ask => ("Ask", BLUE),
+        Permission::Never => ("Never", CORAL),
+    }
+}
+
+/// A day as the cards say it: today, yesterday, else the date.
+pub fn day(now: u64, then: u64) -> String {
+    match (now / 86_400).checked_sub(then / 86_400) {
+        Some(0) => "today".to_string(),
+        Some(1) => "yesterday".to_string(),
+        _ => format!("on {}", date(then)),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Page {
     #[default]
     Home,
     Settings,
+}
+
+/// Which desks the list shows. A desk can be under several.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Favorites,
+    Recent,
+    CameIn,
+}
+
+/// One setting: an entry in the menu, a place to jump to, and what the unsaved marks count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    StartOnBoot,
+    Key,
+    Permission,
+    Actions,
+    Idle,
+    Limits,
+    Keyboard,
+    Pointer,
+    Sound,
+    Clipboard,
+    Reconnect,
+    Shrink,
+    About,
+}
+
+const MENU: [(&str, &[(Item, &str)]); 4] = [
+    (
+        "General",
+        &[
+            (Item::StartOnBoot, "Start on boot"),
+            (Item::Key, "This desk's key"),
+        ],
+    ),
+    (
+        "Incoming",
+        &[
+            (Item::Permission, "Default permission"),
+            (Item::Actions, "Allowed actions"),
+            (Item::Idle, "Disconnect when idle"),
+        ],
+    ),
+    (
+        "Outgoing",
+        &[
+            (Item::Limits, "Picture limits"),
+            (Item::Keyboard, "Keyboard"),
+            (Item::Pointer, "Pointer"),
+            (Item::Sound, "Sound"),
+            (Item::Clipboard, "Clipboard"),
+            (Item::Reconnect, "Reconnect"),
+            (Item::Shrink, "Shrink picture"),
+        ],
+    ),
+    ("About", &[(Item::About, "Version")]),
+];
+
+/// The settings that differ between what is saved and what is on screen.
+fn unsaved(saved: &Settings, shown: &Settings) -> Vec<Item> {
+    let mut items = Vec::new();
+    let mut differs = |item, differs: bool| {
+        if differs {
+            items.push(item);
+        }
+    };
+    differs(
+        Item::StartOnBoot,
+        saved.start_on_boot != shown.start_on_boot,
+    );
+    differs(Item::Permission, saved.refuse_new != shown.refuse_new);
+    differs(
+        Item::Actions,
+        (saved.let_control, saved.let_sound, saved.let_clipboard)
+            != (shown.let_control, shown.let_sound, shown.let_clipboard),
+    );
+    differs(Item::Idle, saved.idle_minutes != shown.idle_minutes);
+    differs(
+        Item::Limits,
+        (
+            saved.max_bitrate_mbps,
+            saved.max_fps,
+            saved.latency_limit_ms,
+        ) != (
+            shown.max_bitrate_mbps,
+            shown.max_fps,
+            shown.latency_limit_ms,
+        ),
+    );
+    differs(Item::Keyboard, saved.keyboard != shown.keyboard);
+    differs(Item::Pointer, saved.pointer != shown.pointer);
+    differs(Item::Sound, saved.sound != shown.sound);
+    differs(Item::Clipboard, saved.clipboard != shown.clipboard);
+    differs(Item::Reconnect, saved.reconnect != shown.reconnect);
+    differs(Item::Shrink, saved.allow_scale != shown.allow_scale);
+    items
+}
+
+/// A desk as the edit dialog holds it until Save.
+struct Editing {
+    desk: Desk,
+    name: String,
+    permission: Option<Permission>,
+    favorite: bool,
 }
 
 /// What the window itself remembers between frames.
@@ -502,8 +700,15 @@ pub struct HomeUi {
     view_only: bool,
     mute: bool,
     filter: String,
-    /// The address just copied, to say so on the button for a moment.
-    copied_at: Option<f64>,
+    /// The tab the person chose; until then, Favorites if there are any, else Recent.
+    tab: Option<Tab>,
+    editing: Option<Editing>,
+    /// The settings as edited and not yet saved, while the Settings page is open.
+    pending: Option<Settings>,
+    /// The setting the menu was asked to bring into view.
+    jump: Option<Item>,
+    /// Asked to leave Settings with unsaved changes.
+    leaving: bool,
 }
 
 impl HomeUi {
@@ -515,41 +720,70 @@ impl HomeUi {
         }
     }
 
+    /// Opens on the "Came in" tab (for pictures).
+    pub fn on_came_in() -> HomeUi {
+        HomeUi {
+            tab: Some(Tab::CameIn),
+            ..HomeUi::default()
+        }
+    }
+
+    /// Opens with the edit dialog for one desk (for pictures).
+    pub fn editing(desk: &Desk) -> HomeUi {
+        let mut ui = HomeUi::default();
+        ui.edit(desk);
+        ui
+    }
+
+    fn edit(&mut self, desk: &Desk) {
+        self.editing = Some(Editing {
+            desk: desk.clone(),
+            name: desk.name.clone(),
+            permission: desk.permission,
+            favorite: desk.favorite,
+        });
+    }
+
     /// Draws one frame and returns what the person asked for.
     pub fn draw(&mut self, ui: &mut Ui, state: &AppState) -> Vec<Command> {
         let mut out = Vec::new();
-        self.top_bar(ui, state);
+        if self.page == Page::Settings && self.pending.is_none() {
+            self.pending = Some(state.settings.clone());
+        }
+        self.top_bar(ui, state, &mut out);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(TILE))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        let full = ui.available_width();
-                        let width = (full - 64.0).clamp(280.0, 1056.0);
-                        let side = ((full - width) / 2.0).max(0.0);
-                        ui.add_space(28.0);
-                        ui.horizontal_top(|ui| {
-                            ui.add_space(side);
-                            ui.vertical(|ui| {
-                                ui.set_width(width);
-                                ui.spacing_mut().item_spacing.y = 12.0;
-                                match self.page {
-                                    Page::Home => self.home(ui, state, width, &mut out),
-                                    Page::Settings => settings(ui, state, &mut out),
-                                }
+            .show(ui, |ui| match self.page {
+                Page::Home => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            let full = ui.available_width();
+                            let width = (full - 64.0).clamp(280.0, 1056.0);
+                            let side = ((full - width) / 2.0).max(0.0);
+                            ui.add_space(28.0);
+                            ui.horizontal_top(|ui| {
+                                ui.add_space(side);
+                                ui.vertical(|ui| {
+                                    ui.set_width(width);
+                                    ui.spacing_mut().item_spacing.y = 12.0;
+                                    self.home(ui, state, width, &mut out);
+                                });
                             });
+                            ui.add_space(32.0);
                         });
-                        ui.add_space(32.0);
-                    });
+                }
+                Page::Settings => self.settings(ui, state),
             });
+        self.edit_dialog(ui.ctx(), &mut out);
+        self.leave_dialog(ui.ctx(), &mut out);
         if let Some(q) = state.questions.front() {
             question(ui.ctx(), q, &mut out);
         }
         out
     }
 
-    fn top_bar(&mut self, ui: &mut Ui, state: &AppState) {
+    fn top_bar(&mut self, ui: &mut Ui, state: &AppState, out: &mut Vec<Command>) {
         let bar = egui::Panel::top("bar")
             .frame(
                 Frame::new()
@@ -558,29 +792,59 @@ impl HomeUi {
             )
             .show_separator_line(false)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    match self.page {
-                        Page::Home => {
-                            logo(ui, 36.0);
-                            if ui.available_width() > 430.0 {
-                                ui.label(RichText::new("Illumination").font(heading(20.0)));
-                            }
+                ui.horizontal(|ui| match self.page {
+                    Page::Home => {
+                        logo(ui, 36.0);
+                        if ui.available_width() > 430.0 {
+                            ui.label(RichText::new("Illumination").font(heading(20.0)));
                         }
-                        Page::Settings => {
-                            if ui.add(button("Back", WHITE, 40.0)).clicked() {
-                                self.page = Page::Home;
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(button("Settings", WHITE, 40.0)).clicked() {
+                                self.page = Page::Settings;
                             }
-                            ui.label(RichText::new("Settings").font(heading(20.0)));
-                        }
+                            status_pill(ui, state);
+                        });
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if self.page == Page::Home
-                            && ui.add(button("Settings", WHITE, 40.0)).clicked()
-                        {
-                            self.page = Page::Settings;
+                    Page::Settings => {
+                        let changes = self
+                            .pending
+                            .as_ref()
+                            .map_or(0, |p| unsaved(&state.settings, p).len());
+                        if ui.add(button("Back", WHITE, 40.0)).clicked() {
+                            if changes == 0 {
+                                self.leave();
+                            } else {
+                                self.leaving = true;
+                            }
                         }
-                        status_pill(ui, state);
-                    });
+                        ui.label(RichText::new("Settings").font(heading(20.0)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // Always in sight, wherever the page is scrolled to.
+                            let save = ui.add_enabled(
+                                changes > 0,
+                                primary("Save").min_size(vec2(96.0, 40.0)),
+                            );
+                            if save.clicked()
+                                && let Some(pending) = &self.pending
+                            {
+                                out.push(Command::SaveSettings(pending.clone()));
+                            }
+                            if ui
+                                .add_enabled(changes > 0, button("Discard", WHITE, 40.0))
+                                .clicked()
+                            {
+                                self.pending = Some(state.settings.clone());
+                            }
+                            if changes > 0 {
+                                let text = if changes == 1 {
+                                    "1 unsaved change".to_string()
+                                } else {
+                                    format!("{changes} unsaved changes")
+                                };
+                                ui.label(RichText::new(text).font(semibold(14.0)));
+                            }
+                        });
+                    }
                 });
             });
         let rect = bar.response.rect;
@@ -592,6 +856,13 @@ impl HomeUi {
         );
     }
 
+    fn leave(&mut self) {
+        self.page = Page::Home;
+        self.pending = None;
+        self.leaving = false;
+        self.jump = None;
+    }
+
     fn home(&mut self, ui: &mut Ui, state: &AppState, width: f32, out: &mut Vec<Command>) {
         // Side by side when there is room, one under the other on a narrow window.
         let gap = 24.0;
@@ -600,14 +871,14 @@ impl HomeUi {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.allocate_ui_with_layout(vec2(each, 0.0), Layout::top_down(Align::Min), |ui| {
-                    this_desk(ui, state, each, 262.0, &mut self.copied_at, out)
+                    this_desk(ui, state, each, 150.0)
                 });
                 ui.allocate_ui_with_layout(vec2(each, 0.0), Layout::top_down(Align::Min), |ui| {
-                    self.remote_desk(ui, state, each, 262.0, out)
+                    self.remote_desk(ui, state, each, 150.0, out)
                 });
             });
         } else {
-            this_desk(ui, state, width, 0.0, &mut self.copied_at, out);
+            this_desk(ui, state, width, 0.0);
             ui.add_space(12.0);
             self.remote_desk(ui, state, width, 0.0, out);
         }
@@ -626,26 +897,32 @@ impl HomeUi {
         card(ui, WHITE, |ui| {
             ui.set_width(width - 52.0);
             ui.set_min_height(min_height);
-            ui.label(caps("Remote desk"));
-            ui.label(RichText::new("IP address or hostname").font(semibold(14.0)));
+            ui.horizontal(|ui| {
+                ui.label(caps("Remote desk"));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.checkbox(&mut self.mute, "Mute its sound");
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.view_only, "View only");
+                });
+            });
             let dialing = matches!(state.dial, Dial::Dialing(_));
             let mut go = false;
             ui.horizontal(|ui| {
-                let connect_width = 128.0;
+                let connect_width = 140.0;
                 let field = ui.add_sized(
                     [ui.available_width() - connect_width - 10.0, 48.0],
-                    text_field(&mut self.address, "100.64.0.20 or laptop", mono(17.0)),
+                    text_field(&mut self.address, "100.100.101.2", mono(17.0)),
                 );
                 go |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let label = if dialing { "Connecting…" } else { "Connect" };
+                // Blue while the other side is being asked.
+                let connect = if dialing {
+                    primary("Connecting…").fill(BLUE)
+                } else {
+                    primary("Connect")
+                };
                 go |= ui
-                    .add_enabled(!dialing, primary(label).min_size(vec2(connect_width, 48.0)))
+                    .add_enabled(!dialing, connect.min_size(vec2(connect_width, 48.0)))
                     .clicked();
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.view_only, "View only");
-                ui.add_space(12.0);
-                ui.checkbox(&mut self.mute, "Mute its sound");
             });
             if go && !dialing && !self.address.trim().is_empty() {
                 out.push(Command::Connect {
@@ -654,74 +931,112 @@ impl HomeUi {
                     mute: self.mute,
                 });
             }
-            match &state.dial {
-                Dial::Idle => {
-                    ui.label(muted(
-                        "The first time, both desks show each other's key and ask you to \
-                         confirm. After that you connect without prompts.",
-                    ));
-                }
-                Dial::Dialing(target) => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Reaching {target}…"));
-                    });
-                }
-                Dial::Failed { target, message } => {
-                    Frame::new()
-                        .fill(SOFT)
-                        .stroke(outline())
-                        .corner_radius(CornerRadius::same(12))
-                        .inner_margin(Margin::symmetric(14, 10))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(format!("Could not connect to {target}"))
-                                    .font(semibold(14.0)),
-                            );
-                            ui.label(RichText::new(message).size(14.0));
-                            if ui.add(button("OK", WHITE, 32.0)).clicked() {
-                                out.push(Command::DismissDial);
-                            }
+            if let Dial::Failed { message, .. } = &state.dial {
+                Frame::new()
+                    .fill(CORAL)
+                    .stroke(outline())
+                    .corner_radius(CornerRadius::same(12))
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.add(button("OK", WHITE, 32.0)).clicked() {
+                                    out.push(Command::DismissDial);
+                                }
+                                ui.with_layout(
+                                    Layout::left_to_right(Align::Center).with_main_wrap(true),
+                                    |ui| ui.label(RichText::new(message).size(14.0)),
+                                );
+                            });
                         });
-                }
+                    });
             }
         });
     }
 
     fn desks(&mut self, ui: &mut Ui, state: &AppState, width: f32, out: &mut Vec<Command>) {
+        let tab = self.tab.unwrap_or_else(|| {
+            if state.desks.iter().any(|d| d.favorite) {
+                Tab::Favorites
+            } else {
+                Tab::Recent
+            }
+        });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Your desks").font(heading(22.0)));
+            ui.label(RichText::new("Desks").font(heading(22.0)));
+            ui.add_space(6.0);
+            Frame::new()
+                .stroke(outline())
+                .corner_radius(CornerRadius::same(12))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.horizontal(|ui| {
+                        let tabs = [
+                            (Tab::Favorites, "Favorites"),
+                            (Tab::Recent, "Recent"),
+                            (Tab::CameIn, "Came in"),
+                        ];
+                        for (i, (value, label)) in tabs.into_iter().enumerate() {
+                            let on = value == tab;
+                            let radius = CornerRadius {
+                                nw: if i == 0 { 10 } else { 0 },
+                                sw: if i == 0 { 10 } else { 0 },
+                                ne: if i == 2 { 10 } else { 0 },
+                                se: if i == 2 { 10 } else { 0 },
+                            };
+                            let pick = egui::Button::new(
+                                RichText::new(label).font(semibold(14.0)).color(NAVY),
+                            )
+                            .fill(if on { YELLOW } else { WHITE })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(radius)
+                            .min_size(vec2(0.0, 36.0));
+                            if ui.add(pick).clicked() {
+                                self.tab = Some(value);
+                            }
+                        }
+                    });
+                });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_sized(
-                    [240.0, 40.0],
+                    [220.0, 40.0],
                     text_field(&mut self.filter, "Find a desk", FontId::proportional(15.0)),
                 );
             });
         });
-        if state.desks.is_empty() {
-            ui.label(muted(
-                "No desks yet. Connect to one above and it is kept here.",
-            ));
-            return;
-        }
         let needle = self.filter.trim().to_lowercase();
-        let shown: Vec<&Desk> = state
+        let mut shown: Vec<&Desk> = state
             .desks
             .iter()
+            .filter(|d| match tab {
+                Tab::Favorites => d.favorite,
+                Tab::Recent => d.last_out > 0,
+                Tab::CameIn => d.last_in > 0 || d.tried_in > 0,
+            })
             .filter(|d| {
                 needle.is_empty()
                     || d.name.to_lowercase().contains(&needle)
-                    || d.address.to_lowercase().contains(&needle)
+                    || d.address.contains(&needle)
             })
             .collect();
+        match tab {
+            Tab::Favorites => shown.sort_by_key(|d| d.name.to_lowercase()),
+            Tab::Recent => shown.sort_by_key(|d| std::cmp::Reverse(d.last_out)),
+            Tab::CameIn => shown.sort_by_key(|d| std::cmp::Reverse(d.last_in.max(d.tried_in))),
+        }
         if shown.is_empty() {
-            ui.label(muted("No desk matches."));
+            ui.label(muted(match (tab, needle.is_empty()) {
+                (_, false) => "No desk matches.",
+                (Tab::Favorites, _) => "No favorites yet. Star a desk and it is kept here.",
+                (Tab::Recent, _) => "No desks yet. Connect to one above and it is kept here.",
+                (Tab::CameIn, _) => "No desk has connected here yet.",
+            }));
             return;
         }
-        // As many columns as fit at 230 px or wider, all the same width.
+        // As many columns as fit at 240 px or wider, all the same width.
         let gap = 20.0;
-        let columns = (((width + gap) / (230.0 + gap)).floor() as usize).max(1);
+        let columns = (((width + gap) / (240.0 + gap)).floor() as usize).max(1);
         let each = (width - gap * (columns as f32 - 1.0)) / columns as f32;
         let dialing = matches!(state.dial, Dial::Dialing(_));
         for row in shown.chunks(columns) {
@@ -732,17 +1047,24 @@ impl HomeUi {
                         vec2(each, 0.0),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            let online = state.online.get(&desk.address).copied();
-                            desk_card(
-                                ui,
-                                desk,
-                                online,
-                                each,
-                                dialing,
-                                self.view_only,
-                                self.mute,
-                                out,
-                            )
+                            let did = desk_card(ui, desk, state, tab, each, dialing);
+                            match did {
+                                Some(OnCard::Connect) => {
+                                    if let Some(target) = &desk.connect_to {
+                                        out.push(Command::Connect {
+                                            target: target.clone(),
+                                            view_only: self.view_only,
+                                            mute: self.mute,
+                                        });
+                                    }
+                                }
+                                Some(OnCard::Edit) => self.edit(desk),
+                                Some(OnCard::Star) => out.push(Command::Favorite {
+                                    fingerprint: desk.fingerprint.clone(),
+                                    on: !desk.favorite,
+                                }),
+                                None => {}
+                            }
                         },
                     );
                 }
@@ -750,18 +1072,393 @@ impl HomeUi {
             ui.add_space(8.0);
         }
     }
+
+    fn edit_dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
+        let Some(editing) = &mut self.editing else {
+            return;
+        };
+        let mut close = false;
+        dialog(ctx, "edit-desk", |ui| {
+            ui.set_width(392.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            if !editing.desk.os.is_empty() {
+                ui.label(caps(&editing.desk.os).color(MUTED));
+            }
+            ui.label(
+                RichText::new(format!(
+                    "{} · key {}",
+                    editing.desk.address,
+                    key_start(&editing.desk.fingerprint)
+                ))
+                .font(mono(13.0))
+                .color(MUTED),
+            );
+            ui.label(RichText::new("Name").font(semibold(14.0)));
+            ui.add_sized(
+                [ui.available_width(), 48.0],
+                text_field(&mut editing.name, "", heading(17.0)),
+            );
+            ui.label(RichText::new("Permission").font(semibold(14.0)));
+            let each = vec2((ui.available_width() - 10.0) / 2.0, 44.0);
+            let choices: [(Option<Permission>, &str, Color32); 4] = [
+                (None, "Default", SOFT),
+                (Some(Permission::Always), "Always", GREEN),
+                (Some(Permission::Ask), "Ask", BLUE),
+                (Some(Permission::Never), "Never", CORAL),
+            ];
+            for pair in choices.chunks(2) {
+                ui.horizontal(|ui| {
+                    for (value, label, fill) in pair {
+                        if choice(ui, label, editing.permission == *value, *fill, each) {
+                            editing.permission = *value;
+                        }
+                    }
+                });
+            }
+            ui.checkbox(&mut editing.favorite, "Favorite");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.add(button("Forget", CORAL, 44.0)).clicked() {
+                    out.push(Command::ForgetDesk(editing.desk.fingerprint.clone()));
+                    close = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(primary("Save").min_size(vec2(96.0, 44.0))).clicked() {
+                        // A name left as the machine's own is no name of the person's.
+                        let name = editing.name.trim();
+                        let own = if name == editing.desk.name && editing.desk.own_name.is_empty() {
+                            ""
+                        } else {
+                            name
+                        };
+                        out.push(Command::EditDesk {
+                            fingerprint: editing.desk.fingerprint.clone(),
+                            name: own.to_string(),
+                            permission: editing.permission,
+                            favorite: editing.favorite,
+                        });
+                        close = true;
+                    }
+                    if ui.add(button("Cancel", WHITE, 44.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if close {
+            self.editing = None;
+        }
+    }
+
+    fn leave_dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
+        if !self.leaving {
+            return;
+        }
+        let mut did = None;
+        dialog(ctx, "leave-settings", |ui| {
+            ui.set_width(360.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(RichText::new("Save the changes?").font(heading(22.0)));
+            ui.horizontal(|ui| {
+                if ui.add(button("Cancel", WHITE, 44.0)).clicked() {
+                    did = Some(0);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(primary("Save").min_size(vec2(96.0, 44.0))).clicked() {
+                        did = Some(2);
+                    }
+                    if ui.add(button("Discard", WHITE, 44.0)).clicked() {
+                        did = Some(1);
+                    }
+                });
+            });
+        });
+        match did {
+            Some(0) => self.leaving = false,
+            Some(1) => self.leave(),
+            Some(2) => {
+                if let Some(pending) = self.pending.take() {
+                    out.push(Command::SaveSettings(pending));
+                }
+                self.leave();
+            }
+            _ => {}
+        }
+    }
+
+    fn settings(&mut self, ui: &mut Ui, state: &AppState) {
+        let Some(mut s) = self.pending.clone() else {
+            return;
+        };
+        let changed = unsaved(&state.settings, &s);
+        let full = ui.available_width();
+        let width = (full - 64.0).clamp(280.0, 1056.0);
+        let side = ((full - width) / 2.0).max(0.0);
+        let menu_width = if width >= 700.0 { 230.0 } else { 0.0 };
+        ui.add_space(24.0);
+        let height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.add_space(side);
+            ui.spacing_mut().item_spacing.x = 24.0;
+            if menu_width > 0.0 {
+                ui.allocate_ui_with_layout(
+                    vec2(menu_width, height),
+                    Layout::top_down(Align::Min),
+                    |ui| self.menu(ui, &changed),
+                );
+            }
+            let rest = width - menu_width - if menu_width > 0.0 { 24.0 } else { 0.0 };
+            ui.allocate_ui_with_layout(vec2(rest, height), Layout::top_down(Align::Min), |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        ui.set_width(rest - 14.0);
+                        ui.spacing_mut().item_spacing.y = 14.0;
+                        self.sections(ui, state, &mut s);
+                        ui.add_space(24.0);
+                    });
+            });
+        });
+        self.pending = Some(s);
+    }
+
+    /// Every setting, grouped; a click brings it into view, a dot marks an unsaved change.
+    fn menu(&mut self, ui: &mut Ui, changed: &[Item]) {
+        Frame::new()
+            .fill(WHITE)
+            .stroke(outline())
+            .corner_radius(CornerRadius::same(16))
+            .inner_margin(Margin::same(8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (section, items) in MENU {
+                    let head = egui::Button::new(RichText::new(section).font(heading(15.0)))
+                        .fill(WHITE)
+                        .stroke(Stroke::NONE)
+                        .min_size(vec2(ui.available_width(), 34.0));
+                    if ui.add(head).clicked() {
+                        self.jump = Some(items[0].0);
+                    }
+                    for (item, label) in items {
+                        if *item == Item::About {
+                            continue;
+                        }
+                        let text = if changed.contains(item) {
+                            format!("{label}  •")
+                        } else {
+                            (*label).to_string()
+                        };
+                        let entry = egui::Button::new(RichText::new(text).size(14.0))
+                            .fill(WHITE)
+                            .stroke(Stroke::NONE)
+                            .min_size(vec2(ui.available_width(), 28.0));
+                        if ui.add(entry).clicked() {
+                            self.jump = Some(*item);
+                        }
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+    }
+
+    /// Marks where a setting is drawn, and brings it into view when the menu asked for it.
+    fn here(&mut self, ui: &mut Ui, item: Item) {
+        if self.jump == Some(item) {
+            let (_, mark) = ui.allocate_exact_size(vec2(1.0, 0.0), Sense::hover());
+            mark.scroll_to_me(Some(Align::TOP));
+            self.jump = None;
+        }
+    }
+
+    fn sections(&mut self, ui: &mut Ui, state: &AppState, s: &mut Settings) {
+        let title = |ui: &mut Ui, text: &str| {
+            ui.label(RichText::new(text).font(heading(18.0)));
+        };
+        let label = |ui: &mut Ui, text: &str| {
+            ui.label(RichText::new(text).font(semibold(14.0)));
+        };
+        card(ui, WHITE, |ui| {
+            ui.set_width(ui.available_width());
+            self.here(ui, Item::StartOnBoot);
+            title(ui, "General");
+            ui.checkbox(&mut s.start_on_boot, "Start on boot");
+            self.here(ui, Item::Key);
+            label(ui, "This desk's key");
+            ui.horizontal(|ui| key_box(ui, &state.fingerprint, TILE, 15.0));
+            ui.label(muted("Other desks show it on first connection."));
+        });
+        card(ui, WHITE, |ui| {
+            ui.set_width(ui.available_width());
+            self.here(ui, Item::Permission);
+            title(ui, "Incoming");
+            ui.label(muted("When another desk connects here."));
+            label(ui, "Default permission");
+            ui.horizontal(|ui| {
+                let each = vec2(150.0, 44.0);
+                if choice(ui, "Ask", !s.refuse_new, BLUE, each) {
+                    s.refuse_new = false;
+                }
+                if choice(ui, "Never", s.refuse_new, CORAL, each) {
+                    s.refuse_new = true;
+                }
+            });
+            ui.label(muted("A desk's own permission overrides this."));
+            self.here(ui, Item::Actions);
+            label(ui, "Allowed actions");
+            let mut always = true;
+            ui.add_enabled(false, egui::Checkbox::new(&mut always, "See screen"));
+            ui.checkbox(&mut s.let_control, "Use keyboard and mouse");
+            ui.checkbox(&mut s.let_sound, "Hear sound");
+            ui.checkbox(&mut s.let_clipboard, "Share clipboard");
+            self.here(ui, Item::Idle);
+            ui.horizontal(|ui| {
+                label(ui, "Disconnect when idle for");
+                let name = |minutes: u32| match minutes {
+                    0 => "Never".to_string(),
+                    60 => "1 hour".to_string(),
+                    120 => "2 hours".to_string(),
+                    m => format!("{m} minutes"),
+                };
+                egui::ComboBox::from_id_salt("idle")
+                    .selected_text(name(s.idle_minutes))
+                    .show_ui(ui, |ui| {
+                        for minutes in [10, 30, 60, 120, 0] {
+                            ui.selectable_value(&mut s.idle_minutes, minutes, name(minutes));
+                        }
+                    });
+            });
+        });
+        card(ui, WHITE, |ui| {
+            ui.set_width(ui.available_width());
+            self.here(ui, Item::Limits);
+            ui.horizontal(|ui| {
+                title(ui, "Outgoing");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(button("Reset to defaults", WHITE, 36.0)).clicked() {
+                        *s = s.with_outgoing_reset();
+                    }
+                });
+            });
+            ui.label(muted("When I connect to another desk."));
+            egui::Grid::new("outgoing")
+                .num_columns(2)
+                .spacing(vec2(16.0, 10.0))
+                .show(ui, |ui| {
+                    label(ui, "Max bitrate");
+                    ui.add(
+                        egui::DragValue::new(&mut s.max_bitrate_mbps)
+                            .range(1.0..=200.0)
+                            .speed(0.5)
+                            .max_decimals(1)
+                            .suffix(" Mb/s"),
+                    );
+                    ui.end_row();
+                    label(ui, "Max frame rate");
+                    egui::ComboBox::from_id_salt("fps")
+                        .selected_text(format!("{} fps", s.max_fps))
+                        .show_ui(ui, |ui| {
+                            for fps in [15, 30, 60, 120] {
+                                ui.selectable_value(&mut s.max_fps, fps, format!("{fps} fps"));
+                            }
+                        });
+                    ui.end_row();
+                    label(ui, "Delay limit");
+                    ui.add(
+                        egui::DragValue::new(&mut s.latency_limit_ms)
+                            .range(10..=500)
+                            .suffix(" ms"),
+                    );
+                    ui.end_row();
+                    self.here(ui, Item::Keyboard);
+                    label(ui, "Keyboard");
+                    let name = |mode: KeyboardMode| match mode {
+                        KeyboardMode::Remote => "Remote",
+                        KeyboardMode::Local => "Local",
+                        KeyboardMode::Auto => "Auto",
+                    };
+                    egui::ComboBox::from_id_salt("keyboard")
+                        .selected_text(name(s.keyboard))
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                KeyboardMode::Remote,
+                                KeyboardMode::Local,
+                                KeyboardMode::Auto,
+                            ] {
+                                ui.selectable_value(&mut s.keyboard, mode, name(mode));
+                            }
+                        });
+                    ui.end_row();
+                    self.here(ui, Item::Pointer);
+                    label(ui, "Pointer");
+                    let name = |p: PointerMode| match p {
+                        PointerMode::Desk => "This desk's",
+                        PointerMode::Host => "The host's",
+                    };
+                    egui::ComboBox::from_id_salt("pointer")
+                        .selected_text(name(s.pointer))
+                        .show_ui(ui, |ui| {
+                            for p in [PointerMode::Desk, PointerMode::Host] {
+                                ui.selectable_value(&mut s.pointer, p, name(p));
+                            }
+                        });
+                    ui.end_row();
+                });
+            self.here(ui, Item::Sound);
+            ui.checkbox(&mut s.sound, "Play sound");
+            self.here(ui, Item::Clipboard);
+            ui.checkbox(&mut s.clipboard, "Share clipboard");
+            self.here(ui, Item::Reconnect);
+            ui.checkbox(&mut s.reconnect, "Reconnect automatically");
+            self.here(ui, Item::Shrink);
+            ui.checkbox(&mut s.allow_scale, "Shrink picture when slow");
+        });
+        card(ui, WHITE, |ui| {
+            ui.set_width(ui.available_width());
+            self.here(ui, Item::About);
+            ui.horizontal(|ui| {
+                title(ui, "About");
+                ui.label(muted(format!(
+                    "Illumination {} · GPL-3.0-only",
+                    state.version
+                )));
+                ui.hyperlink_to(
+                    RichText::new("Source code").size(14.0),
+                    "https://github.com/Yooouuuuuuu/illumination",
+                );
+            });
+        });
+    }
 }
 
+/// A dialog over the window, in the app's frame.
+fn dialog(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
+    let frame = Frame::new()
+        .fill(WHITE)
+        .stroke(outline())
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(Margin::same(24));
+    egui::Modal::new(egui::Id::unique(id))
+        .frame(frame)
+        .backdrop_color(Color32::from_rgba_unmultiplied(0x1E, 0x2A, 0x4A, 150))
+        .show(ctx, add);
+}
+
+/// This desk's state, top right.
 fn status_pill(ui: &mut Ui, state: &AppState) {
-    let (text, fill) = match (&state.incoming, state.sessions.as_slice()) {
-        (Incoming::Failed(_), _) => ("Not reachable".to_string(), WHITE),
-        (_, [one]) => (format!("{one} is connected"), YELLOW),
+    let (text, fill, solid) = match (&state.incoming, state.sessions.as_slice()) {
+        (Incoming::Failed(_), _) => ("Cannot be reached".to_string(), CORAL, false),
+        (_, [one]) => (format!("{one} is connected"), YELLOW, true),
         (_, [_, ..]) => (
-            format!("{} desks are connected", state.sessions.len()),
+            format!("{} desks connected", state.sessions.len()),
             YELLOW,
+            true,
         ),
-        (Incoming::Listening, []) => ("Ready for connections".to_string(), SOFT),
-        (Incoming::Off, []) => ("Not accepting connections".to_string(), WHITE),
+        (Incoming::Listening, []) if state.settings.refuse_new => {
+            ("New desks are refused".to_string(), WHITE, false)
+        }
+        (Incoming::Listening, []) => ("Ready for connections".to_string(), GREEN, true),
+        (Incoming::Off, []) => ("Not listening".to_string(), WHITE, false),
     };
     Frame::new()
         .fill(fill)
@@ -774,8 +1471,8 @@ fn status_pill(ui: &mut Ui, state: &AppState) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.label(RichText::new(text).font(semibold(13.0)));
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                // Filled when something can reach us, hollow when not: told apart without colour.
-                if matches!(state.incoming, Incoming::Listening) || !state.sessions.is_empty() {
+                // Filled when open, hollow when not: told apart without colour.
+                if solid {
                     ui.painter().circle_filled(dot.center(), 5.0, NAVY);
                 } else {
                     ui.painter()
@@ -785,400 +1482,163 @@ fn status_pill(ui: &mut Ui, state: &AppState) {
         });
 }
 
-fn this_desk(
-    ui: &mut Ui,
-    state: &AppState,
-    width: f32,
-    min_height: f32,
-    copied_at: &mut Option<f64>,
-    out: &mut Vec<Command>,
-) {
+fn this_desk(ui: &mut Ui, state: &AppState, width: f32, min_height: f32) {
     card(ui, SOFT, |ui| {
         ui.set_width(width - 52.0);
         ui.set_min_height(min_height);
-        ui.horizontal(|ui| {
-            ui.label(caps("This desk"));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(&state.device_name).font(semibold(13.0)));
-            });
-        });
+        ui.label(caps("This desk"));
         match state.addresses.first() {
             Some(address) => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(address).font(mono(30.0)));
-                    let now = ui.input(|i| i.time);
-                    let just_copied = copied_at.is_some_and(|t| now - t < 1.5);
-                    let label = if just_copied { "Copied" } else { "Copy" };
-                    if ui.add(button(label, WHITE, 40.0)).clicked() {
-                        ui.ctx().copy_text(address.clone());
-                        *copied_at = Some(now);
-                    }
-                    if just_copied {
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(300));
-                    }
-                });
+                ui.label(RichText::new(address).font(mono(32.0)));
                 if state.addresses.len() > 1 {
                     ui.label(
                         RichText::new(format!("also {}", state.addresses[1..].join(", ")))
                             .font(mono(13.0)),
                     );
                 }
-                ui.label(
-                    RichText::new(
-                        "Give this address to the desk that should reach you. It works on your own \
-                     tailnet; nothing goes through a server.",
-                    )
-                    .size(14.0),
-                );
             }
             None => {
                 ui.label(RichText::new("No tailnet address").font(heading(22.0)));
-                ui.label(RichText::new(
-                    "Start Tailscale on this desk so others can reach it. You can still connect \
-                     to other desks.",
-                ).size(14.0));
+                ui.label(
+                    RichText::new("Start Tailscale so other desks can reach this one.").size(14.0),
+                );
             }
         }
         if let Incoming::Failed(why) = &state.incoming {
-            ui.label(
-                RichText::new(format!("Can't accept connections: {why}")).font(semibold(14.0)),
-            );
+            ui.label(RichText::new(format!("Cannot be reached: {why}")).font(semibold(14.0)));
         }
-        for name in &state.sessions {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{name} is connected")).font(semibold(15.0)));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(button("Disconnect", WHITE, 36.0)).clicked() {
-                        out.push(Command::EndSession(name.clone()));
-                    }
-                });
-            });
-        }
-        let line = ui.available_rect_before_wrap();
-        ui.painter().line_segment(
-            [line.left_top(), egui::pos2(line.right(), line.top())],
-            Stroke::new(OUTLINE, NAVY),
-        );
-        ui.add_space(8.0);
-        let mut allow = state.settings.allow_incoming;
-        if ui
-            .checkbox(
-                &mut allow,
-                RichText::new("Allow incoming connections").font(semibold(15.0)),
-            )
-            .changed()
-        {
-            out.push(Command::SaveSettings(Settings {
-                allow_incoming: allow,
-                ..state.settings.clone()
-            }));
-        }
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Key").size(13.0));
-            ui.label(RichText::new(key_start(&state.fingerprint)).font(mono(13.0)))
-                .on_hover_ui(|ui| {
-                    for row in key_rows(&state.fingerprint) {
-                        ui.label(RichText::new(row).font(mono(14.0)));
-                    }
-                });
-            ui.label(RichText::new("(hover for all of it)").size(13.0));
-        });
     });
 }
 
-#[allow(clippy::too_many_arguments)]
+enum OnCard {
+    Connect,
+    Edit,
+    Star,
+}
+
 fn desk_card(
     ui: &mut Ui,
     desk: &Desk,
-    online: Option<bool>,
+    state: &AppState,
+    tab: Tab,
     width: f32,
     dialing: bool,
-    view_only: bool,
-    mute: bool,
-    out: &mut Vec<Command>,
-) {
+) -> Option<OnCard> {
+    let mut did = None;
     Frame::new()
         .fill(WHITE)
         .stroke(outline())
         .corner_radius(CornerRadius::same(16))
+        .inner_margin(Margin::symmetric(16, 14))
         .show(ui, |ui| {
-            ui.set_width(width - 4.0);
-            ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
-            // A dark strip with a small screen in it, as the icon's "remote" screen.
-            let (strip, _) = ui.allocate_exact_size(vec2(width - 4.0, 84.0), Sense::hover());
-            let top = CornerRadius {
-                nw: 14,
-                ne: 14,
-                sw: 0,
-                se: 0,
-            };
-            ui.painter().rect_filled(strip, top, NAVY);
-            let screen = egui::Rect::from_center_size(strip.center(), vec2(72.0, 48.0));
-            ui.painter().rect(
-                screen,
-                CornerRadius::same(5),
-                // Lit while the desk answers; dark when it does not.
-                if online == Some(false) { NAVY } else { YELLOW },
-                Stroke::new(2.5, TILE),
-                StrokeKind::Inside,
+            ui.set_width(width - 36.0);
+            ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+            ui.label(
+                RichText::new(if desk.os.is_empty() { " " } else { &desk.os }.to_uppercase())
+                    .font(heading(12.0))
+                    .extra_letter_spacing(1.0)
+                    .color(MUTED),
             );
-            Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.add(egui::Label::new(RichText::new(&desk.name).font(semibold(16.0))).truncate());
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(shown_address(&desk.address))
-                            .font(mono(13.0))
-                            .color(MUTED),
-                    )
-                    .truncate(),
-                );
-                let reach = match online {
-                    Some(true) => "Online · known since",
-                    Some(false) => "Offline · known since",
-                    None => "Known since",
-                };
-                ui.label(
-                    RichText::new(format!("{reach} {}", date(desk.first_seen)))
-                        .size(13.0)
-                        .color(MUTED),
-                );
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let forget_width = 76.0;
-                    let connect = ui.add_enabled(
-                        !dialing,
-                        button("Connect", WHITE, 40.0)
-                            .min_size(vec2(ui.available_width() - forget_width - 10.0, 40.0)),
-                    );
-                    if connect.clicked() {
-                        out.push(Command::Connect {
-                            target: desk.address.clone(),
-                            view_only,
-                            mute,
-                        });
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if star(ui, desk.favorite) {
+                        did = Some(OnCard::Star);
                     }
-                    if ui
-                        .add(button("Forget", WHITE, 40.0).min_size(vec2(forget_width, 40.0)))
-                        .on_hover_text("Forget this desk's key. The next connection asks again.")
-                        .clicked()
-                    {
-                        out.push(Command::ForgetDesk(desk.address.clone()));
-                    }
-                });
-            });
-        });
-}
-
-fn settings(ui: &mut Ui, state: &AppState, out: &mut Vec<Command>) {
-    let mut s = state.settings.clone();
-    let title = |ui: &mut Ui, text: &str| {
-        ui.label(RichText::new(text).font(heading(18.0)));
-    };
-    card(ui, WHITE, |ui| {
-        ui.set_width(ui.available_width());
-        title(ui, "Picture and speed");
-        ui.label(muted(
-            "The host starts at the top of these limits and steps down by itself when the \
-             connection can't keep up.",
-        ));
-        egui::Grid::new("limits")
-            .num_columns(2)
-            .spacing(vec2(16.0, 10.0))
-            .show(ui, |ui| {
-                ui.label(RichText::new("Highest bitrate").font(semibold(14.0)));
-                ui.add(
-                    egui::DragValue::new(&mut s.max_bitrate_mbps)
-                        .range(1.0..=200.0)
-                        .speed(0.5)
-                        .max_decimals(1)
-                        .suffix(" Mb/s"),
-                );
-                ui.end_row();
-                ui.label(RichText::new("Highest frame rate").font(semibold(14.0)));
-                egui::ComboBox::from_id_salt("fps")
-                    .selected_text(format!("{} fps", s.max_fps))
-                    .show_ui(ui, |ui| {
-                        for fps in [30, 60, 120] {
-                            ui.selectable_value(&mut s.max_fps, fps, format!("{fps} fps"));
+                    if let Some(target) = &desk.connect_to {
+                        match state.online.get(target) {
+                            Some(true) => tag(ui, "Online", GREEN, true),
+                            Some(false) => tag(ui, "Offline", WHITE, true),
+                            None => {}
                         }
-                    });
-                ui.end_row();
-                ui.label(RichText::new("Picture delay limit").font(semibold(14.0)));
-                ui.add(
-                    egui::DragValue::new(&mut s.latency_limit_ms)
-                        .range(10..=500)
-                        .suffix(" ms"),
-                );
-                ui.end_row();
-            });
-        ui.checkbox(
-            &mut s.allow_scale,
-            "Let the picture get smaller when the connection is very slow",
-        );
-        ui.checkbox(
-            &mut s.reconnect,
-            "Reconnect by itself when the connection drops",
-        );
-    });
-    card(ui, WHITE, |ui| {
-        ui.set_width(ui.available_width());
-        title(ui, "Keyboard and pointer");
-        let modes = [
-            (
-                KeyboardMode::Remote,
-                "Remote",
-                "Every key goes to the host, Win and Alt+Tab included. Its layout and input \
-                 method apply.",
-            ),
-            (
-                KeyboardMode::Local,
-                "Local",
-                "Type with this desk's input method, for a host that lacks your language.",
-            ),
-            (
-                KeyboardMode::Auto,
-                "Auto",
-                "Remote when both desks use the same layout, otherwise Local.",
-            ),
-        ];
-        for (mode, name, what) in modes {
-            let chosen = s.keyboard == mode;
-            let frame = Frame::new()
-                .fill(if chosen { SOFT } else { WHITE })
-                .stroke(Stroke::new(OUTLINE, if chosen { NAVY } else { LINE }))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(Margin::symmetric(14, 10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.radio_value(
-                        &mut s.keyboard,
-                        mode,
-                        RichText::new(name).font(semibold(15.0)),
-                    );
-                    ui.label(RichText::new(what).size(14.0));
-                });
-            if frame.response.interact(Sense::click()).clicked() {
-                s.keyboard = mode;
-            }
-        }
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Pointer").font(semibold(14.0)));
-            let name = |p: PointerMode| match p {
-                PointerMode::Desk => "This desk's pointers",
-                PointerMode::Host => "The host's pointers",
-            };
-            egui::ComboBox::from_id_salt("pointer")
-                .width(340.0)
-                .selected_text(name(s.pointer))
-                .show_ui(ui, |ui| {
-                    for p in [PointerMode::Desk, PointerMode::Host] {
-                        ui.selectable_value(&mut s.pointer, p, name(p));
                     }
-                });
-        });
-    });
-    card(ui, WHITE, |ui| {
-        ui.set_width(ui.available_width());
-        title(ui, "Sound and clipboard");
-        ui.checkbox(&mut s.sound, "Play the host's sound here");
-        ui.checkbox(&mut s.clipboard, "Share the clipboard (text, both ways)");
-    });
-    card(ui, WHITE, |ui| {
-        ui.set_width(ui.available_width());
-        title(ui, "When another desk connects here");
-        ui.label(muted(
-            "It always sees this screen. A desk connected now keeps what it had until it \
-             connects again.",
-        ));
-        ui.checkbox(&mut s.let_control, "It may use the keyboard and mouse");
-        ui.checkbox(&mut s.let_sound, "It may hear this desk's sound");
-        ui.checkbox(&mut s.let_clipboard, "It may share the clipboard");
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("A desk that is not known here").font(semibold(14.0)));
-            let name = |refuse: bool| {
-                if refuse {
-                    "is refused"
-                } else {
-                    "is asked about"
-                }
-            };
-            egui::ComboBox::from_id_salt("refuse-new")
-                .selected_text(name(s.refuse_new))
-                .show_ui(ui, |ui| {
-                    for refuse in [false, true] {
-                        ui.selectable_value(&mut s.refuse_new, refuse, name(refuse));
-                    }
-                });
-        });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Disconnect it when idle for").font(semibold(14.0)));
-            let name = |minutes: u32| match minutes {
-                0 => "never".to_string(),
-                60 => "1 hour".to_string(),
-                120 => "2 hours".to_string(),
-                m => format!("{m} minutes"),
-            };
-            egui::ComboBox::from_id_salt("idle")
-                .selected_text(name(s.idle_minutes))
-                .show_ui(ui, |ui| {
-                    for minutes in [10, 30, 60, 120, 0] {
-                        ui.selectable_value(&mut s.idle_minutes, minutes, name(minutes));
-                    }
-                });
-        });
-    });
-    card(ui, WHITE, |ui| {
-        ui.set_width(ui.available_width());
-        title(ui, "Trusted desks");
-        ui.label(muted(
-            "These connect to this desk without asking. Forget one and it has to be accepted \
-             again.",
-        ));
-        if state.trusted.is_empty() {
-            ui.label(muted("None yet."));
-        }
-        for desk in &state.trusted {
-            Frame::new()
-                .stroke(Stroke::new(OUTLINE, LINE))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(Margin::symmetric(14, 8))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&desk.name).font(semibold(15.0)));
-                        ui.label(
-                            RichText::new(key_start(&desk.fingerprint))
-                                .font(mono(13.0))
-                                .color(MUTED),
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&desk.name).font(heading(18.0)))
+                                .truncate(),
                         );
-                        ui.label(muted(format!("last from {}", desk.last_address)));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add(button("Forget", WHITE, 36.0)).clicked() {
-                                out.push(Command::ForgetTrusted(desk.fingerprint.clone()));
-                            }
-                        });
                     });
                 });
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(muted(format!("Illumination {}", state.version)));
-        ui.label(muted("GPL-3.0-only"));
-        ui.hyperlink_to(
-            RichText::new("Source code").size(14.0),
-            "https://github.com/Yooouuuuuuu/illumination",
-        );
-    });
-    ui.label(muted("Changes apply to the next connection."));
-    if s != state.settings {
-        out.push(Command::SaveSettings(s));
-    }
+            });
+            ui.label(RichText::new(&desk.address).font(mono(13.0)).color(MUTED));
+            let last = match tab {
+                Tab::CameIn if desk.last_in >= desk.tried_in && desk.last_in > 0 => {
+                    format!("Connected here {}", day(state.now, desk.last_in))
+                }
+                Tab::CameIn => format!("Tried to connect {}", day(state.now, desk.tried_in)),
+                _ if desk.last_out > 0 => format!("Connected {}", day(state.now, desk.last_out)),
+                _ if desk.last_in > 0 => {
+                    format!("Connected here {}", day(state.now, desk.last_in))
+                }
+                _ => "Not connected yet".to_string(),
+            };
+            ui.label(RichText::new(last).size(13.0).color(MUTED));
+            // Only a permission of its own is shown; without one it follows Settings.
+            if let Some(permission) = desk.permission {
+                let (word, fill) = permission_look(permission);
+                tag(
+                    ui,
+                    &format!("Permission: {}", word.to_lowercase()),
+                    fill,
+                    false,
+                );
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let can_connect = desk.connect_to.is_some();
+                let w = ui.available_width();
+                if can_connect
+                    && ui
+                        .add_enabled(
+                            !dialing,
+                            button("Connect", WHITE, 40.0).min_size(vec2(w * 0.58, 40.0)),
+                        )
+                        .clicked()
+                {
+                    did = Some(OnCard::Connect);
+                }
+                if ui
+                    .add(button("Edit", WHITE, 40.0).min_size(vec2(ui.available_width(), 40.0)))
+                    .clicked()
+                {
+                    did = Some(OnCard::Edit);
+                }
+            });
+        });
+    did
 }
 
-/// The question in front of everything else: one of the two key checks.
+/// The star of a favourite: filled when it is one. Returns whether it was clicked.
+fn star(ui: &mut Ui, on: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let (c, outer, inner) = (rect.center(), 10.0f32, 4.2f32);
+    let points: Vec<egui::Pos2> = (0..10)
+        .map(|i| {
+            let r = if i % 2 == 0 { outer } else { inner };
+            let a = std::f32::consts::PI * (i as f32 / 5.0) - std::f32::consts::FRAC_PI_2;
+            c + vec2(r * a.cos(), r * a.sin())
+        })
+        .collect();
+    // A star is not convex: filled as a fan of triangles from its middle.
+    if on {
+        for i in 0..10 {
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![c, points[i], points[(i + 1) % 10]],
+                YELLOW,
+                Stroke::NONE,
+            ));
+        }
+    }
+    ui.painter()
+        .add(egui::Shape::closed_line(points, Stroke::new(1.8, NAVY)));
+    response
+        .on_hover_text(if on {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        })
+        .clicked()
+}
+
 /// Draws nothing but the first waiting question, on the app's ground: the window of
 /// `illum ask`, which the installed host opens for a new desk.
 pub fn draw_question(ui: &mut Ui, state: &AppState) -> Vec<Command> {
@@ -1192,135 +1652,62 @@ pub fn draw_question(ui: &mut Ui, state: &AppState) -> Vec<Command> {
     out
 }
 
+/// A desk wants to connect here: who it is, its key, and the four answers.
 fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
     let frame = Frame::new()
         .fill(WHITE)
         .stroke(outline())
-        .corner_radius(CornerRadius::same(16));
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(Margin::same(24));
     egui::Modal::new(egui::Id::unique(("question", q.id)))
         .frame(frame)
         .backdrop_color(Color32::from_rgba_unmultiplied(0x1E, 0x2A, 0x4A, 150))
         .show(ctx, |ui| {
-            ui.set_width(432.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let (band, title, small) = match q.kind {
-                QuestionKind::AcceptDesk => (
-                    YELLOW,
-                    format!("{} wants to connect", q.name),
-                    "Incoming connection",
-                ),
-                QuestionKind::TrustHost => {
-                    (TILE, format!("Is this {}?", q.name), "First connection")
-                }
+            ui.set_width(392.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            let small = if q.os.is_empty() {
+                "New desk".to_string()
+            } else {
+                format!("New desk · {}", q.os)
             };
-            let top = CornerRadius {
-                nw: 14,
-                ne: 14,
-                sw: 0,
-                se: 0,
-            };
-            let head = Frame::new()
-                .fill(band)
-                .corner_radius(top)
-                .inner_margin(Margin::same(24))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    ui.label(caps(small));
-                    ui.label(RichText::new(title).font(heading(24.0)));
-                    ui.label(
-                        RichText::new(if q.os.is_empty() {
-                            format!("at {}", q.address)
-                        } else {
-                            format!("{} at {}", q.os, q.address)
-                        })
-                        .font(mono(14.0)),
-                    );
-                });
-            let line = head.response.rect;
-            ui.painter().line_segment(
-                [line.left_bottom(), line.right_bottom()],
-                Stroke::new(OUTLINE, NAVY),
-            );
-            Frame::new().inner_margin(Margin::same(24)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 12.0;
-                let (lead, check, yes, no) = match q.kind {
-                    QuestionKind::AcceptDesk => (
-                        "It shows this key:",
-                        "It should match that desk's own key. \"Always\" lets it in from now on \
-                         without asking; \"This time\" only now.",
-                        "Always",
-                        "No",
-                    ),
-                    QuestionKind::TrustHost => (
-                        "You have not connected to it before. It shows this key:",
-                        "Compare it with the key on that desk's home screen, under This desk. \
-                         If they match, nobody is in between. You are asked once; a different \
-                         key later is refused.",
-                        "They match, connect",
-                        "Cancel",
-                    ),
-                };
-                ui.label(lead);
-                key_box(
-                    ui,
-                    &q.fingerprint,
-                    if q.kind == QuestionKind::TrustHost {
-                        SOFT
-                    } else {
-                        TILE
-                    },
-                    17.0,
+            ui.label(caps(&small).color(MUTED));
+            ui.label(RichText::new(&q.name).font(heading(24.0)));
+            ui.label(RichText::new(&q.address).font(mono(14.0)).color(MUTED));
+            ui.add_space(4.0);
+            key_box(ui, &q.fingerprint, TILE, 16.0);
+            ui.label(muted(
+                "Its key. Compare with the key in that desk's Settings.",
+            ));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Let it connect?").font(semibold(15.0)));
+            let mut answer = |verdict| out.push(Command::Answer { id: q.id, verdict });
+            ui.horizontal(|ui| {
+                let each = vec2(
+                    (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0,
+                    48.0,
                 );
-                ui.label(muted(check));
-                ui.add_space(4.0);
-                let mut answer = |verdict| out.push(Command::Answer { id: q.id, verdict });
-                ui.horizontal(|ui| {
-                    let w = ui.available_width();
-                    if q.kind == QuestionKind::AcceptDesk {
-                        let each = (w - 2.0 * ui.spacing().item_spacing.x) / 3.0;
-                        if ui
-                            .add(button("No", WHITE, 48.0).min_size(vec2(each, 48.0)))
-                            .clicked()
-                        {
-                            answer(Verdict::No);
-                        }
-                        if ui
-                            .add(button("This time", WHITE, 48.0).min_size(vec2(each, 48.0)))
-                            .clicked()
-                        {
-                            answer(Verdict::Once);
-                        }
-                        if ui
-                            .add(primary("Always").min_size(vec2(each, 48.0)))
-                            .clicked()
-                        {
-                            answer(Verdict::Always);
-                        }
-                    } else {
-                        if ui
-                            .add(button(no, WHITE, 48.0).min_size(vec2(w * 0.34, 48.0)))
-                            .clicked()
-                        {
-                            answer(Verdict::No);
-                        }
-                        if ui
-                            .add(primary(yes).min_size(vec2(ui.available_width(), 48.0)))
-                            .clicked()
-                        {
-                            answer(Verdict::Always);
-                        }
-                    }
-                });
-                if q.kind == QuestionKind::AcceptDesk
-                    && ui
-                        .link(RichText::new("Never for this desk").size(14.0))
-                        .clicked()
+                if ui.add(button("No", CORAL, 48.0).min_size(each)).clicked() {
+                    answer(Verdict::No);
+                }
+                if ui
+                    .add(button("This time", WHITE, 48.0).min_size(each))
+                    .clicked()
                 {
-                    answer(Verdict::Never);
+                    answer(Verdict::Once);
+                }
+                if ui
+                    .add(primary("Always").fill(GREEN).min_size(each))
+                    .clicked()
+                {
+                    answer(Verdict::Always);
                 }
             });
+            if ui
+                .link(RichText::new("Never for this desk").size(14.0))
+                .clicked()
+            {
+                answer(Verdict::Never);
+            }
         });
 }
 
@@ -1331,6 +1718,15 @@ pub fn sample_state() -> AppState {
             .map(|i| format!("{:02x}", i.wrapping_mul(37).wrapping_add(seed)))
             .collect()
     };
+    let now = 1_795_003_200;
+    let desk = |seed: u8, name: &str, os: &str, address: &str| Desk {
+        fingerprint: key(seed),
+        name: name.into(),
+        os: os.into(),
+        address: address.into(),
+        connect_to: Some(format!("{address}:28326")),
+        ..Desk::default()
+    };
     AppState {
         version: env!("CARGO_PKG_VERSION").to_string(),
         device_name: "studio-desktop".into(),
@@ -1340,29 +1736,31 @@ pub fn sample_state() -> AppState {
         sessions: Vec::new(),
         desks: vec![
             Desk {
-                address: "100.64.0.20:28326".into(),
-                name: "studio-laptop".into(),
-                fingerprint: key(21),
-                first_seen: 1_793_000_000,
+                own_name: "Laptop".into(),
+                permission: Some(Permission::Always),
+                favorite: true,
+                last_out: now - 3_600,
+                last_in: now - 7_200,
+                ..desk(21, "Laptop", "Windows 11", "100.64.0.20")
             },
             Desk {
-                address: "100.64.0.31:28326".into(),
-                name: "render-box".into(),
-                fingerprint: key(42),
-                first_seen: 1_793_500_000,
+                last_out: now - 3 * 86_400,
+                ..desk(42, "render-box", "Ubuntu 22.04", "100.64.0.31")
             },
             Desk {
-                address: "living-room:28326".into(),
-                name: "living-room".into(),
-                fingerprint: key(63),
-                first_seen: 1_794_000_000,
+                favorite: true,
+                last_out: now - 8 * 86_400,
+                permission: Some(Permission::Ask),
+                last_in: now - 86_400,
+                ..desk(63, "Living room", "macOS 15", "100.64.0.52")
+            },
+            Desk {
+                connect_to: None,
+                permission: Some(Permission::Never),
+                tried_in: now - 4 * 86_400,
+                ..desk(84, "OFFICE-PC-7", "Windows 10", "100.64.0.44")
             },
         ],
-        trusted: vec![TrustedDesk {
-            fingerprint: key(21),
-            name: "studio-laptop".into(),
-            last_address: "100.64.0.20".into(),
-        }],
         online: HashMap::from([
             ("100.64.0.20:28326".to_string(), true),
             ("100.64.0.31:28326".to_string(), false),
@@ -1370,6 +1768,7 @@ pub fn sample_state() -> AppState {
         dial: Dial::Idle,
         questions: VecDeque::new(),
         settings: Settings::default(),
+        now,
     }
 }
 
@@ -1382,26 +1781,75 @@ mod tests {
         let rows = key_rows(&"0123456789abcdef".repeat(4));
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0], "0123 4567 89AB CDEF");
-        assert_eq!(key_start("abcd"), "ABCD");
+        assert_eq!(key_start(&"ab".repeat(32)), "ABAB ABAB ABAB ABAB");
     }
 
     #[test]
     fn dates() {
         assert_eq!(date(0), "1970-01-01");
-        assert_eq!(date(951_782_400), "2000-02-29");
-        assert_eq!(date(1_794_528_000), "2026-11-13");
+        assert_eq!(date(1_793_000_000), "2026-10-26");
+        assert_eq!(shown_address("100.64.0.20:28326"), "100.64.0.20");
+        assert_eq!(shown_address("100.64.0.20:7171"), "100.64.0.20:7171");
+        let now = 1_795_003_200;
+        assert_eq!(day(now, now - 60), "today");
+        assert_eq!(day(now, now - 86_400), "yesterday");
+        assert_eq!(day(now, 1_793_000_000), "on 2026-10-26");
     }
 
     #[test]
     fn settings_file_tolerates_missing_and_unknown_fields() {
-        let s: Settings = serde_json::from_str(r#"{"max_fps":60,"later":true}"#).unwrap();
+        // A file from 0.13, with a field that is gone and without the new ones.
+        let s: Settings =
+            serde_json::from_str(r#"{"max_fps":60,"allow_incoming":false,"pointer":"native"}"#)
+                .unwrap();
         assert_eq!(s.max_fps, 60);
-        assert_eq!(s.keyboard, KeyboardMode::Remote);
+        assert_eq!(s.pointer, PointerMode::Desk);
+        assert!(s.start_on_boot && s.idle_minutes == 30 && !s.refuse_new);
         let text = serde_json::to_string(&Settings::default()).unwrap();
-        assert!(text.contains(r#""keyboard":"remote""#), "{text}");
         assert_eq!(
             serde_json::from_str::<Settings>(&text).unwrap(),
             Settings::default()
         );
+    }
+
+    #[test]
+    fn unsaved_changes_are_counted_per_setting() {
+        let saved = Settings::default();
+        assert!(unsaved(&saved, &saved).is_empty());
+        let shown = Settings {
+            max_fps: 60,
+            latency_limit_ms: 80,
+            let_sound: false,
+            refuse_new: true,
+            ..saved.clone()
+        };
+        assert_eq!(
+            unsaved(&saved, &shown),
+            [Item::Permission, Item::Actions, Item::Limits]
+        );
+        // Resetting Outgoing keeps what Incoming and General were set to.
+        let reset = shown.with_outgoing_reset();
+        assert_eq!(unsaved(&saved, &reset), [Item::Permission, Item::Actions]);
+        // Every setting has a place in the menu.
+        let listed: Vec<Item> = MENU
+            .iter()
+            .flat_map(|(_, items)| items.iter().map(|i| i.0))
+            .collect();
+        for item in unsaved(
+            &saved,
+            &Settings {
+                start_on_boot: false,
+                idle_minutes: 0,
+                keyboard: KeyboardMode::Local,
+                pointer: PointerMode::Host,
+                sound: false,
+                clipboard: false,
+                reconnect: false,
+                allow_scale: true,
+                ..shown
+            },
+        ) {
+            assert!(listed.contains(&item), "{item:?} is missing from the menu");
+        }
     }
 }

@@ -15,10 +15,8 @@ use crate::{Sessions, accept_loop, describe, endpoint, host_config_with, open_li
 use anyhow::{Context, Result};
 use illum_core::protocol::{ControlMsg, DEFAULT_PORT};
 use illum_net::session::{connect, normalize_target};
-use illum_net::{Answer, Endpoint, Prompt, PromptKind, PromptRequest, bind};
-use illum_ui::app::{
-    AppState, Command, Desk, Dial, Incoming, Question, QuestionKind, Settings, TrustedDesk, Verdict,
-};
+use illum_net::{Answer, Endpoint, Prompt, PromptRequest, bind};
+use illum_ui::app::{AppState, Command, Desk, Dial, Incoming, Question, Settings, Verdict};
 use illum_ui::app_window::AppWindow;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -129,10 +127,6 @@ fn window_prompt(state: Shared, answers: Answers, waker: Wake) -> Prompt {
                 .questions
                 .push_back(Question {
                     id,
-                    kind: match req.kind {
-                        PromptKind::TrustHost => QuestionKind::TrustHost,
-                        PromptKind::PairPeer => QuestionKind::AcceptDesk,
-                    },
                     name: if req.name.is_empty() {
                         "this desk".to_string()
                     } else {
@@ -287,15 +281,9 @@ impl Backend {
             .spawn(async move { this.refresh_desks().await });
         let this = self.clone();
         self.runtime.spawn(async move { this.watch_desks().await });
-        if self
-            .state
-            .lock()
-            .expect("app state")
-            .settings
-            .allow_incoming
-        {
-            self.set_incoming(true);
-        }
+        // An open app listens: whether a desk gets in is its permission's matter, and not
+        // being reachable at all is closing the app (architecture §14).
+        self.set_incoming(true);
     }
 
     fn update(&self, change: impl FnOnce(&mut AppState)) {
@@ -303,34 +291,21 @@ impl Backend {
         (self.waker)(false);
     }
 
-    /// Copies the trust store's two lists into what the window shows.
+    /// Puts the desks the trust store knows into what the window shows: one entry per desk,
+    /// whichever way it was met.
     async fn refresh_desks(&self) {
-        let (desks, trusted) = {
+        let desks = {
             let mut store = self.ep.store.lock().await;
             store.refresh();
-            let desks = store
-                .known_hosts()
-                .map(|(address, host)| Desk {
-                    address: address.clone(),
-                    name: host.name.clone(),
-                    fingerprint: host.fingerprint.clone(),
-                    first_seen: host.first_seen,
-                })
-                .collect();
-            let trusted = store
-                .paired_peers()
-                .map(|(fingerprint, peer)| TrustedDesk {
-                    fingerprint: fingerprint.clone(),
-                    name: peer.name.clone(),
-                    last_address: peer.last_address.clone(),
-                })
-                .collect();
-            (desks, trusted)
+            desk_list(&store)
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         let new_desks = self.state.lock().expect("app state").desks != desks;
         self.update(|s| {
             s.desks = desks;
-            s.trusted = trusted;
+            s.now = now;
         });
         if new_desks {
             self.desks_changed.notify_one();
@@ -359,18 +334,38 @@ impl Backend {
                     });
                 }
             }
-            Command::ForgetDesk(address) => {
+            Command::ForgetDesk(fingerprint) => {
                 self.runtime.spawn(async move {
-                    if let Err(e) = this.ep.store.lock().await.forget_host(&address) {
-                        tracing::warn!(target: "app", "Could not forget {address}: {e}");
+                    if let Err(e) = this.ep.store.lock().await.forget_desk(&fingerprint) {
+                        tracing::warn!(target: "app", "Could not forget a desk: {e}");
                     }
                     this.refresh_desks().await;
                 });
             }
-            Command::ForgetTrusted(fingerprint) => {
+            Command::Favorite { fingerprint, on } => {
                 self.runtime.spawn(async move {
-                    if let Err(e) = this.ep.store.lock().await.forget_peer(&fingerprint) {
-                        tracing::warn!(target: "app", "Could not forget a trusted desk: {e}");
+                    if let Err(e) = this.ep.store.lock().await.set_favorite(&fingerprint, on) {
+                        tracing::warn!(target: "app", "Could not star a desk: {e}");
+                    }
+                    this.refresh_desks().await;
+                });
+            }
+            Command::EditDesk {
+                fingerprint,
+                name,
+                permission,
+                favorite,
+            } => {
+                self.runtime.spawn(async move {
+                    let saved = {
+                        let mut store = this.ep.store.lock().await;
+                        store
+                            .rename(&fingerprint, &name)
+                            .and_then(|_| store.set_permission(&fingerprint, permission))
+                            .and_then(|_| store.set_favorite(&fingerprint, favorite))
+                    };
+                    if let Err(e) = saved {
+                        tracing::warn!(target: "app", "Could not save a desk: {e}");
                     }
                     this.refresh_desks().await;
                 });
@@ -391,7 +386,6 @@ impl Backend {
                 if let Err(e) = saved {
                     tracing::warn!(target: "app", "Settings not saved: {e:#}");
                 }
-                let incoming = settings.allow_incoming;
                 // What a connected desk may do is part of what is listened with.
                 let offer_changed = (
                     settings.let_control,
@@ -412,8 +406,8 @@ impl Backend {
                     });
                 }
                 self.update(|s| s.settings = settings);
-                if incoming != was.allow_incoming || (incoming && offer_changed) {
-                    self.set_incoming(incoming);
+                if offer_changed {
+                    self.set_incoming(true);
                 }
             }
             Command::EndSession(name) => match &self.hosting.control {
@@ -446,7 +440,11 @@ impl Backend {
         loop {
             let addresses: Vec<String> = {
                 let state = self.state.lock().expect("app state");
-                state.desks.iter().map(|d| d.address.clone()).collect()
+                state
+                    .desks
+                    .iter()
+                    .filter_map(|d| d.connect_to.clone())
+                    .collect()
             };
             let knocks = addresses.into_iter().map(|address| {
                 tokio::spawn(async move {
@@ -674,6 +672,72 @@ impl Backend {
     }
 }
 
+/// The desks a trust store knows, one entry each, by key: its entry if it has one, and what
+/// the older lists (hosts by address, paired peers) say about it.
+fn desk_list(store: &illum_core::store::TrustStore) -> Vec<Desk> {
+    let mut keys: Vec<&String> = store.desks().map(|(key, _)| key).collect();
+    keys.extend(store.paired_peers().map(|(key, _)| key));
+    let hosts: Vec<_> = store.known_hosts().collect();
+    keys.extend(hosts.iter().map(|(_, host)| &host.fingerprint));
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .map(|key| {
+            let info = store.desk(key).cloned().unwrap_or_default();
+            let host = hosts.iter().find(|(_, host)| host.fingerprint == *key);
+            let peer = store.paired_peer(key);
+            let machine = [
+                info.machine.as_str(),
+                host.map_or("", |(_, h)| h.name.as_str()),
+                peer.map_or("", |p| p.name.as_str()),
+            ]
+            .into_iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or("unnamed desk")
+            .to_string();
+            let without_port = |address: &str| {
+                address
+                    .parse::<std::net::SocketAddr>()
+                    .map_or_else(|_| address.to_string(), |a| a.ip().to_string())
+            };
+            let address = if !info.address.is_empty() {
+                info.address.clone()
+            } else if let Some((address, _)) = host {
+                without_port(address)
+            } else {
+                peer.map(|p| without_port(&p.last_address))
+                    .unwrap_or_default()
+            };
+            Desk {
+                fingerprint: key.clone(),
+                name: if info.name.is_empty() {
+                    machine
+                } else {
+                    info.name.clone()
+                },
+                own_name: info.name.clone(),
+                os: info.os.clone(),
+                address,
+                connect_to: host.map(|(address, _)| (*address).clone()),
+                permission: store.permission(key),
+                favorite: info.favorite,
+                // A host met before desks had entries counts from when it was first met.
+                last_out: if info.last_out > 0 {
+                    info.last_out
+                } else {
+                    host.map_or(0, |(_, h)| h.first_seen)
+                },
+                last_in: if info.last_in > 0 {
+                    info.last_in
+                } else {
+                    peer.map_or(0, |p| p.first_seen)
+                },
+                tried_in: info.tried_in,
+            }
+        })
+        .collect()
+}
+
 /// The plain words for a desk that did not answer at all: off, asleep, not accepting, or
 /// not there. `None` for every other failure, which has words of its own.
 fn no_answer(err: &illum_net::NetError, shown: &str) -> Option<String> {
@@ -741,7 +805,6 @@ pub fn run_ask(name: &str, address: &str, fingerprint: &str, os: &str) -> std::p
     let mut state = AppState::default();
     state.questions.push_back(Question {
         id: 1,
-        kind: QuestionKind::AcceptDesk,
         name: name.to_string(),
         address: address.to_string(),
         fingerprint: fingerprint.to_string(),
@@ -812,7 +875,7 @@ mod tests {
         assert_eq!(load_settings(&home), Settings::default(), "no file yet");
         let chosen = Settings {
             max_fps: 60,
-            allow_incoming: false,
+            refuse_new: true,
             ..Settings::default()
         };
         save_settings(&home, &chosen).unwrap();
@@ -837,7 +900,7 @@ mod tests {
             clipboard: false,
             keyboard: illum_ui::KeyboardMode::Auto,
             pointer: illum_ui::PointerMode::Host,
-            allow_incoming: true,
+            start_on_boot: false,
             let_control: false,
             let_sound: false,
             let_clipboard: false,
@@ -962,7 +1025,6 @@ mod tests {
         let asked = wait("the host is asked to accept the viewer", &host, |s| {
             s.questions.front().cloned()
         });
-        assert_eq!(asked.kind, QuestionKind::AcceptDesk);
         assert_eq!(asked.name, "viewer");
         assert_eq!(asked.fingerprint, viewer.state.lock().unwrap().fingerprint);
         host.command(Command::Answer {
@@ -982,13 +1044,37 @@ mod tests {
             (s.online.get(&target) == Some(&true)).then_some(())
         });
         assert_eq!(
-            (desks[0].name.as_str(), desks[0].address.as_str()),
-            ("host", target.as_str())
+            (desks[0].name.as_str(), desks[0].connect_to.as_deref()),
+            ("host", Some(target.as_str()))
         );
-        let trusted = wait("the viewer is among the host's trusted desks", &host, |s| {
-            (!s.trusted.is_empty()).then(|| s.trusted.clone())
+        assert_eq!(desks[0].address, "127.0.0.1", "shown without its port");
+        assert!(!desks[0].os.is_empty() && desks[0].last_out > 0);
+        let trusted = wait("the viewer is among the host's desks, let in", &host, |s| {
+            s.desks
+                .iter()
+                .find(|d| d.permission == Some(illum_ui::app::Permission::Always))
+                .cloned()
         });
-        assert_eq!(trusted[0].name, "viewer");
+        assert_eq!(trusted.name, "viewer");
+        assert!(
+            trusted.connect_to.is_none(),
+            "it came here; the host never dialled it"
+        );
+        assert!(trusted.last_in > 0);
+
+        // The person's own name, a star and a permission for one desk.
+        host.command(Command::EditDesk {
+            fingerprint: trusted.fingerprint.clone(),
+            name: "My viewer".into(),
+            permission: Some(illum_ui::app::Permission::Always),
+            favorite: true,
+        });
+        wait("the desk shows as edited", &host, |s| {
+            s.desks
+                .iter()
+                .any(|d| d.name == "My viewer" && d.favorite)
+                .then_some(())
+        });
         wait("no question is left on either screen", &host, |s| {
             s.questions.is_empty().then_some(())
         });
@@ -1032,9 +1118,9 @@ mod tests {
         );
 
         // The host forgets the viewer, is asked again, and declines.
-        host.command(Command::ForgetTrusted(trusted[0].fingerprint.clone()));
+        host.command(Command::ForgetDesk(trusted.fingerprint.clone()));
         wait("the host forgot the viewer", &host, |s| {
-            s.trusted.is_empty().then_some(())
+            s.desks.is_empty().then_some(())
         });
         connect_to(&viewer, &target);
         let asked = wait("the host is asked again", &host, |s| {
@@ -1050,18 +1136,17 @@ mod tests {
         assert_eq!(launches.lock().unwrap().len(), 2);
 
         // The viewer forgets the host.
-        viewer.command(Command::ForgetDesk(target.clone()));
+        viewer.command(Command::ForgetDesk(desks[0].fingerprint.clone()));
         wait("the viewer forgot the host", &viewer, |s| {
             s.desks.is_empty().then_some(())
         });
 
-        // Turning incoming off stops the listening.
+        // A setting is saved as it is changed.
         host.command(Command::SaveSettings(Settings {
-            allow_incoming: false,
+            refuse_new: true,
             ..Settings::default()
         }));
-        assert_eq!(host.state.lock().unwrap().incoming, Incoming::Off);
-        assert!(!load_settings(&host.home).allow_incoming, "saved");
+        assert!(load_settings(&host.home).refuse_new, "saved");
     }
 
     /// What the person at a desk decides about a desk that reaches it: in for this time
@@ -1118,7 +1203,15 @@ mod tests {
         wait("the guest is shown as connected", &host, |s| {
             (s.sessions == ["guest"]).then_some(())
         });
-        assert!(host.state.lock().unwrap().trusted.is_empty());
+        assert!(
+            host.state
+                .lock()
+                .unwrap()
+                .desks
+                .iter()
+                .all(|d| d.permission.is_none()),
+            "this time only: no permission of its own"
+        );
 
         // Sent away: it is told goodbye, so it does not come back by itself.
         // As in a real session, it is in the middle of sending when that happens: the
@@ -1183,24 +1276,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         };
 
-        // Incoming off and on again while that desk is connected: it stays connected, and
-        // the port, which the listening before held a moment ago, is listened on anew.
-        let quiet = Settings {
-            let_sound: false,
-            ..Settings::default()
+        // Another change while that desk is connected, so the host listens anew: the desk
+        // stays connected, and the port, held a moment ago, is listened on again.
+        host.command(Command::SaveSettings(Settings::default()));
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        let second = loop {
+            if let Ok(Ok(conn)) = runtime.block_on(dial()) {
+                let offered = conn.peer_hello.clone().unwrap().capabilities;
+                if offered.iter().any(|c| c == "audio") {
+                    break conn;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "sound is not offered again"
+            );
+            std::thread::sleep(Duration::from_millis(50));
         };
-        host.command(Command::SaveSettings(Settings {
-            allow_incoming: false,
-            ..quiet.clone()
-        }));
-        assert_eq!(host.state.lock().unwrap().incoming, Incoming::Off);
-        host.command(Command::SaveSettings(quiet));
-        wait("the host listens again", &host, |s| match &s.incoming {
-            Incoming::Listening => Some(()),
-            Incoming::Failed(why) => panic!("the host cannot listen again: {why}"),
-            Incoming::Off => None,
-        });
-        let second = runtime.block_on(dial()).unwrap().unwrap();
+        if let Incoming::Failed(why) = &host.state.lock().unwrap().incoming {
+            panic!("the host cannot listen again: {why}");
+        }
         wait("both are shown as connected", &host, |s| {
             (s.sessions == ["guest", "guest"]).then_some(())
         });
