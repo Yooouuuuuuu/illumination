@@ -1231,13 +1231,14 @@ Crates are added only when a milestone needs them.
   (IP only, with "View only" and "Mute its sound" on its heading line), and **Desks**. This
   desk's key is no longer here; it is in Settings.
 - **Desks is one list** in three tabs, and a desk can be under several: Favorites (the
-  starred ones), Recent (connected to, newest first), Came in (connected here or tried to).
+  ones marked so), Recent (connected to, newest first), Came in (connected here or tried to).
   It opens on Favorites when there are any, else on Recent. A card says the desk's system,
   the person's name for it (or the machine's), online or offline, its address, when, and
   its permission if it has one of its own. "Edit" opens a dialog for the name, the
-  permission (default, always, ask, never), the star, and Forget.
+  permission (default, always, ask, never), and Forget (the favourite moved to the card's
+  menu in v0.14.7).
 - **Settings** has a menu on the left listing every setting under General, Incoming,
-  Outgoing and About; a click brings the setting into view and a dot marks one that is
+  Outgoing and About (from v0.14.7: General, Connection, Incoming, Trusted desks, About); a click brings the setting into view and a dot marks one that is
   changed and not saved. Nothing applies until **Save**, which sits with Discard in the
   top bar, always in sight; leaving with changes asks. Outgoing has "Reset to defaults".
 - **Colours carry one meaning each**: green is open or allowed (ready, online, permission
@@ -1353,6 +1354,24 @@ app is one thing that is either running, with an icon in the tray, or not runnin
   - *Settings' menu* lists the four sections only, with the dot of an unsaved change on the
     section. The state at the top of the main window is smaller than the button beside it,
     and the two cards of the first row are as tall as their contents.
+- **Second round, drawn first on a design canvas (v0.14.7).**
+  - *The card of a desk* is in two parts. Above: system and online (a dot and a word),
+    name, address, when. Below, on a warm grey strip: the desk's own permission in words on
+    its colour ("Default permission" when it has none) and the one button, whose menu is
+    Connect, Edit, and add to or remove from the favourites. The mark of v0.14.6 needed
+    hovering to be read; words do not.
+  - *A favourite is a cream card*, not a star: the star was a second small target on a
+    card that is itself the thing to click. Pointing at a card thickens its outline, since
+    a fill would now read as a favourite. Edit no longer has the favourite.
+  - *This desk* says what a new desk meets, under the address: the setting for new desks in
+    words, with its mark, and how many desks are always allowed. A click opens Settings at
+    Incoming. Beside the address, a button copies it. The other addresses of this desk (its
+    IPv6 one) are no longer shown; the first is the one to give out.
+  - *Settings*: "Outgoing" is "Connection" and comes second (what a person changes most:
+    the limits of a connection they make). **Trusted desks** is a section of its own after
+    Incoming: the desks with "Always allow", each with Remove, which gives the desk the
+    default again at once (it is the desk's own entry that changes, not a setting that
+    waits for Save).
 
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads

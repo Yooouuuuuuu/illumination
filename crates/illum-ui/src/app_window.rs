@@ -716,7 +716,7 @@ mod tests {
                 "settings",
                 HomeUi::on_settings(),
                 sample_state(),
-                (1120.0, 1500.0),
+                (1120.0, 1800.0),
             ),
             ("accept", HomeUi::default(), with_question, (1120.0, 760.0)),
             (

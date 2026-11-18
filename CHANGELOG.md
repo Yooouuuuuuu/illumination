@@ -11,6 +11,34 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.7] - 2026-11-18
+
+Not released.
+
+### Added
+
+- **Trusted desks**, a section of Settings: the desks that are always allowed
+  to connect here, each with Remove (which puts it back on the default).
+- **This desk** says what happens to a new desk that connects ("New desks are
+  asked first", and how many desks are always allowed); a click opens Settings
+  at Incoming. A button beside the address copies it.
+
+### Changed
+
+- **Desk cards** have a strip at the bottom with the desk's own permission in
+  words ("Always allow", "Ask", "Never allow", or "Default permission") and the
+  button for what can be done. Online and offline are a dot and a word.
+  Pointing at a card thickens its outline.
+- **Favorites**: a favorite's card is cream. The star is gone from the card;
+  "Add to favorites" and "Remove from favorites" are in the card's menu, and no
+  longer in Edit.
+- **Settings**: "Outgoing" is now "Connection" and comes before Incoming.
+
+### Removed
+
+- The second address line ("also ...", this desk's IPv6 address) under This
+  desk.
+
 ## [0.14.6] - 2026-11-18
 
 Not released.
