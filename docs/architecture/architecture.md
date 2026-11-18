@@ -1372,6 +1372,14 @@ app is one thing that is either running, with an icon in the tray, or not runnin
     Incoming: the desks with "Always allow", each with Remove, which gives the desk the
     default again at once (it is the desk's own entry that changes, not a setting that
     waits for Save).
+- **One window per desk (v0.14.8).** Asking for a desk that already has a session window
+  open from this app brings that window to the front, restored if it was minimized, and no
+  second one opens. The desk is recognised by the address dialled (the card's, or the one
+  typed); the same desk reached by another address still opens a second window. The session
+  is a process of its own, so the app says it on that process's standard input (a line,
+  "raise"), which works the same on every system; the session's window then asks its
+  system for the front. Nothing is said in the main window: the person asked for the desk
+  and is taken to it.
 
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads

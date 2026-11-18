@@ -363,6 +363,9 @@ pub enum UiEvent {
     /// The program came to the front (true) or left it, as the keyboard grab's watch saw it
     /// (`ViewerOptions::front_watched`).
     Front(bool),
+    /// Come to the front, out of the taskbar if need be: the app was asked for this desk
+    /// again and it is already open here.
+    Raise,
 }
 
 /// Lets the network side wake or close the window from any thread.
@@ -1920,6 +1923,12 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::ToggleView => self.toggle_view(),
             UiEvent::Front(front) if self.options.front_watched => self.focus_changed(front),
             UiEvent::Front(_) => {}
+            UiEvent::Raise => {
+                if let Some(s) = &self.window {
+                    s.window.set_minimized(false);
+                    s.window.focus_window();
+                }
+            }
             UiEvent::Exit => event_loop.exit(),
         }
     }

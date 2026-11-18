@@ -1355,6 +1355,22 @@ fn run_view(
 
     let window = ViewerWindow::new().map_err(anyhow::Error::msg)?;
     let waker = window.waker();
+    // The app that opened this session says "raise" on our standard input when the person
+    // asks for this desk again: the window comes to the front instead of a second one
+    // opening. Started any other way, the input ends or says nothing, and so does this.
+    {
+        let waker = waker.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines() {
+                match line {
+                    Ok(line) if line.trim() == "raise" => waker.wake(UiEvent::Raise),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+    }
     let shared: Shared = Arc::default();
     #[cfg(windows)]
     {

@@ -183,8 +183,9 @@ struct Backend {
     sessions: Sessions,
     /// Rung when the list of desks changed, so the new one's "online" is looked at now.
     desks_changed: tokio::sync::Notify,
-    /// The session windows this app opened, to end them when it closes.
-    opened: Mutex<Vec<Arc<Mutex<std::process::Child>>>>,
+    /// The session windows this app opened, each with the address it went to: to bring one
+    /// to the front when that desk is asked for again, and to end them when the app closes.
+    opened: Mutex<Vec<(String, Arc<Mutex<std::process::Child>>)>>,
 }
 
 /// The command line of a session: `view <target> <flags>`, then `--home` when this app was
@@ -211,7 +212,8 @@ fn session_process(home_flag: Option<PathBuf>) -> Launch {
         let mut command = std::process::Command::new(exe);
         command.args(session_args(home_flag.as_deref(), target, flags));
         command
-            .stdin(std::process::Stdio::null())
+            // Ours to write on: "raise" brings the session's window to the front.
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         #[cfg(windows)]
@@ -657,6 +659,10 @@ impl Backend {
             });
             return;
         }
+        // Already open from here: that window comes to the front, and no second one opens.
+        if self.raise(&address) {
+            return;
+        }
         {
             let mut state = self.state.lock().expect("app state");
             if matches!(state.dial, Dial::Dialing(_)) {
@@ -681,7 +687,7 @@ impl Backend {
                 match (self.launch)(&target, view_flags(&settings, view_only, mute)) {
                     Ok(child) => {
                         if let Some(child) = child {
-                            self.watch_session(child, shown.clone());
+                            self.watch_session(child, address.clone(), shown.clone());
                         }
                         Dial::Idle
                     }
@@ -698,7 +704,7 @@ impl Backend {
     /// app is opened again (architecture §14).
     fn quit(self: &Arc<Self>) {
         tracing::info!(target: "app", "Closing: ending every connection.");
-        for child in self.opened.lock().expect("opened sessions").drain(..) {
+        for (_, child) in self.opened.lock().expect("opened sessions").drain(..) {
             let _ = child.lock().expect("session window").kill();
         }
         let names = self.state.lock().expect("app state").sessions.clone();
@@ -722,9 +728,27 @@ impl Backend {
         }
     }
 
+    /// Asks the session window open to `address` to come to the front. False when there is
+    /// none (or it is on its way out), and then the desk is dialled as usual.
+    fn raise(&self, address: &str) -> bool {
+        use std::io::Write;
+        let opened = self.opened.lock().expect("opened sessions");
+        opened
+            .iter()
+            .filter(|(to, _)| to == address)
+            .any(|(_, child)| {
+                let mut child = child.lock().expect("session window");
+                matches!(child.try_wait(), Ok(None))
+                    && child
+                        .stdin
+                        .as_mut()
+                        .is_some_and(|input| input.write_all(b"raise\n").is_ok())
+            })
+    }
+
     /// Says so in the window if a session ends with an error within its first moments (it could
     /// not open its window, or the host refused it after all). Its own log has the details.
-    fn watch_session(self: &Arc<Self>, child: std::process::Child, shown: String) {
+    fn watch_session(self: &Arc<Self>, child: std::process::Child, address: String, shown: String) {
         let this = self.clone();
         let started = std::time::Instant::now();
         let log = crate::own_folder(&self.home)
@@ -735,7 +759,7 @@ impl Backend {
         let child = Arc::new(Mutex::new(child));
         {
             let mut opened = self.opened.lock().expect("opened sessions");
-            opened.push(child.clone());
+            opened.push((address, child.clone()));
             let count = opened.len();
             self.update(|s| s.outgoing = count);
         }
@@ -750,7 +774,7 @@ impl Backend {
             };
             {
                 let mut opened = this.opened.lock().expect("opened sessions");
-                opened.retain(|other| !Arc::ptr_eq(other, &child));
+                opened.retain(|(_, other)| !Arc::ptr_eq(other, &child));
                 let count = opened.len();
                 this.update(|s| s.outgoing = count);
             }

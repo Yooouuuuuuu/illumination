@@ -11,6 +11,19 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
+## [0.14.8] - 2026-11-18
+
+Not released.
+
+### Changed
+
+- **Connecting to a desk that is already open** brings its session window to
+  the front (out of the taskbar if it was minimized) instead of opening a
+  second one. The desk is recognised by the address you connect to.
+- **Max bitrate and Delay limit** (Settings, Connection) are typed: a click
+  puts the cursor in the field, dragging no longer changes the number, and the
+  pointer over them is the text pointer.
+
 ## [0.14.7] - 2026-11-18
 
 Not released.

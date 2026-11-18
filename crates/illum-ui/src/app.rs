@@ -1422,14 +1422,16 @@ impl HomeUi {
                 .num_columns(2)
                 .spacing(vec2(16.0, 10.0))
                 .show(ui, |ui| {
+                    // The two numbers are typed: no dragging, and the pointer says so.
                     label(ui, "Max bitrate");
                     ui.add(
                         egui::DragValue::new(&mut s.max_bitrate_mbps)
                             .range(1.0..=200.0)
-                            .speed(0.5)
+                            .speed(0.0)
                             .max_decimals(1)
                             .suffix(" Mb/s"),
-                    );
+                    )
+                    .on_hover_cursor(egui::CursorIcon::Text);
                     ui.end_row();
                     label(ui, "Max frame rate");
                     egui::ComboBox::from_id_salt("fps")
@@ -1444,8 +1446,10 @@ impl HomeUi {
                     ui.add(
                         egui::DragValue::new(&mut s.latency_limit_ms)
                             .range(10..=500)
+                            .speed(0.0)
                             .suffix(" ms"),
-                    );
+                    )
+                    .on_hover_cursor(egui::CursorIcon::Text);
                     ui.end_row();
                 });
             self.here(ui, Item::Sound);
