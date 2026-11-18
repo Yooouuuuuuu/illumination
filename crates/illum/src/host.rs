@@ -44,8 +44,11 @@ use std::time::{Duration, Instant};
 
 /// How often the capture thread wakes up even when the screen is still.
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// The host's own ceiling when the viewer asks for none (the top rung at 1080p60).
+/// The top of the ladder when the viewer asks for none (the top rung at 1080p60).
 pub const DEFAULT_MAX_BITRATE_KBPS: u32 = 20_000;
+/// The most a viewer may ask for: what Settings offers, for a link that carries it. The
+/// ladder under a higher top is longer, and still reaches ordinary rates.
+pub const MAX_BITRATE_KBPS: u32 = 200_000;
 /// How long the host waits for the viewer's first punch datagram before giving up on UDP.
 const PUNCH_DEADLINE: Duration = Duration::from_secs(5);
 /// A viewer's keyframe request is honoured at most this often: two a second however many
@@ -76,7 +79,7 @@ pub struct StreamSettings {
 }
 
 impl StreamSettings {
-    /// Zero means "the default"; the host caps the bitrate at its own ceiling.
+    /// Zero means "the default"; the host caps what is asked for at `MAX_BITRATE_KBPS`.
     #[allow(clippy::too_many_arguments)] // mirrors the ScreenStart fields
     pub fn from_request(
         max_bitrate_kbps: u32,
@@ -92,7 +95,7 @@ impl StreamSettings {
         let kbps = if max_bitrate_kbps == 0 {
             DEFAULT_MAX_BITRATE_KBPS
         } else {
-            max_bitrate_kbps.min(DEFAULT_MAX_BITRATE_KBPS)
+            max_bitrate_kbps.min(MAX_BITRATE_KBPS)
         };
         let fec_floor = if fec_min == 0 {
             DEFAULT_FEC_FLOOR

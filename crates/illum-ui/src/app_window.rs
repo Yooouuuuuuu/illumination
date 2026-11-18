@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The window that shows [`crate::app`]: `winit` for the window, `egui` for the widgets, `wgpu`
-//! to draw them — the same window and GPU stack as the viewer (architecture §14). It redraws
+//! to draw them — the same window and GPU stack as the viewer. It redraws
 //! only when something happened: an input event, an animation egui asked for, or a wake from
 //! the rest of the program after it changed the [`AppState`].
 
@@ -499,6 +499,11 @@ impl ApplicationHandler<Wake> for App {
             Wake::Tray(TrayAction::Quit) => self.close_requested(),
         }
         self.tell_tray();
+        // An update's installer runs: it replaces this program, which must not be running.
+        // Not a Quit, which would also stop the service the installer is stopping.
+        if self.state.lock().expect("app state").update.closing {
+            self.exit = true;
+        }
         if let Some(shown) = &self.shown {
             shown.window.request_redraw();
         }
@@ -691,6 +696,27 @@ mod tests {
             },
         ];
         connected.outgoing = 1;
+        let mut with_update = sample_state();
+        with_update.update = crate::app::Updates {
+            available: Some(crate::app::NewRelease {
+                version: "0.15.1".into(),
+                notes: "### Fixed\n\n- **Connecting to a desk that is already open** brings its\n  session window to the front instead of opening a second one.\n- The update check says when it could not reach GitHub.\n\n### Changed\n\n- **Max bitrate** goes up to 200 Mb/s.\n".into(),
+            }),
+            checked: crate::app::Checked::Done(with_update.now),
+            installed: true,
+            ..crate::app::Updates::default()
+        };
+        let mut update_busy = with_update.clone();
+        update_busy.sessions = vec!["Laptop".into()];
+        update_busy.outgoing = 1;
+        let mut downloading = with_update.clone();
+        downloading.update.progress = crate::app::Progress::Downloading(Some(42));
+        let mut not_installed = with_update.clone();
+        not_installed.update.installed = false;
+        let mut up_to_date = sample_state();
+        up_to_date.update.checked = crate::app::Checked::Done(up_to_date.now);
+        let mut check_failed = sample_state();
+        check_failed.update.checked = crate::app::Checked::Failed("could not reach GitHub".into());
         let screens = [
             ("home", HomeUi::default(), sample_state(), (1120.0, 760.0)),
             (
@@ -730,6 +756,60 @@ mod tests {
                 HomeUi::editing(&sample_state().desks[0]),
                 sample_state(),
                 (1120.0, 760.0),
+            ),
+            (
+                "home-update",
+                HomeUi::default(),
+                with_update.clone(),
+                (1120.0, 760.0),
+            ),
+            (
+                "home-downloading",
+                HomeUi::default(),
+                downloading.clone(),
+                (1120.0, 760.0),
+            ),
+            (
+                "update",
+                HomeUi::updating(),
+                with_update.clone(),
+                (1120.0, 760.0),
+            ),
+            (
+                "update-busy",
+                HomeUi::updating(),
+                update_busy,
+                (1120.0, 760.0),
+            ),
+            (
+                "update-downloading",
+                HomeUi::updating(),
+                downloading,
+                (1120.0, 760.0),
+            ),
+            (
+                "update-not-installed",
+                HomeUi::updating(),
+                not_installed,
+                (1120.0, 760.0),
+            ),
+            (
+                "settings-update",
+                HomeUi::on_settings(),
+                with_update,
+                (1120.0, 1800.0),
+            ),
+            (
+                "settings-up-to-date",
+                HomeUi::on_settings(),
+                up_to_date,
+                (1120.0, 1800.0),
+            ),
+            (
+                "settings-check-failed",
+                HomeUi::on_settings(),
+                check_failed,
+                (1120.0, 1800.0),
             ),
         ];
         for (name, mut home, state, points) in screens {

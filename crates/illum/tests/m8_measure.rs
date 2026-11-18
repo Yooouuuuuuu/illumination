@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Measurement mode over loopback (docs/testing/measure.md): a fixed session streams at exactly
+//! Measurement mode over loopback: a fixed session streams at exactly
 //! what was asked and never moves, the host's per-second stats arrive, and the recorder keeps a
 //! record per second with them.
 

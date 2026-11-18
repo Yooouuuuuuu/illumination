@@ -6,10 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Entries record *what shipped*, kept simple. The *why* behind a design lives in
-the docs: [docs/architecture/architecture.md](docs/architecture/architecture.md)
-and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
+the docs: the design documents and the decision ledger in
+[docs/README.md](docs/README.md).
 
 ## [Unreleased]
+
+## [0.15.0] - 2026-11-19
+
+Released: the first release. It also ships 0.13.0 to 0.14.8, which were not
+released on their own.
+
+### Added
+
+- **Updates.** The app looks for a newer release when it starts and once a
+  day, and Settings, About has **Check for updates**. When there is one,
+  **Update to X** appears in the top bar. Its dialog shows the release's notes;
+  **Update now** downloads the installer, checks its signature, and installs
+  it with no administrator prompt. Illumination closes and opens again with
+  its desks and settings. Nothing is downloaded before **Update now**, and
+  updating waits while a desk is connected or a session window is open.
+- `illum-sign`, which makes the update key and signs a release
+  (`scripts/build-installer.ps1 -Release` writes the installer, its signature
+  and `latest.json`).
+
+### Fixed
+
+- **Max bitrate** above 20 Mb/s was held at 20 Mb/s by the host. It now goes up
+  to the 200 Mb/s that Settings offers, and the connection still steps down to
+  ordinary rates when the link cannot carry it.
+- The message when the Illumination service is not running says how to start
+  it again.
+- The command line's help named the old port, 7171.
+
+### Changed
+
+- The README is shorter, with pictures, and the technical documents in
+  [docs/](docs/README.md) were reorganised.
 
 ## [0.14.8] - 2026-11-18
 

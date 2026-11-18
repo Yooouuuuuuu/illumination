@@ -66,7 +66,7 @@ impl MediaFlags {
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
 const PROBE_INTERVAL: Duration = Duration::from_millis(250);
 /// The round trip reported to the host is this percentile of the probes over this long
-/// (§5.5 rule 6).
+/// (§5.5).
 const RTT_RECENT: Duration = Duration::from_secs(3);
 const RTT_PERCENTILE: f64 = 0.75;
 /// Punch cadence before the first video datagram, and the keepalive cadence afterwards.
@@ -164,7 +164,7 @@ impl ViewParams {
     }
 }
 
-/// A control sender that follows reconnections (§5.5): every host-bound send from the window —
+/// A control sender that follows reconnections: every host-bound send from the window —
 /// input, clipboard, video acks, the pause on minimize — goes through it, and the reconnect
 /// loop repoints it at the current connection. Sends while disconnected are dropped.
 #[derive(Clone, Default)]
@@ -661,11 +661,11 @@ pub async fn run_viewer_session_sharing_media(
     if params.latency_limit_ms > 0 {
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
     }
-    // Kept so the media loop can re-send it to rebuild a stuck media path (§5.5).
+    // Kept so the media loop can re-send it to rebuild a stuck media path (§5.6).
     let screen_start = flags.screen_start(&params);
     conn.send_control(&screen_start);
 
-    // Clock probes once a second; they also keep the session from idling out on a still screen.
+    // Clock probes four times a second; they also keep the session from idling out on a still screen.
     let probes: Arc<Mutex<HashMap<u64, u64>>> = Arc::default();
     let probe_task = {
         let (sender, probes) = (conn.sender(), probes.clone());

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Measurement runs (docs/testing/measure.md): the JSON a viewer writes at the end of a fixed
+//! Measurement runs: the JSON a viewer writes at the end of a fixed
 //! session (`view --fixed --duration N --report file.json`), and the table `illum report`
 //! makes from a folder of them. The workload on the host cycles still / detail / motion on the
 //! wall clock, so every record is grouped by that phase before anything is averaged.

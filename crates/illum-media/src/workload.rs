@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! What the host screen shows during a measurement run (docs/testing/measure.md). The phase
+//! What the host screen shows during a measurement run. The phase
 //! comes from the wall clock, so host and viewer agree on it without talking: 20 s still, 20 s
 //! fine detail, 20 s full motion, repeating every minute. A clock in the corner is what a
 //! slow-motion camera reads for screen-to-screen measurements.

@@ -61,7 +61,9 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-only"
 !insertmacro MUI_LANGUAGE "English"
 
 ; Waits until the program's file can be written: the service has let go of it and no window
-; of the app is open. Nothing is closed for the person; they are asked to.
+; of the app is open. Nothing is closed for the person; they are asked to. Run silently, it is
+; an update the service started: the app closes by itself, and if it has not after 30 seconds
+; the old version's service is started again, so the desk is not left without one.
 !macro WaitUntilClosed
   StrCpy $1 0
   ${Do}
@@ -75,10 +77,15 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-only"
       ${Break}
     ${EndIf}
     IntOp $1 $1 + 1
-    ${If} $1 < 20
+    ${If} ${Silent}
+      ${If} $1 >= 120
+        nsExec::Exec 'sc.exe start ${NAME}'
+        Pop $0
+        Abort "${NAME} is still open."
+      ${EndIf}
       Sleep 250
-    ${ElseIf} ${Silent}
-      Abort "${NAME} is still open."
+    ${ElseIf} $1 < 20
+      Sleep 250
     ${Else}
       MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${NAME} is still open.$\n$\nQuit it from its icon in the tray (next to the clock), then press Retry." IDRETRY +2
       Abort "${NAME} is still open."

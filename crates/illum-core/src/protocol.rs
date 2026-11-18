@@ -192,8 +192,8 @@ pub enum ControlMsg {
         within_limit: u32,
         /// Frames decoded (a hidden window decodes everything and presents nothing).
         decoded: u32,
-        /// Round trip of the clock probes, ms (0 = unknown): the smallest of the last 3 s, and
-        /// the smallest of the last minute. Their difference tells congestion from random loss.
+        /// Round trip of the clock probes, ms (0 = unknown): the 75th percentile of the last
+        /// 3 s, and the smallest of the last minute. Their difference tells congestion from random loss.
         #[serde(default)]
         rtt_ms: u32,
         #[serde(default)]

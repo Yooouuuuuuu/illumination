@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The app's icon in the system tray (architecture §14).
+//! The app's icon in the system tray.
 //!
 //! The app goes on while its window is hidden: this icon is where it lives then. A click
 //! opens the window; its menu opens it, shows who is connected here, or closes the app. The

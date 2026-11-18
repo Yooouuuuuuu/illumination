@@ -1,0 +1,59 @@
+# The adaptation loop, one pass per second (adaptation.md §5.5–5.6, illum_media::adapt).
+# The viewer measures; the host grades, decides and applies. The rules and their numbers
+# are in the tables of adaptation.md.
+# Render with: d2 adaptation.d2 adaptation.svg
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 24
+  }
+}
+
+direction: right
+
+**.style.stroke: "#1E2A4A"
+**.style.font-color: "#1E2A4A"
+**.style.stroke-width: 2
+(** -> **)[*].style.stroke: "#1E2A4A"
+(** <- **)[*].style.stroke: "#1E2A4A"
+(** -> **)[*].style.font-color: "#44506E"
+(** <- **)[*].style.font-color: "#44506E"
+
+viewer: "Viewer" {
+  style.fill: "#DDE6F6"
+  style.border-radius: 12
+  measure: "Every frame shown:\nwas it within the delay limit?\nClock probes: the round trip" {style.fill: "#FFFFFF"}
+  report: "MediaReport, once a second\nshown · within limit · decoded\nreceived · lost · frames lost\nround trip and its floor" {
+    shape: document
+    style.fill: "#FFFCE3"
+  }
+  measure -> report
+}
+
+host: "Host, once a second" {
+  style.fill: "#DDE6F6"
+  style.border-radius: 12
+
+  grade: "Grade the second\ngreen · yellow · red · blank" {style.fill: "#FFFFFF"}
+  risen: "Round trip risen?\n(a queue is building)" {
+    shape: diamond
+    style.fill: "#C9DBFF"
+  }
+  ladder: "Latency controller\none rung down or up\n(fast drop on loss + risen round trip)" {style.fill: "#FFE012"}
+  fec: "FEC controller\nparity 5 – 30 %\nfrom loss before repair" {style.fill: "#B9EFB0"}
+  apply: "Apply\npacer · encoder bitrate\nframe rate · scale · parity" {style.fill: "#FFFFFF"}
+
+  grade -> ladder: "grades"
+  risen -> grade: "freeze = overload" {style.stroke-dash: 3}
+  risen -> ladder: "congestion" {style.stroke-dash: 3}
+  risen -> fec {style.stroke-dash: 3}
+  fec -> ladder: "backstop:\none rung down" {style.stroke-dash: 3}
+  ladder -> apply: "rung"
+  fec -> apply: "parity"
+}
+
+viewer.report -> host.grade: "shown, within"
+viewer.report -> host.risen: "round trip"
+viewer.report -> host.fec: "received, lost"
+viewer.measure <- host.apply: "video at the new quality,\nand a Quality message"

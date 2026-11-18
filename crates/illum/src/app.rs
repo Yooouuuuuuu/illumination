@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `illum` with no command: the app. This is the half behind the window (`illum_ui::app`,
-//! architecture §14): it keeps the window's [`AppState`] true and carries out its [`Command`]s.
+//! `illum` with no command: the app. This is the half behind the window (`illum_ui::app`):
+//! it keeps the window's [`AppState`] true and carries out its [`Command`]s.
 //!
-//! - **This desk** listens in this process while "Allow incoming connections" is on, exactly as
-//!   `illum --service` does, with the key questions asked in the window instead of a console.
+//! - **This desk** listens in this process while the app is open and no installed service
+//!   listens, exactly as `illum --service` does, with the questions asked in the window
+//!   instead of a console.
 //! - **Connect** first dials from here, so a wrong address, a refusal or a changed key is said
-//!   in the window and a first connection gets its key check there. Then the session opens in
+//!   in the window. Then the session opens in
 //!   its own process (`illum view …`): one window per session, and a session that crashes does
 //!   not take the app or the other sessions with it. AnyDesk and RustDesk do the same.
 //! - **Settings** live in `settings.json` in the home folder and become the flags of the next
@@ -16,12 +17,15 @@ use anyhow::{Context, Result};
 use illum_core::protocol::{ControlMsg, DEFAULT_PORT};
 use illum_net::session::{connect, normalize_target};
 use illum_net::{Answer, Endpoint, Prompt, PromptRequest, bind};
-use illum_ui::app::{AppState, Command, Desk, Dial, Guest, Incoming, Question, Settings, Verdict};
+use illum_ui::app::{
+    AppState, Checked, Command, Desk, Dial, Guest, Incoming, NewRelease, Progress, Question,
+    Settings, Verdict,
+};
 use illum_ui::app_window::AppWindow;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -168,6 +172,12 @@ struct Hosting {
     control: Option<String>,
 }
 
+/// How far an update this app asked for is: not asked, asked and not yet taken up by the
+/// host, or on its way there.
+const IDLE: u8 = 0;
+const ASKED: u8 = 1;
+const FOLLOWING: u8 = 2;
+
 struct Backend {
     home: PathBuf,
     ep: Endpoint,
@@ -177,7 +187,7 @@ struct Backend {
     runtime: tokio::runtime::Handle,
     hosting: Hosting,
     launch: Launch,
-    /// The task that listens for other desks, while "Allow incoming connections" is on.
+    /// The task that listens for other desks, while this app does the listening itself.
     listening: Mutex<Option<JoinHandle<()>>>,
     /// The desks connected to this one, while this app does the listening itself.
     sessions: Sessions,
@@ -186,6 +196,8 @@ struct Backend {
     /// The session windows this app opened, each with the address it went to: to bring one
     /// to the front when that desk is asked for again, and to end them when the app closes.
     opened: Mutex<Vec<(String, Arc<Mutex<std::process::Child>>)>>,
+    /// An update asked for here ([`IDLE`], [`ASKED`], [`FOLLOWING`]).
+    update_phase: AtomicU8,
 }
 
 /// The command line of a session: `view <target> <flags>`, then `--home` when this app was
@@ -289,6 +301,7 @@ impl Backend {
                 sessions,
                 desks_changed: tokio::sync::Notify::new(),
                 opened: Mutex::new(Vec::new()),
+                update_phase: AtomicU8::new(IDLE),
             }
         })
     }
@@ -313,8 +326,22 @@ impl Backend {
                 }
             }
         });
+        // Updates: looked for a moment after the window is up, then once a day. Only the
+        // app of the usual home does; a desk run with --home is a test desk.
+        let installed = self.hosting.control.is_some();
+        self.update(|s| s.update.installed = installed);
+        if self.hosting.service {
+            let this = self.clone();
+            self.runtime.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                loop {
+                    this.clone().check_updates(false).await;
+                    tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+                }
+            });
+        }
         // An open app listens: whether a desk gets in is its permission's matter, and not
-        // being reachable at all is closing the app (architecture §14).
+        // being reachable at all is closing the app.
         self.set_incoming(true);
     }
 
@@ -444,6 +471,35 @@ impl Backend {
                 }
                 if settings_start_on_boot != was.start_on_boot && self.hosting.service {
                     crate::installed::set_autostart(settings_start_on_boot);
+                }
+            }
+            Command::CheckUpdates => {
+                self.runtime
+                    .spawn(async move { this.check_updates(true).await });
+            }
+            Command::UpdateNow => match &self.hosting.control {
+                Some(pipe) => {
+                    let pipe = pipe.clone();
+                    self.update_phase.store(ASKED, Ordering::SeqCst);
+                    self.update(|s| s.update.progress = Progress::Downloading(None));
+                    self.runtime.spawn_blocking(move || {
+                        let asked = crate::control::ask(&pipe, &crate::control::Request::Update);
+                        if let Err(why) = asked {
+                            tracing::warn!(target: "app", "Not updated: {why}");
+                            this.update_phase.store(IDLE, Ordering::SeqCst);
+                            this.update(|s| s.update.progress = Progress::Failed(why));
+                        }
+                    });
+                }
+                None => self.update(|s| {
+                    s.update.progress = Progress::Failed("this copy is not installed".into())
+                }),
+            },
+            Command::CancelUpdate => {
+                if let Some(pipe) = self.hosting.control.clone() {
+                    self.runtime.spawn_blocking(move || {
+                        let _ = crate::control::ask(&pipe, &crate::control::Request::CancelUpdate);
+                    });
                 }
             }
             // Handled by the window itself; nothing for the rest of the app to do.
@@ -582,7 +638,7 @@ impl Backend {
                     let why = if in_use {
                         format!(
                             "another Illumination is already listening on this desk (port {}). \
-                             Close it, then switch this off and on.",
+                             Close it, then open this app again.",
                             this.hosting.port
                         )
                     } else {
@@ -596,19 +652,21 @@ impl Backend {
 
     /// Shows what the installed host does, while it does the listening: whether it listens,
     /// who is connected, and the desks it accepted. The host reads the same settings file,
-    /// so switching incoming off here stops it there.
+    /// so what is saved here applies there.
     async fn follow_service(self: Arc<Self>) {
         tracing::info!(target: "app", "The installed service listens for this desk.");
         let mut sessions: Option<Vec<String>> = None;
         loop {
             let incoming = if !crate::installed::service_runs() {
                 Incoming::Failed(
-                    "the Illumination service is not running. Start it from Windows' Services, \n                     or restart this PC."
+                    "the Illumination service is not running. Close Illumination and open it again, \
+                     which starts it."
                         .to_string(),
                 )
             } else {
                 match crate::installed::read_status(&self.home) {
                     Some(status) => {
+                        self.follow_update(&status.update);
                         if sessions.as_ref() != Some(&status.sessions) {
                             // A desk may have been accepted a moment ago: show it as trusted.
                             self.refresh_desks().await;
@@ -641,6 +699,86 @@ impl Backend {
                 self.update(|s| s.incoming = incoming);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Asks GitHub whether a newer release is out. A check nobody asked for that fails says
+    /// nothing; one the person asked for says why.
+    async fn check_updates(self: Arc<Self>, asked: bool) {
+        let before = self.state.lock().expect("app state").update.checked.clone();
+        self.update(|s| s.update.checked = Checked::Checking);
+        let found = tokio::task::spawn_blocking(crate::update::check)
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        match found {
+            Ok(release) => {
+                match &release {
+                    Some(r) => tracing::info!(target: "app", "Illumination {} is out.", r.version),
+                    None => tracing::info!(target: "app", "Up to date."),
+                }
+                self.update(|s| {
+                    s.now = now;
+                    s.update.checked = Checked::Done(now);
+                    // Not taken away from under an update on its way.
+                    if release.is_some() || s.update.progress == Progress::Idle {
+                        s.update.available = release.map(|r| NewRelease {
+                            version: r.version,
+                            notes: r.notes,
+                        });
+                    }
+                });
+            }
+            Err(why) => {
+                tracing::warn!(target: "app", "Could not check for updates: {why}");
+                self.update(|s| {
+                    s.update.checked = if asked { Checked::Failed(why) } else { before };
+                });
+            }
+        }
+    }
+
+    /// What the host says of the update this app asked for. Once its installer runs, the
+    /// window closes so that the program can be replaced.
+    fn follow_update(&self, status: &crate::update::UpdateStatus) {
+        let phase = self.update_phase.load(Ordering::SeqCst);
+        if phase == IDLE || (phase == ASKED && status.state.is_empty()) {
+            return;
+        }
+        let progress = match status.state.as_str() {
+            "downloading" => Progress::Downloading(
+                (status.total > 0).then(|| (status.done * 100 / status.total).min(100) as u8),
+            ),
+            "installing" => Progress::Installing,
+            "failed" => Progress::Failed(status.why.clone()),
+            _ => Progress::Idle,
+        };
+        self.update_phase.store(
+            if matches!(progress, Progress::Idle | Progress::Failed(_)) {
+                IDLE
+            } else {
+                FOLLOWING
+            },
+            Ordering::SeqCst,
+        );
+        let closing = progress == Progress::Installing;
+        if closing {
+            tracing::info!(target: "app", "The update's installer runs: closing.");
+        }
+        let shown = self
+            .state
+            .lock()
+            .expect("app state")
+            .update
+            .progress
+            .clone();
+        if shown != progress || closing {
+            self.update(|s| {
+                s.update.progress = progress;
+                s.update.closing = closing;
+            });
         }
     }
 
@@ -701,7 +839,7 @@ impl Backend {
 
     /// Closing the app: every connection ends, and on an installed desk the service stops,
     /// so nothing of Illumination is left running and this desk cannot be reached until the
-    /// app is opened again (architecture §14).
+    /// app is opened again.
     fn quit(self: &Arc<Self>) {
         tracing::info!(target: "app", "Closing: ending every connection.");
         for (_, child) in self.opened.lock().expect("opened sessions").drain(..) {

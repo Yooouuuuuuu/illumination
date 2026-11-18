@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The app's window: this desk, the desk to reach, the desks you know, settings, and the
-//! question about a desk that wants in (architecture §14).
+//! question about a desk that wants in.
 //!
 //! This module only draws and reports what the person did. [`AppState`] is what the rest of the
 //! program knows (written by `illum::app`), [`Command`] is what the person asked for. The look
@@ -202,6 +202,117 @@ pub enum Verdict {
     Never,
 }
 
+/// Updates: what the last check found, and how installing goes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Updates {
+    /// The newer release a check found.
+    pub available: Option<NewRelease>,
+    pub checked: Checked,
+    pub progress: Progress,
+    /// Whether this copy can update itself: an installed desk whose service runs.
+    pub installed: bool,
+    /// The installer runs: the window closes so the program can be replaced.
+    pub closing: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewRelease {
+    pub version: String,
+    /// Its changelog entry.
+    pub notes: String,
+}
+
+/// The last check for updates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Checked {
+    #[default]
+    Not,
+    Checking,
+    /// When (Unix seconds); `available` says what it found.
+    Done(u64),
+    /// A check the person asked for did not get an answer. One done by itself that fails is
+    /// not said.
+    Failed(String),
+}
+
+/// An update on its way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Progress {
+    #[default]
+    Idle,
+    /// Percent, when the size is known.
+    Downloading(Option<u8>),
+    Installing,
+    Failed(String),
+}
+
+/// One line of a release's notes, as shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteLine {
+    Heading(String),
+    Bullet(String),
+    Text(String),
+}
+
+/// A changelog entry as lines to show: headings, bullets (with their wrapped lines joined)
+/// and plain text, without the Markdown marks.
+pub fn note_lines(notes: &str) -> Vec<NoteLine> {
+    let mut lines: Vec<NoteLine> = Vec::new();
+    // Whether the next line may carry on the last one (no blank line came between).
+    let mut open = false;
+    for raw in notes.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            open = false;
+            continue;
+        }
+        if line.starts_with('#') {
+            lines.push(NoteLine::Heading(plain(
+                line.trim_start_matches('#').trim(),
+            )));
+            open = false;
+        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            lines.push(NoteLine::Bullet(plain(item)));
+            open = true;
+        } else if open && let Some(NoteLine::Bullet(last) | NoteLine::Text(last)) = lines.last_mut()
+        {
+            last.push(' ');
+            last.push_str(&plain(line));
+        } else {
+            lines.push(NoteLine::Text(plain(line)));
+            open = true;
+        }
+    }
+    lines
+}
+
+/// Markdown's marks taken out: bold, code, and links (their words kept).
+fn plain(text: &str) -> String {
+    let text = text.replace("**", "").replace('`', "");
+    let mut out = String::new();
+    let mut rest = text.as_str();
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        match after.find("](").and_then(|mid| {
+            after[mid + 2..]
+                .find(')')
+                .map(|close| (mid, mid + 2 + close))
+        }) {
+            Some((mid, close)) => {
+                out.push_str(&rest[..open]);
+                out.push_str(&after[..mid]);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Everything the window shows that it does not own.
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
@@ -227,6 +338,7 @@ pub struct AppState {
     pub settings: Settings,
     /// Now, in Unix seconds, for "today" and "yesterday" on the cards.
     pub now: u64,
+    pub update: Updates,
 }
 
 /// What the person asked for.
@@ -260,6 +372,12 @@ pub enum Command {
     /// End the sessions of the desk of this name that is connected to this one.
     EndSession(String),
     SaveSettings(Settings),
+    /// Look for a newer release now.
+    CheckUpdates,
+    /// Install the newer release.
+    UpdateNow,
+    /// Stop the download of an update.
+    CancelUpdate,
     /// Send the window to the tray; the app goes on.
     Hide,
     /// Close the app: every connection ends and this desk cannot be reached until it is
@@ -694,6 +812,8 @@ pub struct HomeUi {
     connected: bool,
     /// Asked to close while something is connected.
     closing: bool,
+    /// The update dialog is open.
+    update: bool,
 }
 
 impl HomeUi {
@@ -738,6 +858,14 @@ impl HomeUi {
     pub fn connected() -> HomeUi {
         HomeUi {
             connected: true,
+            ..HomeUi::default()
+        }
+    }
+
+    /// Opens on the update dialog (for pictures).
+    pub fn updating() -> HomeUi {
+        HomeUi {
+            update: true,
             ..HomeUi::default()
         }
     }
@@ -792,6 +920,7 @@ impl HomeUi {
         self.leave_dialog(ui.ctx(), &mut out);
         self.connected_dialog(ui.ctx(), state, &mut out);
         self.close_dialog(ui.ctx(), state, &mut out);
+        self.update_dialog(ui.ctx(), state, &mut out);
         if let Some(q) = state.questions.front() {
             question(ui.ctx(), q, &mut out);
         }
@@ -819,6 +948,9 @@ impl HomeUi {
                             }
                             if status_pill(ui, state) {
                                 self.connected = true;
+                            }
+                            if update_pill(ui, state) {
+                                self.update = true;
                             }
                         });
                     }
@@ -1275,6 +1407,92 @@ impl HomeUi {
         }
     }
 
+    /// The update: what is new and the way to install it, or how installing goes.
+    fn update_dialog(&mut self, ctx: &egui::Context, state: &AppState, out: &mut Vec<Command>) {
+        if !self.update {
+            return;
+        }
+        let Some(release) = &state.update.available else {
+            self.update = false;
+            return;
+        };
+        let mut close = false;
+        dialog(ctx, "update", |ui| {
+            ui.set_width(420.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(caps("Update").color(MUTED));
+            ui.label(
+                RichText::new(format!("Illumination {}", release.version)).font(heading(24.0)),
+            );
+            let on_its_way = match state.update.progress {
+                Progress::Downloading(percent) => Some(percent),
+                Progress::Installing => Some(Some(100)),
+                _ => None,
+            };
+            if let Some(percent) = on_its_way {
+                progress_bar(ui, percent);
+                ui.label(muted("Illumination closes and opens again when it is done.").size(13.0));
+                if matches!(state.update.progress, Progress::Downloading(_)) {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(button("Cancel", WHITE, 44.0)).clicked() {
+                            out.push(Command::CancelUpdate);
+                        }
+                    });
+                }
+                return;
+            }
+            ui.label(
+                RichText::new(format!("You have {}", state.version))
+                    .font(mono(13.0))
+                    .color(MUTED),
+            );
+            release_notes(ui, &release.notes);
+            if let Progress::Failed(why) = &state.update.progress {
+                note_box(ui, CORAL, &format!("The update did not finish: {why}."));
+            }
+            let connections = state.sessions.len() + state.outgoing;
+            let can_update = state.update.installed && connections == 0;
+            if !state.update.installed {
+                note_box(
+                    ui,
+                    CREAM,
+                    &format!(
+                        "This copy of Illumination is not installed, so it cannot update \
+                         itself. Get {} from the release page.",
+                        release.version
+                    ),
+                );
+            } else if connections > 0 {
+                note_box(ui, CORAL, &busy_sentence(state));
+            } else {
+                ui.label(muted("Illumination closes and opens again.").size(13.0));
+            }
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if state.update.installed {
+                        let go = primary("Update now").min_size(vec2(0.0, 44.0));
+                        if ui.add_enabled(can_update, go).clicked() {
+                            out.push(Command::UpdateNow);
+                        }
+                    } else if ui
+                        .add(primary("Open the release page").min_size(vec2(0.0, 44.0)))
+                        .clicked()
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(
+                            "https://github.com/Yooouuuuuuu/illumination/releases/latest",
+                        ));
+                    }
+                    if ui.add(button("Later", WHITE, 44.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if close {
+            self.update = false;
+        }
+    }
+
     fn leave_dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
         if !self.leaving {
             return;
@@ -1577,6 +1795,12 @@ impl HomeUi {
                     "https://github.com/Yooouuuuuuu/illumination",
                 );
             });
+            ui.add_space(6.0);
+            match update_line(ui, state) {
+                Some(true) => self.update = true,
+                Some(false) => out.push(Command::CheckUpdates),
+                None => {}
+            }
         });
     }
 }
@@ -1650,6 +1874,255 @@ fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
         NAVY,
     );
     !state.sessions.is_empty() && response.clicked()
+}
+
+/// The update, top right beside the status: strong yellow while it waits for the person,
+/// blue while it is on its way. Nothing when there is none. Returns whether it was clicked.
+fn update_pill(ui: &mut Ui, state: &AppState) -> bool {
+    let Some(release) = &state.update.available else {
+        return false;
+    };
+    let (fill, text, percent) = match state.update.progress {
+        Progress::Downloading(percent) => (
+            BLUE,
+            format!("Downloading {}", release.version),
+            Some(percent),
+        ),
+        Progress::Installing => (BLUE, format!("Installing {}", release.version), None),
+        _ => (YELLOW, format!("Update to {}", release.version), None),
+    };
+    let waiting = fill == YELLOW;
+    let words = ui.painter().layout_no_wrap(text, semibold(13.0), NAVY);
+    let tail = percent.map(|p| {
+        let shown = p.map_or_else(|| "…".to_string(), |p| format!("{p} %"));
+        ui.painter().layout_no_wrap(shown, semibold(13.0), NAVY)
+    });
+    const BAR: f32 = 56.0;
+    let icon = if waiting { 14.0 + 8.0 } else { 0.0 };
+    let tail_width = tail.as_ref().map_or(0.0, |t| 8.0 + BAR + 8.0 + t.size().x);
+    let size = vec2(10.0 + icon + words.size().x + tail_width + 12.0, 28.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let p = ui.painter();
+    p.rect(
+        rect,
+        CornerRadius::same(14),
+        fill,
+        outline(),
+        StrokeKind::Inside,
+    );
+    let mut x = rect.left() + 10.0;
+    let y = rect.center().y;
+    if waiting {
+        // A download arrow over a line.
+        let c = x + 7.0;
+        let line = Stroke::new(2.2, NAVY);
+        p.line_segment([egui::pos2(c, y - 6.0), egui::pos2(c, y + 2.5)], line);
+        p.line_segment([egui::pos2(c - 4.0, y - 1.5), egui::pos2(c, y + 2.5)], line);
+        p.line_segment([egui::pos2(c + 4.0, y - 1.5), egui::pos2(c, y + 2.5)], line);
+        p.line_segment(
+            [egui::pos2(c - 6.0, y + 6.5), egui::pos2(c + 6.0, y + 6.5)],
+            line,
+        );
+        x += icon;
+    }
+    let width = words.size().x;
+    p.galley(egui::pos2(x, y - words.size().y / 2.0), words, NAVY);
+    x += width;
+    if let (Some(percent), Some(tail)) = (percent, tail) {
+        x += 8.0;
+        let track = egui::Rect::from_min_size(egui::pos2(x, y - 3.0), vec2(BAR, 6.0));
+        p.rect(
+            track,
+            CornerRadius::same(3),
+            WHITE,
+            Stroke::new(1.5, NAVY),
+            StrokeKind::Inside,
+        );
+        let done = track.width() * f32::from(percent.unwrap_or(0)) / 100.0;
+        p.with_clip_rect(egui::Rect::from_min_size(track.min, vec2(done, 6.0)))
+            .rect_filled(track, CornerRadius::same(3), NAVY);
+        x += BAR + 8.0;
+        p.galley(egui::pos2(x, y - tail.size().y / 2.0), tail, NAVY);
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// How far the update is, with the percentage inside the bar.
+fn progress_bar(ui: &mut Ui, percent: Option<u8>) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    let p = ui.painter();
+    let round = CornerRadius::same(14);
+    p.rect_filled(rect, round, CREAM);
+    if let Some(percent) = percent {
+        let done = rect.width() * f32::from(percent.min(100)) / 100.0;
+        let filled = egui::Rect::from_min_size(rect.min, vec2(done, rect.height()));
+        p.with_clip_rect(filled).rect_filled(rect, round, YELLOW);
+        if percent > 0 && percent < 100 {
+            let x = rect.left() + done;
+            p.with_clip_rect(rect.shrink(1.0)).line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                Stroke::new(OUTLINE, NAVY),
+            );
+        }
+    }
+    p.rect_stroke(rect, round, outline(), StrokeKind::Inside);
+    let shown = percent.map_or_else(|| "…".to_string(), |p| format!("{p} %"));
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        shown,
+        mono(13.0),
+        NAVY,
+    );
+}
+
+/// A release's notes, as its changelog entry says them. A long entry scrolls.
+fn release_notes(ui: &mut Ui, notes: &str) {
+    let lines = note_lines(notes);
+    if lines.is_empty() {
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .max_height(280.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            for line in lines {
+                match line {
+                    NoteLine::Heading(text) => {
+                        ui.add_space(2.0);
+                        ui.label(caps(&text).size(12.0).color(MUTED));
+                    }
+                    NoteLine::Bullet(text) => {
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(RichText::new("•").size(14.0));
+                            ui.add(egui::Label::new(RichText::new(text).size(14.0)).wrap());
+                        });
+                    }
+                    NoteLine::Text(text) => {
+                        ui.label(RichText::new(text).size(14.0));
+                    }
+                }
+            }
+        });
+}
+
+/// A boxed line in a dialog: coral for what stands in the way, cream for a note.
+fn note_box(ui: &mut Ui, fill: Color32, text: &str) {
+    Frame::new()
+        .fill(fill)
+        .stroke(outline())
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(text).size(14.0));
+        });
+}
+
+/// Why an update has to wait: what is connected, in words.
+fn busy_sentence(state: &AppState) -> String {
+    let mut parts = Vec::new();
+    match state.sessions.as_slice() {
+        [] => {}
+        [one] => parts.push(format!("{one} is connected here")),
+        [a, b] => parts.push(format!("{a} and {b} are connected here")),
+        many => parts.push(format!("{} desks are connected here", many.len())),
+    }
+    match state.outgoing {
+        0 => {}
+        1 => parts.push("1 session window is open".to_string()),
+        n => parts.push(format!("{n} session windows are open")),
+    }
+    format!(
+        "Updating ends every connection. {}. End them first.",
+        parts.join(" and ")
+    )
+}
+
+/// The update line of About: what the last check found, and the button for what comes
+/// next. `Some(true)`: open the update; `Some(false)`: check now.
+fn update_line(ui: &mut Ui, state: &AppState) -> Option<bool> {
+    let mut asked = None;
+    ui.horizontal(|ui| {
+        let update = &state.update;
+        if let Some(release) = &update.available {
+            ui.label(
+                RichText::new(format!("{} is available.", release.version)).font(semibold(14.0)),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(button("Update…", YELLOW, 36.0)).clicked() {
+                    asked = Some(true);
+                }
+            });
+            return;
+        }
+        match &update.checked {
+            Checked::Not => {
+                ui.label(muted("Not checked for updates yet."));
+            }
+            Checked::Checking => {
+                ui.label(muted("Checking for updates…"));
+            }
+            Checked::Done(at) => {
+                check_mark(ui, true);
+                ui.label(RichText::new("Up to date.").font(semibold(14.0)));
+                ui.label(muted(format!("Checked {}.", day(state.now, *at))));
+            }
+            Checked::Failed(why) => {
+                check_mark(ui, false);
+                ui.label(RichText::new("Could not check for updates.").font(semibold(14.0)));
+                ui.label(muted(sentence(why)));
+            }
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let idle = update.checked != Checked::Checking;
+            if ui
+                .add_enabled(idle, button("Check for updates", WHITE, 36.0))
+                .clicked()
+            {
+                asked = Some(false);
+            }
+        });
+    });
+    asked
+}
+
+/// A round mark: a green tick for done, a coral cross for failed.
+fn check_mark(ui: &mut Ui, done: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+    let p = ui.painter();
+    let c = rect.center();
+    p.circle(
+        c,
+        9.0,
+        if done { GREEN } else { CORAL },
+        Stroke::new(OUTLINE, NAVY),
+    );
+    let line = Stroke::new(2.0, NAVY);
+    if done {
+        p.line_segment([c + vec2(-4.0, 0.0), c + vec2(-1.0, 3.0)], line);
+        p.line_segment([c + vec2(-1.0, 3.0), c + vec2(4.5, -3.0)], line);
+    } else {
+        p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], line);
+        p.line_segment([c + vec2(3.5, -3.5), c + vec2(-3.5, 3.5)], line);
+    }
+}
+
+/// Words as a sentence: a capital first, a full stop last.
+fn sentence(text: &str) -> String {
+    let mut chars = text.trim().chars();
+    let mut out: String = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    out
 }
 
 /// This desk: the address other desks dial, with a way to copy it, and what happens to a new
@@ -2196,12 +2669,34 @@ pub fn sample_state() -> AppState {
         now,
         guests: Vec::new(),
         outgoing: 0,
+        update: Updates::default(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A changelog entry reads as headings, bullets with their wrapped lines joined, and
+    /// text, without Markdown's marks.
+    #[test]
+    fn release_notes_read_as_lines() {
+        let notes = "Not released.\n\n### Added\n\n- **Updates**: the app finds a newer\n  release and installs it ([how](docs/x.md)).\n- `illum-sign`, for releases.\n\n### Fixed\n\n- One [thing.\n";
+        assert_eq!(
+            note_lines(notes),
+            vec![
+                NoteLine::Text("Not released.".into()),
+                NoteLine::Heading("Added".into()),
+                NoteLine::Bullet(
+                    "Updates: the app finds a newer release and installs it (how).".into()
+                ),
+                NoteLine::Bullet("illum-sign, for releases.".into()),
+                NoteLine::Heading("Fixed".into()),
+                NoteLine::Bullet("One [thing.".into()),
+            ]
+        );
+        assert!(note_lines("").is_empty());
+    }
 
     #[test]
     fn keys_read_in_four_rows() {

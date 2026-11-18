@@ -60,6 +60,8 @@ pub struct HostStatus {
     /// The same, with where each is and since when (Unix seconds).
     pub guests: Vec<GuestStatus>,
     pub version: String,
+    /// An update the app asked for, as it goes.
+    pub update: crate::update::UpdateStatus,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,12 +172,23 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         })
     });
     *guests_of.lock().expect("sessions") = Some(sessions.clone());
+    // Updating, when the app asks: what an earlier update downloaded is not needed now.
+    crate::update::clean(home);
+    let (counted, shown) = (sessions.clone(), told.clone());
+    let installer = crate::update::Installer::new(
+        home,
+        move || counted.guests().len(),
+        move |update| shown.change(|s| s.update = update),
+    );
     // What the app may not do itself, it asks for here (`control`).
     let ending = sessions.clone();
     let _asked = AbortOnDrop(tokio::spawn(crate::control::serve(
         home.to_path_buf(),
         crate::control::pipe_name(home, crate::is_usual_home(home)),
-        Arc::new(move |name: &str| ending.end(name)),
+        crate::control::Hands {
+            end: Arc::new(move |name: &str| ending.end(name)),
+            update: Some(installer),
+        },
     )));
     // One endpoint for as long as the host runs: the desks accepted "this time" live in it.
     let base = loop {
@@ -413,9 +426,16 @@ pub fn run_service() -> Result<()> {
     );
     illum_win::run_as_service(move |stop| {
         tracing::info!(target: "service", "Illumination {} service started.", env!("CARGO_PKG_VERSION"));
+        // Started by an update's installer: the app was open, and opens again.
+        let home = crate::default_home();
+        let reopen = crate::update::take_reopen(&home);
+        if reopen {
+            reopen_app(&exe);
+        }
         // Started by Windows at boot, with "Start on boot" switched off: not wanted until
-        // the person opens the app, which starts this service saying so (architecture §14).
-        let by_app = illum_win::service_start_args().iter().any(|a| a == STARTED_BY_APP);
+        // the person opens the app, which starts this service saying so.
+        let by_app =
+            reopen || illum_win::service_start_args().iter().any(|a| a == STARTED_BY_APP);
         if !by_app && !crate::app::load_settings(&crate::default_home()).start_on_boot {
             tracing::info!(target: "service", "\"Start on boot\" is off: stopping until the app is opened.");
             return;
@@ -482,6 +502,23 @@ pub fn run_service() -> Result<()> {
         tracing::info!(target: "service", "Service stopped.");
     })
     .map_err(anyhow::Error::msg)
+}
+
+/// Opens the app as the person at the screen, after an update replaced it.
+#[cfg(windows)]
+fn reopen_app(exe: &Path) {
+    let line = quoted(&exe.display().to_string());
+    match illum_win::console_session()
+        .map(|session| illum_win::start_as_session_user(session, &line))
+    {
+        Some(Ok(_)) => tracing::info!(target: "service", "Updated: the app is opened again."),
+        Some(Err(why)) => {
+            tracing::warn!(target: "service", "Updated, but the app was not opened again: {why}")
+        }
+        None => {
+            tracing::warn!(target: "service", "Updated, but nobody is at the screen to open the app for.")
+        }
+    }
 }
 
 #[cfg(not(windows))]

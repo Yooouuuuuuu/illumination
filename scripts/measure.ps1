@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Runs a measurement plan against a host and writes one report folder (docs/testing/measure.md).
+Runs a measurement plan against a host and writes one report folder.
 
 .DESCRIPTION
 On the host: `illum --service` and `illum workload` (full screen) are running.

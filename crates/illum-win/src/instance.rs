@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! One app per person at a time (architecture §14).
+//! One app per person at a time.
 //!
 //! The app lives in the tray, so opening it again (the Start menu, the desktop icon) must
 //! bring the running one's window up, not start a second one beside it. The first app makes

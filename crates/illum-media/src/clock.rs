@@ -90,7 +90,7 @@ impl ClockSync {
 
     /// The `p`-th fraction (0 = smallest, 1 = largest) of the round trips of the last
     /// `recent`, ending at the newest probe. The 0.75 point is what the host judges congestion
-    /// by (§5.5 rule 6): on Wi-Fi a path above its capacity delays *most* probes by tens of ms
+    /// by (§5.5): on Wi-Fi a path above its capacity delays *most* probes by tens of ms
     /// while some still slip through at the floor, so the minimum stayed flat for 70 s of
     /// 12 % loss (2026-11-03); one probe caught behind a keyframe burst does not move the
     /// 0.75 point.

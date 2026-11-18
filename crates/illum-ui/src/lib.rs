@@ -519,7 +519,7 @@ pub struct ViewerOptions {
     pub on_pointer: Box<dyn Fn(PointerMode)>,
 }
 
-/// What the window needs from the session to show several displays as tiles (§14). Each
+/// What the window needs from the session to show several displays as tiles. Each
 /// display but the one the session shows already is a session of its own.
 pub struct AllDisplays {
     /// Starts showing a display, asked for at a size (percent of its own).
@@ -1176,7 +1176,7 @@ impl App {
     }
 }
 
-/// The session's bars between frames (architecture §14).
+/// The session's bars between frames.
 struct Bars {
     ctx: egui::Context,
     input: egui_winit::State,

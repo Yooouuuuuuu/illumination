@@ -3,8 +3,9 @@
 //! [`Frame`]s; the cursor is reported separately (the duplicated image never contains it).
 //!
 //! Only `DXGI_FORMAT_B8G8R8A8_UNORM` is accepted, matching our one internal pixel format.
-//! When duplication is lost (resolution change, desktop switch) it is recreated; the
-//! suspend → switch → restart handling for the secure desktop arrives in M7.
+//! When duplication is lost (resolution change, desktop switch) it is recreated.
+//! Following the screen to the lock screen and permission prompts is `ScreenCapture::ride_out`
+//! (architecture §7).
 //!
 //! Laptops with two GPUs: the same display can be listed under more than one adapter (the
 //! NVIDIA "Optimus" layer reports the panel under the discrete GPU when the program runs on
@@ -268,7 +269,7 @@ impl DdaSource {
                         )));
                     }
                     Err(e) => {
-                        // E.g. the secure desktop is showing (handled properly in M7). Try again shortly.
+                        // E.g. the screen is changing desktops (architecture §7). Try again shortly.
                         tracing::warn!(target: "capture", "DuplicateOutput failed, retrying: {e}");
                         self.retry_at = Instant::now() + Duration::from_millis(500);
                         return Ok(None);

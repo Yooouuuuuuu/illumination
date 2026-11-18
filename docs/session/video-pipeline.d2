@@ -1,0 +1,56 @@
+# The path of the picture from host to viewer (video.md, section 5).
+# Render with: d2 video-pipeline.d2 video-pipeline.svg
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 24
+  }
+}
+
+direction: right
+
+**.style.stroke: "#1E2A4A"
+**.style.font-color: "#1E2A4A"
+**.style.stroke-width: 2
+(** -> **)[*].style.stroke: "#1E2A4A"
+(** <- **)[*].style.stroke: "#1E2A4A"
+(** -> **)[*].style.font-color: "#44506E"
+(** <- **)[*].style.font-color: "#44506E"
+
+host: Host {
+  style.fill: "#DDE6F6"
+  style.border-radius: 12
+  capture: "Capture (Windows)\nDesktop Duplication\nfallback: GDI" {style.fill: "#FFFFFF"}
+  frame: "Frame\nBGRA8 in memory\nnewest wins" {style.fill: "#FFFFFF"}
+  encode: "Encoder\nAV1, else H.265 (4:2:0)\nelse lossless tiles" {style.fill: "#FFFFFF"}
+  send: "Packets + parity\npacer" {style.fill: "#FFFFFF"}
+  cursor: "Pointer\nshape, kind, position" {style.fill: "#FFFFFF"}
+  capture -> frame -> encode -> send
+  capture -> cursor
+}
+
+udp: "UDP media path\nencrypted datagrams" {
+  shape: queue
+  style.fill: "#FFF68D"
+}
+tls: "TLS connection\ncursor and control" {
+  shape: queue
+  style.fill: "#C9DBFF"
+}
+
+viewer: "Viewer (illum view)" {
+  style.fill: "#DDE6F6"
+  style.border-radius: 12
+  decode: "Decoder\nGPU through FFmpeg\nfallback: CPU" {style.fill: "#FFFFFF"}
+  present: "Present\nwgpu: convert, scale,\nshow at once" {style.fill: "#FFFFFF"}
+  pointer: "Own system pointer\nwith the host's shape,\nor the local one of that kind" {style.fill: "#FFFFFF"}
+  decode -> present
+}
+
+host.send -> udp: "video"
+udp -> viewer.decode
+host.cursor -> tls: "pointer"
+tls -> viewer.pointer
+host.send <- tls: "feedback" {style.stroke-dash: 3}
+tls <- viewer.decode: "reports,\nlost frames" {style.stroke-dash: 3}

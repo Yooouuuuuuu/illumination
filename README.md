@@ -1,184 +1,68 @@
-<img src="assets/icon/png/illumination-128.png" width="96" alt="Illumination icon" align="right">
+<p align="center">
+  <img src="assets/icon/png/illumination-128.png" width="120" alt="Illumination icon">
+</p>
 
-# Illumination
+<h1 align="center">Illumination</h1>
 
-Direct, IP-only remote desktop. You connect straight to your own machines by IP address, for
-example over a Tailscale tailnet. There is no ID server, no relay and no account.
+<p align="center"><b>Remote desktop over UDP, straight to your own machines. No ID server, no relay, no account.</b></p>
 
-- **One app for both sides:** every install can control other machines and be controlled.
-- **Direct only:** dial an IP address or hostname. Getting through NAT is left to your network
-  (a LAN, Tailscale, a VPN).
-- **Written in Rust.**
-- **Free:** GPL-3.0-only.
+<p align="center">
+  <img src="assets/screenshot.png" width="900" alt="Illumination's main window: this desk's address, the field for the desk to reach, and the cards of the desks it knows">
+</p>
 
-> Status: you can see and control another machine (keyboard, mouse, IME text, sound, clipboard)
-> with AV1 / H.265 video over UDP, from an app window or from the console. It is not yet a
-> Windows service. See [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
+Illumination is what AnyDesk and RustDesk do, with the picture sent the way game streaming
+sends it. You type another machine's IP address, for example its
+[Tailscale](https://tailscale.com) address, and use its screen, keyboard, mouse, sound and
+clipboard.
 
-## The app
+<p align="center">
+  <img src="assets/screenshot-displays.png" width="900" alt="A session window showing both displays of the other desk side by side: a code editor on one, a browser on the other">
+  <br>
+  <em>One window, every display of the other desk.</em>
+</p>
 
-After building (below), run `illum.exe` with no arguments on both machines.
+---
 
-- **This desk** shows the address to give to the other machine and this machine's key. While
-  "Allow incoming connections" is ticked, the other machine can reach this one.
-- **Remote desk:** type the other machine's address and press Connect. The first time, each
-  machine shows the other's key and asks you to confirm; after that you connect without
-  questions. The session opens in a window of its own, with a bar on top (size, keyboard and
-  pointer mode, full screen, Disconnect) and the connection's numbers at the bottom.
-- **Your desks** keeps every machine you have connected to, one click away.
-- **Settings:** picture quality limits, keyboard and pointer mode, sound, clipboard, and the
-  machines trusted to connect here.
+## Key features
 
-Don't run `illum --service` on a machine at the same time as the app: both want the same port,
-and the app will say it cannot listen.
+### Video over UDP
+AnyDesk and RustDesk send the picture over a reliable connection, so one lost packet holds
+back everything behind it. Illumination sends AV1 or H.265 over UDP and never resends: lost
+packets are rebuilt from parity, and a late frame is dropped instead of waited for.
 
-## Install (Windows)
+### Stable by adjusting itself
+You set one number: how much delay you accept. The host watches how late frames arrive and
+moves bitrate and frame rate down and back up to stay inside it, and tells a congested link
+from one that merely loses packets.
 
-Build the installer with `pwsh scriptsuild-installer.ps1` and run
-`targetinstallerIllumination_<version>_x64-setup.exe` (no released download yet). It asks for an
-administrator once, because it installs a Windows service. With the service this desk can be
-reached while the app is closed, after a restart, and in windows that run as administrator;
-a desk you accepted before connects with nobody there, and a new one is asked about in a small
-window. Run without installing, Illumination works as described below, with those limits.
-Uninstalling keeps this desk's key, its desks and its settings. More in
-[docs/release/release.md](docs/release/release.md).
+### Direct only
+A desk is an IP address. Nothing passes through a server of ours, because there is none.
 
-## Try it (console)
+The technical documents are in [`docs/`](docs/README.md).
 
-Build on each machine (needs [Rust](https://rustup.rs) and, once, two downloads: a prebuilt
-FFmpeg for the AV1 / H.265 codecs and libclang for generating its bindings; nothing else to
-install on Windows 10/11):
-```powershell
-git clone https://github.com/Yooouuuuuuu/illumination
-cd illumination
-powershell -ExecutionPolicy Bypass -File scripts\get-ffmpeg.ps1
-powershell -ExecutionPolicy Bypass -File scripts\get-libclang.ps1
-cargo build --release
-cd target\release
-```
-The build copies FFmpeg's DLLs next to `illum.exe`. PowerShell only runs programs from the
-current folder with `.\` in front, hence `.\illum.exe`.
+---
 
-On the machine to be reached (the host):
-```powershell
-.\illum.exe --service            # listens on this machine's Tailscale address, port 28326 (TCP and UDP)
-```
-On the other machine:
-```powershell
-.\illum.exe view 100.x.y.z       # or a MagicDNS name; opens a window with the host's screen
-```
-The first time, each side shows the other's key fingerprint and asks you to confirm. After
-that you connect without prompts, and a changed key is refused. The window title shows frame
-rate, bandwidth, latency and packet loss.
+## Install
 
-Control and input travel over TLS on TCP; video travels over **UDP on the same port number**
-and is never resent; parity lets the viewer rebuild lost packets. The host **adapts**: it starts
-at the top of a quality ladder (`--max-bitrate 20` Mb/s, `--max-fps 30`, up to 120) and steps
-down one rung at a time while frames arrive later than your limit (`--latency-limit 50` ms), at
-once when loss comes with a rising round trip (congestion), and back up when things are clean;
-parity moves between 5 and 30 percent with the packet loss it sees. Resolution only goes down if
-you allow it (`--allow-scale`). The title bar shows the rung in use; the host log says why it changed. A viewer offers AV1
-only when its GPU decodes it (`--software-decode` turns the GPU decoders off and keeps it on
-H.265). The viewer decodes and draws on the GPU; `--software-render` draws on the CPU instead,
-which is also what happens on a machine with no usable GPU.
+**Windows 10 / 11, 64-bit.** Run the installer from the
+[latest release](https://github.com/Yooouuuuuuu/illumination/releases/latest) on each
+machine. It isn't code-signed yet: on the SmartScreen warning, click **More info → Run
+anyway**.
 
-**Sound:** the host's audio output is sent too (Opus, 5 ms frames with parity, a fixed 40 ms
-buffer). `illum --service --no-audio` never captures or sends it; `illum view --mute` doesn't
-ask for it.
+## Using it
 
-**Clipboard:** text copied on either machine appears on the other, both ways, while you are
-connected. Turn it off with `illum --service --no-clipboard` on the host or
-`illum view <host> --no-clipboard` on the viewer. Files come later.
+Open Illumination on both machines. Type the other one's address under **Remote desk** and
+press **Connect**; the other machine asks once whether to let you in.
 
-**Reconnecting:** if the connection drops (a flaky link, a route change), the viewer keeps its
-window open, shows "reconnecting…", and re-dials the host on its own until it comes back.
-`illum view <host> --no-reconnect` turns that off so a drop just ends the session.
-
-**Codec:** AV1 if the host can encode it and the viewer decode it, otherwise H.265, otherwise
-lossless tiles (sharp, but heavy when the whole screen changes). The title bar names the one in
-use. `illum codecs` shows what this machine can do and why a hardware encoder was skipped; the
-NVIDIA encoders need driver **570 or newer**.
-
-You may need to allow `illum.exe` through Windows Firewall on the host; one answer covers TCP
-and UDP. (Over Tailscale this is usually not needed: its Windows client permits traffic on its
-own interface.)
-
-Each role also writes a debug-level log file: `%ProgramData%\Illumination\logs\service.log` on
-the host and `…\viewer.log` on the viewer. On an installed desk the app's and the viewer's logs
-are in `%LOCALAPPDATA%\Illumination\logs`. Send those when something looks wrong.
-
-**Measuring instead of guessing:** `illum view <host> --fixed …` streams at one quality with no
-adaptation, `--duration N --report file.json` records every second, `illum workload` on the
-host shows a known screen (still, fine detail, full motion), and `illum report <folder>` turns a
-run into a table. `scripts/measure.ps1` runs a whole plan; see `docs/testing/measure.md`.
-
-To check colours, run the host with `--test-pattern`. The top half shows eight patches, left to
-right: **red, green, blue, cyan, magenta, yellow, white, black**.
-
-**Keyboard modes** (`illum view <host> --keyboard …`):
-- `remote`: sends key positions and **grabs the keyboard** while the window is focused,
-  so the host's layout and IME apply and nothing (Alt+Tab, Win, your local IME) acts on your own
-  machine. Click another window to release the grab.
-- `local`: sends characters as you type them here, including your IME's result — for typing into
-  a host that doesn't have your language's IME. Only the system keys are grabbed.
-- `auto`: remote when both machines use the same layout, otherwise local.
-
-Without the flag the mode is the one last chosen for that host under More in its session
-window, and `remote` the first time.
-
-`--view-only` sends no input. In the default `remote` mode, while the viewer has focus the
-**whole keyboard** goes to the host — Win, Alt+Tab, shortcuts, everything; click another window
-to get your own keyboard back. (Ctrl+Alt+Del and Win+L are taken by your own Windows: use "Send Ctrl+Alt+Del" and "Lock"
-under More in the session window.)
-
-**Pointer** (`illum view <host> --pointer …`):
-- `remote`: the host's pointer pictures, exactly as it has them.
-- `local`: this desk's own pointers. The host says which kind it shows (arrow, text,
-  hand, resize, ...) and yours of that kind is shown. A program's own pointer still comes as
-  the host's picture.
-
-As with the keyboard: without the flag, the one last chosen for that host, and `remote` the
-first time.
-
-Either way it is your own system's pointer, so it never lags behind the picture.
-
-Don't control the machine you're sitting at: its own injected keys would loop back into the
-viewer.
-
-## Commands
-
-```
-illum                  # the app window
-illum --service        # host (--port, --bind <IP> to opt in to other addresses, --test-pattern,
-                       #   --no-audio, --no-clipboard)
-illum service install    # install the Windows service (terminal opened as administrator);
-                         #   also: service uninstall, service status
-illum --backend        # per-session worker, started by the service (later milestone)
-illum --control        # per-user helper for clipboard and tray (later milestone)
-illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
-                       #   --pointer remote|local, --no-clipboard, --no-reconnect,
-                       #   --max-bitrate Mb/s, --max-fps, --allow-scale, --latency-limit ms, --mute,
-                       #   --software-decode, --software-render; measurement: --fixed, --scale,
-                       #   --codec, --duration, --report, --label)
-illum workload         # the measurement screen, full size (host side); Esc closes it
-illum report <folder>  # table from a folder of --report files
-illum displays         # list this machine's displays
-illum codecs           # which video codecs this machine can encode and decode
-illum connect <host>   # dial a host and measure round-trip time
-illum fingerprint      # show this device's key fingerprint
-illum list             # pinned hosts and paired devices
-illum forget <host>    # drop a pinned host key (after the host was reinstalled)
-```
+---
 
 ## Acknowledgements
 
-Illumination is built on what we learned from other remote-desktop and streaming projects.
-None of their code is included unless a file says otherwise.
+- **Sunshine / Moonlight:** low-latency capture, encoding and streaming
+- **AnyDesk:** the reference for behaviour
+- **RustDesk:** lessons and UX ideas
 
-- **AnyDesk:** the reference for behaviour (studied as a user, closed source)
-- **Sunshine / Moonlight** (and the forks Apollo / Artemis): low-latency capture, encoding and
-  streaming ideas
-- **RustDesk:** lessons on what to avoid, and UX ideas
+None of their code is included.
 
 ## License
 

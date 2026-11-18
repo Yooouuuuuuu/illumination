@@ -3,9 +3,14 @@
 #
 #   pwsh scripts\build-installer.ps1            release build, then the installer
 #   pwsh scripts\build-installer.ps1 -NoBuild   package what target\release already holds
+#   pwsh scripts\build-installer.ps1 -Release   and sign it for the updater: also writes
+#                                               <installer>.sig and latest.json
 #
 # Needs NSIS (makensis.exe): on PATH, in its usual folder, or the copy Tauri keeps.
-param([switch]$NoBuild)
+# -Release signs with the update key: ILLUM_SIGNING_KEY names it (by default
+# %USERPROFILE%\.illumination\update.key), and its password is ILLUM_SIGNING_KEY_PASSWORD or
+# asked for. The three files in target\installer are what a GitHub Release carries.
+param([switch]$NoBuild, [switch]$Release)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
@@ -45,3 +50,11 @@ $setup = Join-Path $out "Illumination_${version}_x64-setup.exe"
 if ($LASTEXITCODE -ne 0) { throw 'makensis failed.' }
 $size = [math]::Round((Get-Item $setup).Length / 1MB, 1)
 "Built $setup ($size MB)."
+
+if ($Release) {
+    Push-Location $root
+    try {
+        cargo run --release --locked -q -p illum-sign -- release $setup --version $version
+        if ($LASTEXITCODE -ne 0) { throw 'Signing failed.' }
+    } finally { Pop-Location }
+}

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `illum`: one binary, every role (frontend, service, backend, control).
+//! `illum`: one binary, every role (architecture §3).
 //!
-//! Runs in a console for now: `illum --service` hosts, `illum view <ip>` opens a viewer window,
-//! `illum connect <ip>` measures round-trip time. The Windows service, the backend and the
-//! full app window arrive in later milestones.
+//! With no command it opens the app. `illum view <ip>` opens a session window, `illum --service`
+//! hosts from a console, and `illum service run` is what Windows starts for the installed service.
 
 mod app;
 mod control;
 mod installed;
 mod prompt;
+mod update;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -99,9 +99,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Connect to a host by IP or name (port defaults to 7171) and measure round-trip time.
+    /// Connect to a host by IP or name (port defaults to 28326) and measure round-trip time.
     Connect {
-        /// e.g. 100.100.101.1, laptop, or laptop.tail1234.ts.net:7171
+        /// e.g. 100.100.101.1, laptop, or laptop.tail1234.ts.net:28326
         target: String,
         /// How many pings to send before disconnecting.
         #[arg(long, default_value_t = 10)]
@@ -109,7 +109,7 @@ enum Command {
     },
     /// Open a window showing a host's screen.
     View {
-        /// e.g. 100.100.101.1, laptop, or laptop.tail1234.ts.net:7171
+        /// e.g. 100.100.101.1, laptop, or laptop.tail1234.ts.net:28326
         target: String,
         /// Which of the host's displays to show (0 = primary; see `illum displays` on the host).
         #[arg(long, default_value_t = 0)]
@@ -166,7 +166,7 @@ enum Command {
         #[arg(long)]
         software_render: bool,
         /// Measurement run: the host streams at exactly --max-bitrate, --max-fps, --fec-min and
-        /// --scale, with no adaptation (docs/testing/measure.md).
+        /// --scale, with no adaptation.
         #[arg(long)]
         fixed: bool,
         /// Resolution as a percentage of the host display (with --fixed; default native).
@@ -234,7 +234,7 @@ enum Command {
     List,
     /// Remove the pinned key for a host address (after the host was reinstalled).
     Forget {
-        /// The address exactly as you connected to it, e.g. 100.100.101.1:7171
+        /// The address exactly as you connected to it, e.g. 100.100.101.1:28326
         address: String,
     },
 }
@@ -1183,7 +1183,7 @@ struct ExtraSetup {
 }
 
 /// Starts a session of its own for another of the host's displays, shown as a tile in this
-/// window (§14): the same limits and permission, no sound and no clipboard. It reconnects
+/// window: the same limits and permission, no sound and no clipboard. It reconnects
 /// by itself, as the main one does, until it is closed.
 fn open_extra(setup: &ExtraSetup, display: u32, scale: u32) -> illum_ui::ExtraView {
     let number = display + 1;
@@ -1405,7 +1405,7 @@ fn run_view(
         });
     }
     // All host-bound sends from the window go through this; the reconnect loop points it at the
-    // current connection (§5.5).
+    // current connection.
     let live = illum::viewer::LiveSender::default();
     live.set(Some(conn.sender()));
     let media_slot = MediaSlot::default();
@@ -1440,7 +1440,7 @@ fn run_view(
     };
     // The session runs in a loop: an unexpected drop, with reconnect on (the default), re-dials
     // the host and resumes — keeping the window, clipboard, input and media slot — with a
-    // backoff. A clean end (the host said goodbye) stops it (§5.5).
+    // backoff. A clean end (the host said goodbye) stops it.
     let session = {
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();

@@ -94,7 +94,7 @@ impl DeskInfo {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TrustData {
     version: u32,
-    /// Keyed by the address as dialled, e.g. `100.100.101.1:7171`.
+    /// Keyed by the address as dialled, e.g. `100.100.101.1:28326`.
     known_hosts: BTreeMap<String, KnownHost>,
     /// Keyed by the peer's certificate fingerprint.
     paired_peers: BTreeMap<String, PairedPeer>,

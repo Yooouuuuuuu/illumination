@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Several of the host's displays in one window, as tiles (architecture §14).
+//! Several of the host's displays in one window, as tiles.
 //!
 //! Two displays sit side by side, three or four in a two-by-two grid; more than four are not
 //! shown together. Every tile starts the same size whatever the displays' own sizes are, and

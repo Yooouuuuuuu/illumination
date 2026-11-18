@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The session window's two bars (architecture §14): a thin one on top with what is changed
+//! The session window's two bars: a thin one on top with what is changed
 //! often (which display, the picture's size, the window's mode) and a "More" menu for the
 //! rest; a quiet line at the bottom saying who the session is with and how it is doing. The
 //! picture sits between them. In Focus mode and in full screen both are hidden and a small

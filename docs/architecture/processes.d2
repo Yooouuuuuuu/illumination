@@ -1,37 +1,53 @@
-# Illumination process model on one machine (Windows).
-# One binary, four roles; mirrors AnyDesk 9.7 as observed on 2026-10-19.
+# Illumination's processes on one installed Windows machine (architecture.md, section 3).
+# One binary, `illum`; the command line decides what a process is.
+# Render with: d2 processes.d2 processes.svg
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 24
+  }
+}
 
 direction: right
 
-remote: Remote illum (controller) {
-  shape: rectangle
+**.style.stroke: "#1E2A4A"
+**.style.font-color: "#1E2A4A"
+**.style.stroke-width: 2
+(** -> **)[*].style.stroke: "#1E2A4A"
+(** <- **)[*].style.stroke: "#1E2A4A"
+(** -> **)[*].style.font-color: "#44506E"
+(** <- **)[*].style.font-color: "#44506E"
+
+user: "Runs as the signed-in person" {
+  style.fill: "#FFFCE3"
+  style.border-radius: 12
+  view: "illum view <address>\na session window,\none per outgoing session" {style.fill: "#FFFFFF"}
+  app: "illum\nthe app: window and tray" {style.fill: "#FFE012"}
+  ask: "illum ask\nthe question about\na new desk" {style.fill: "#FFFFFF"}
+}
+
+system: "Runs as the system" {
+  style.fill: "#DDE6F6"
+  style.border-radius: 12
+  host: "illum --service --from-service\nthe host: listens, serves sessions\n(in the session at the screen)" {style.fill: "#B9EFB0"}
+  service: "illum service run\nthe Windows service (session 0)\nalso sends Ctrl+Alt+Del for the host" {style.fill: "#C9DBFF"}
+  home: "Home folder\n%ProgramData%\Illumination\nkey · desks · settings · status" {
+    shape: cylinder
+    style.fill: "#FFFFFF"
+  }
+}
+
+remote: "Another desk" {
+  style.fill: "#FFFFFF"
   style.stroke-dash: 4
 }
 
-host: Host machine {
-  session0: Session 0 (SYSTEM) {
-    service: "illum --service\n(always on)" {
-      tooltip: "Listens on the chosen interfaces only, terminates TLS, owns pairing, permissions and config"
-    }
-  }
-
-  console: Console session (e.g. session 1) {
-    backend: "illum --backend\n(SYSTEM, one per incoming session)" {
-      tooltip: "Capture, encode, input injection, desktop switching, accept/permissions panel"
-    }
-    control: "illum --control\n(logged-in user)" {
-      tooltip: "Clipboard, tray"
-    }
-    frontend: "illum\n(app window)" {
-      tooltip: "Device list, outgoing connections, viewer"
-    }
-  }
-
-  session0.service -> console.backend: "spawns per session\n(as SYSTEM in console session)"
-  session0.service -> console.control: "spawns per user session"
-  session0.service <-> console.backend: local IPC {style.stroke-dash: 3}
-  session0.service <-> console.control: local IPC {style.stroke-dash: 3}
-  session0.service <-> console.frontend: local IPC {style.stroke-dash: 3}
-}
-
-remote -> host.session0.service: "TCP + TLS 1.3 (mutual)\nover Tailscale / LAN\ndefault port 7171"
+user.app -> user.view: "starts"
+user.app -> system.host: "asks for changes\n(the pipe)" {style.stroke-dash: 3}
+user.app -> system.service: "starts and stops"
+user.ask <- system.host: "starts,\nreads the answer"
+system.host <- system.service: "keeps it\nrunning"
+system.host -> system.home: "reads and\nwrites"
+system.host <- remote: "incoming · port 28326\nTLS over TCP: control, input, clipboard\nUDP: video and sound"
+user.view -> remote: "outgoing, the same two paths"

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/illum", "crates/illum-core", "crates/illum-ffmpeg", "crates/illum-media", "crates/illum-net", "crates/illum-ui", "crates/illum-win"]
+members = ["crates/illum", "crates/illum-core", "crates/illum-ffmpeg", "crates/illum-media", "crates/illum-net", "crates/illum-sign", "crates/illum-ui", "crates/illum-win"]
 
 [workspace.package]
-version = "0.14.8"
+version = "0.15.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/Yooouuuuuuu/illumination"

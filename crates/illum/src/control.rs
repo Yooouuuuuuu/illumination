@@ -23,6 +23,10 @@ pub enum Request {
     Settings { settings: Settings },
     /// End the sessions of the desk of this name that is connected to this one.
     EndSession { name: String },
+    /// Update to the latest release: download it, check it and run its installer.
+    Update,
+    /// Stop a download on its way.
+    CancelUpdate,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,8 +56,16 @@ pub fn pipe_name(home: &Path, usual: bool) -> String {
 /// Ends the sessions of the desk of that name; says how many there were.
 pub type EndSessions = Arc<dyn Fn(&str) -> usize + Send + Sync>;
 
+/// What the host does for the app besides changing files.
+#[derive(Clone)]
+pub struct Hands {
+    pub end: EndSessions,
+    /// The updater; `None` where there is none (tests).
+    pub update: Option<Arc<crate::update::Installer>>,
+}
+
 /// Carries out one request in the home folder. This is the host's side.
-pub fn carry_out(home: &Path, end: &EndSessions, request: &Request) -> Reply {
+pub fn carry_out(home: &Path, hands: &Hands, request: &Request) -> Reply {
     let done = match request {
         Request::Trust { change } => TrustStore::load(home.join("trust.json"))
             .and_then(|mut store| store.apply(change))
@@ -61,7 +73,17 @@ pub fn carry_out(home: &Path, end: &EndSessions, request: &Request) -> Reply {
         Request::Settings { settings } => crate::app::save_settings(home, settings)
             .map(|()| true)
             .map_err(|e| format!("{e:#}")),
-        Request::EndSession { name } => Ok(end(name) > 0),
+        Request::EndSession { name } => Ok((hands.end)(name) > 0),
+        Request::Update => match &hands.update {
+            Some(installer) => installer.start().map(|()| true),
+            None => Err("this host does not update".to_string()),
+        },
+        Request::CancelUpdate => {
+            if let Some(installer) = &hands.update {
+                installer.cancel();
+            }
+            Ok(true)
+        }
     };
     match done {
         Ok(changed) => Reply {
@@ -78,7 +100,7 @@ pub fn carry_out(home: &Path, end: &EndSessions, request: &Request) -> Reply {
 }
 
 /// Answers one line.
-fn answer(home: &Path, end: &EndSessions, line: &str) -> Reply {
+fn answer(home: &Path, hands: &Hands, line: &str) -> Reply {
     let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(e) => {
@@ -112,9 +134,11 @@ fn answer(home: &Path, end: &EndSessions, line: &str) -> Reply {
         },
         Request::Settings { .. } => "save the settings".to_string(),
         Request::EndSession { name } => format!("disconnect \"{name}\""),
+        Request::Update => "update to the latest release".to_string(),
+        Request::CancelUpdate => "stop the update".to_string(),
     };
     tracing::info!(target: "service", "Asked by the app: {what}.");
-    let reply = carry_out(home, end, &request);
+    let reply = carry_out(home, hands, &request);
     if !reply.ok {
         tracing::warn!(target: "service", "Not done: {}", reply.why);
     }
@@ -174,12 +198,12 @@ pub fn trust_through(pipe: String) -> Through {
 /// line and given one. Opened for the system and for whoever is signed in at this screen
 /// now; when run by hand (not as the system), for the person running it.
 #[cfg(windows)]
-pub async fn serve(home: std::path::PathBuf, pipe: String, end: EndSessions) {
+pub async fn serve(home: std::path::PathBuf, pipe: String, hands: Hands) {
     if illum_win::runs_as_system() {
         let signed_in = || illum_win::own_session().and_then(illum_win::session_user_sid);
-        serve_for(home, pipe, end, Some(signed_in)).await
+        serve_for(home, pipe, hands, Some(signed_in)).await
     } else {
-        serve_for(home, pipe, end, None::<fn() -> Option<String>>).await
+        serve_for(home, pipe, hands, None::<fn() -> Option<String>>).await
     }
 }
 
@@ -189,7 +213,7 @@ pub async fn serve(home: std::path::PathBuf, pipe: String, end: EndSessions) {
 async fn serve_for(
     home: std::path::PathBuf,
     pipe: String,
-    end: EndSessions,
+    hands: Hands,
     guest: Option<impl Fn() -> Option<String>>,
 ) {
     use std::os::windows::io::AsRawHandle;
@@ -253,7 +277,7 @@ async fn serve_for(
             continue;
         }
         let home = home.clone();
-        let end = end.clone();
+        let hands = hands.clone();
         let served = async move {
             let (reading, mut writing) = tokio::io::split(server);
             let mut reading = BufReader::new(reading);
@@ -262,7 +286,7 @@ async fn serve_for(
                 .take(LONGEST_REQUEST)
                 .read_line(&mut line)
                 .await?;
-            let reply = tokio::task::spawn_blocking(move || answer(&home, &end, line.trim()))
+            let reply = tokio::task::spawn_blocking(move || answer(&home, &hands, line.trim()))
                 .await
                 .map_err(std::io::Error::other)?;
             let mut text = serde_json::to_string(&reply).map_err(std::io::Error::other)?;
@@ -285,7 +309,7 @@ async fn serve_for(
 }
 
 #[cfg(not(windows))]
-pub async fn serve(_home: std::path::PathBuf, _pipe: String, _end: EndSessions) {
+pub async fn serve(_home: std::path::PathBuf, _pipe: String, _hands: Hands) {
     // No installed service on the other systems yet (architecture §3).
     std::future::pending::<()>().await
 }
@@ -312,7 +336,8 @@ mod tests {
             noted.lock().unwrap().push(name.to_string());
             usize::from(name == "laptop")
         });
-        let serving = runtime.spawn(serve(home.clone(), pipe.clone(), end));
+        let hands = Hands { end, update: None };
+        let serving = runtime.spawn(serve(home.clone(), pipe.clone(), hands));
 
         let mut store = TrustStore::load(home.join("trust.json")).unwrap();
         store.write_through(trust_through(pipe.clone()));
@@ -417,7 +442,10 @@ mod tests {
         let serving = runtime.spawn(serve_for(
             home.clone(),
             pipe.clone(),
-            Arc::new(|_| 0),
+            Hands {
+                end: Arc::new(|_| 0),
+                update: None,
+            },
             Some(move || Some(guest.clone())),
         ));
         assert_eq!(ask(&pipe, &request), Ok(true), "the account named gets in");
@@ -430,7 +458,10 @@ mod tests {
             let serving = runtime.spawn(serve_for(
                 home.clone(),
                 pipe.clone(),
-                Arc::new(|_| 0),
+                Hands {
+                    end: Arc::new(|_| 0),
+                    update: None,
+                },
                 Some(|| None),
             ));
             let refused = ask(&pipe, &request).unwrap_err();

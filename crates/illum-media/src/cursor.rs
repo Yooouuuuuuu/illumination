@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The cursor travels separately from the video and is drawn by the viewer (architecture §5.5).
+//! The cursor travels separately from the video and is drawn by the viewer (architecture §5.4).
 //!
 //! Wire format on the cursor channel (little-endian):
 //! ```text

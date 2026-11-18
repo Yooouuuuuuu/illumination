@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Per-second records of a session, for measurement runs (docs/testing/measure.md): everything
+//! Per-second records of a session, for measurement runs: everything
 //! the title bar shows, kept rather than summarised, plus what the host reports about its own
 //! side. Written as JSON when the viewer exits; `illum report` turns a folder of them into a
 //! table.

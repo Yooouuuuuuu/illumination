@@ -17,7 +17,7 @@ use std::fmt;
 pub const MIN_BITRATE_BPS: u64 = 1_000_000;
 
 /// Lost frames in a second that, with almost nothing shown, mean "frozen by loss" rather than
-/// "still screen". While the viewer waits for a keyframe the host retries one every 250 ms and
+/// "still screen". While the viewer waits for a keyframe the host retries one every 500 ms and
 /// the small frames in between arrive fine, so a freeze shows as 2–4 lost frames a second, not
 /// dozens (the harness's 50 % loss had suggested a higher bar; the Wi-Fi log corrected it).
 pub const FREEZE_LOST_FRAMES: u32 = 2;
@@ -36,6 +36,10 @@ pub fn encoder_bitrate(rung_bps: u64, fec_percent: u32) -> u64 {
 const BITRATE_STEP: (u64, u64) = (8, 10);
 /// Bitrate rungs before frame-rate rungs begin (top included): 1, .8, .64, .51, .41.
 const BITRATE_RUNGS: usize = 5;
+/// A top above the usual one gets more bitrate rungs, down to where the usual ladder's
+/// bitrate rungs end (20 Mb/s x 0.8^4): however high the top was set, the ladder still
+/// reaches the rates an ordinary link carries.
+const BITRATE_RUNGS_REACH_BPS: u64 = 8_192_000;
 /// Frame-rate rungs, those below the user's maximum.
 const FPS_RUNGS: [u32; 5] = [60, 45, 30, 20, 15];
 /// Resolution rungs, as a percentage of the native size (only when the user allows them: the
@@ -178,7 +182,7 @@ impl Ladder {
         let max_fps = limits.max_fps.max(FPS_RUNGS[FPS_RUNGS.len() - 1]);
         let mut rungs = Vec::new();
         let mut bitrate = limits.max_bitrate_bps.max(MIN_BITRATE_BPS);
-        for _ in 0..BITRATE_RUNGS {
+        while rungs.len() < BITRATE_RUNGS || bitrate >= BITRATE_RUNGS_REACH_BPS {
             rungs.push(Rung {
                 bitrate_bps: bitrate,
                 fps: max_fps,
@@ -975,6 +979,28 @@ mod tests {
         }
         assert_eq!(c.index(), 0, "the tenth second was green");
         assert_eq!(c.observe(Grade::Red, false), Some(Move::Down));
+    }
+
+    #[test]
+    fn a_high_top_still_reaches_ordinary_rates() {
+        let l = Ladder::new(Limits {
+            max_bitrate_bps: 200_000_000,
+            ..top()
+        });
+        let r = l.rungs();
+        assert_eq!(r[0].bitrate_bps, 200_000_000);
+        let full_rate: Vec<&Rung> = r.iter().filter(|x| x.fps == 60).collect();
+        // One step of 0.8 at a time, down to where a 20 Mb/s ladder's bitrate rungs end.
+        assert!(
+            full_rate
+                .windows(2)
+                .all(|w| w[1].bitrate_bps < w[0].bitrate_bps)
+        );
+        let lowest = full_rate[full_rate.len() - 1].bitrate_bps;
+        assert!((8_192_000..10_240_000).contains(&lowest), "{lowest}");
+        // The usual top is untouched: five bitrate rungs.
+        let usual = Ladder::new(top());
+        assert_eq!(usual.rungs().iter().filter(|x| x.fps == 60).count(), 5);
     }
 
     #[test]
