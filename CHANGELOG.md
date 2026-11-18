@@ -11,6 +11,25 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-19
+
+Released.
+
+### Fixed
+
+- **A connected desk goes by the name you gave it.** The top of the main
+  window ("Laptop is connected"), the Connected here list and the update
+  dialog showed the name the other desk gave itself, not the one you set in
+  Edit.
+
+### Changed
+
+- **The update dialog shows the release's notes as the release page has
+  them**, with their bold, and says the version you are on ("Current:
+  v0.15.1"). It showed the changelog entry. `illum-sign release` now takes the
+  notes from the release's section of the release history and also writes
+  them to `release-notes.md`, the text of the GitHub Release.
+
 ## [0.15.0] - 2026-11-19
 
 Released: the first release. It also ships 0.13.0 to 0.14.8, which were not

@@ -700,7 +700,7 @@ mod tests {
         with_update.update = crate::app::Updates {
             available: Some(crate::app::NewRelease {
                 version: "0.15.1".into(),
-                notes: "### Fixed\n\n- **Connecting to a desk that is already open** brings its\n  session window to the front instead of opening a second one.\n- The update check says when it could not reach GitHub.\n\n### Changed\n\n- **Max bitrate** goes up to 200 Mb/s.\n".into(),
+                notes: "A small fix, and the first release that arrives through the updater.\n\n**A connected desk goes by the name you gave it.** While a desk was connected, the top of the\nmain window said the name the other machine gives itself. It now says your name.\n\nNew installs: download `Illumination_0.15.1_x64-setup.exe` below.\n\nFull history in the [CHANGELOG](https://example.com).\n".into(),
             }),
             checked: crate::app::Checked::Done(with_update.now),
             installed: true,

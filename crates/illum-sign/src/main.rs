@@ -6,9 +6,11 @@
 //!       %USERPROFILE%\.illumination\update.key), protected by a password asked for here; the
 //!       public key goes into the program (crates/illum/assets/update-key.pub).
 //!
-//!   illum-sign release INSTALLER --version X.Y.Z [--key PATH] [--changelog PATH]
-//!       Signs a release's installer and writes its manifest: INSTALLER.sig and latest.json
-//!       beside it, with the version's changelog entry as the notes.
+//!   illum-sign release INSTALLER --version X.Y.Z [--key PATH] [--notes PATH]
+//!       Signs a release's installer and writes its manifest: INSTALLER.sig, latest.json and
+//!       release-notes.md beside it. The notes are the release's section of the release
+//!       history (docs/dev/release/release-history.md), which is also the GitHub Release's
+//!       body, so the app shows what the release page says.
 //!
 //! The password is read from ILLUM_SIGNING_KEY_PASSWORD when that is set, else asked for.
 //! It is never written anywhere.
@@ -39,14 +41,14 @@ fn run(args: Vec<String>) -> Result<()> {
     let command = args.next().unwrap_or_default();
     let mut key = None;
     let mut version = None;
-    let mut changelog = None;
+    let mut notes = None;
     let mut file = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().with_context(|| format!("{arg} needs a value"));
         match arg.as_str() {
             "--key" => key = Some(PathBuf::from(value()?)),
             "--version" => version = Some(value()?),
-            "--changelog" => changelog = Some(PathBuf::from(value()?)),
+            "--notes" => notes = Some(PathBuf::from(value()?)),
             other if !other.starts_with("--") && file.is_none() => {
                 file = Some(PathBuf::from(other))
             }
@@ -63,10 +65,11 @@ fn run(args: Vec<String>) -> Result<()> {
             let file =
                 file.context("which installer? illum-sign release INSTALLER --version X.Y.Z")?;
             let version = version.context("--version X.Y.Z is needed")?;
-            let changelog = changelog.unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../CHANGELOG.md")
+            let notes = notes.unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../docs/dev/release/release-history.md")
             });
-            release(&key, &file, &version, &changelog)
+            release(&key, &file, &version, &notes)
         }
         _ => bail!("illum-sign generate | illum-sign release INSTALLER --version X.Y.Z"),
     }
@@ -120,17 +123,22 @@ fn generate(key: &Path, public: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The changelog entry of `version`: what is under its heading, up to the next version's.
-fn changelog_entry(changelog: &str, version: &str) -> Option<String> {
-    let heading = format!("## [{version}]");
-    let mut lines = changelog.lines().skip_while(|l| !l.starts_with(&heading));
+/// The release's notes: what is under its heading `## vX.Y.Z — Title` in the release history,
+/// up to the `---` that closes it (or the next release's heading).
+fn release_notes(history: &str, version: &str) -> Option<String> {
+    let heading = format!("## v{version}");
+    let mut lines = history
+        .lines()
+        .skip_while(|l| !(l.trim_end() == heading || l.starts_with(&format!("{heading} "))));
     lines.next()?;
-    let entry: Vec<&str> = lines.take_while(|l| !l.starts_with("## [")).collect();
+    let entry: Vec<&str> = lines
+        .take_while(|l| l.trim() != "---" && !l.starts_with("## v"))
+        .collect();
     let text = entry.join("\n").trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
-fn release(key: &Path, installer: &Path, version: &str, changelog: &Path) -> Result<()> {
+fn release(key: &Path, installer: &Path, version: &str, history: &Path) -> Result<()> {
     let name = installer
         .file_name()
         .and_then(|n| n.to_str())
@@ -140,10 +148,10 @@ fn release(key: &Path, installer: &Path, version: &str, changelog: &Path) -> Res
     if name != expected {
         bail!("the installer is {name}, but version {version}'s is {expected}");
     }
-    let notes = std::fs::read_to_string(changelog)
-        .with_context(|| format!("reading {}", changelog.display()))?;
-    let notes = changelog_entry(&notes, version)
-        .with_context(|| format!("{} has no entry for {version}", changelog.display()))?;
+    let notes = std::fs::read_to_string(history)
+        .with_context(|| format!("reading {}", history.display()))?;
+    let notes = release_notes(&notes, version)
+        .with_context(|| format!("{} has no section for v{version}", history.display()))?;
 
     let public = std::fs::read_to_string(PUBLIC_KEY_FILE).context("reading the public key")?;
     let public = minisign::PublicKeyBox::from_string(&public)
@@ -189,8 +197,13 @@ fn release(key: &Path, installer: &Path, version: &str, changelog: &Path) -> Res
         serde_json::to_string_pretty(&manifest)? + "\n",
     )
     .with_context(|| format!("writing {}", manifest_path.display()))?;
+    // The same text, for the GitHub Release's body.
+    let notes_path = installer.with_file_name("release-notes.md");
+    std::fs::write(&notes_path, format!("{notes}\n"))
+        .with_context(|| format!("writing {}", notes_path.display()))?;
     println!("Signed:   {}", sig_path.display());
     println!("Manifest: {}", manifest_path.display());
+    println!("Notes:    {}", notes_path.display());
     Ok(())
 }
 
@@ -219,15 +232,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_entry_is_what_is_under_its_heading() {
-        let log = "# Changelog\n\n## [Unreleased]\n\n## [0.15.1] - 2026-11-20\n\n### Fixed\n\n- A.\n  More.\n\n## [0.15.0] - 2026-11-19\n\n- B.\n";
+    fn the_notes_are_the_release_section() {
+        let history = "# Release history\n\nIntro.\n\n---\n\n## v0.15.2 — Names\n\nA small fix.\n\n**Bold.** Text.\n\nFull history.\n\n---\n\n## v0.15.0 — The first release\n\nFirst.\n";
         assert_eq!(
-            changelog_entry(log, "0.15.1").as_deref(),
-            Some("### Fixed\n\n- A.\n  More.")
+            release_notes(history, "0.15.2").as_deref(),
+            Some("A small fix.\n\n**Bold.** Text.\n\nFull history.")
         );
-        assert_eq!(changelog_entry(log, "0.15.0").as_deref(), Some("- B."));
-        assert_eq!(changelog_entry(log, "0.14.0"), None);
-        assert_eq!(changelog_entry(log, "0.15"), None);
+        assert_eq!(release_notes(history, "0.15.0").as_deref(), Some("First."));
+        assert_eq!(release_notes(history, "0.15.1"), None);
+        assert_eq!(release_notes(history, "0.15"), None);
     }
 
     #[test]

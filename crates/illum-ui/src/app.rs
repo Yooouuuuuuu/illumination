@@ -286,9 +286,9 @@ pub fn note_lines(notes: &str) -> Vec<NoteLine> {
     lines
 }
 
-/// Markdown's marks taken out: bold, code, and links (their words kept).
+/// Markdown's marks taken out: code, and links (their words kept). Bold stays, for drawing.
 fn plain(text: &str) -> String {
-    let text = text.replace("**", "").replace('`', "");
+    let text = text.replace('`', "");
     let mut out = String::new();
     let mut rest = text.as_str();
     while let Some(open) = rest.find('[') {
@@ -1338,7 +1338,9 @@ impl HomeUi {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(&guest.name).font(heading(16.0)));
+                                    ui.label(
+                                        RichText::new(guest_name(state, guest)).font(heading(16.0)),
+                                    );
                                     ui.label(
                                         RichText::new(&guest.address).font(mono(12.0)).color(MUTED),
                                     );
@@ -1442,7 +1444,7 @@ impl HomeUi {
                 return;
             }
             ui.label(
-                RichText::new(format!("You have {}", state.version))
+                RichText::new(format!("Current: v{}", state.version))
                     .font(mono(13.0))
                     .color(MUTED),
             );
@@ -1828,10 +1830,30 @@ pub fn duration(seconds: u64) -> String {
     }
 }
 
+/// What a connected desk is called here: your own name for it when you gave one (the desk at
+/// that address), else the name it gave itself.
+pub fn guest_name(state: &AppState, guest: &Guest) -> String {
+    state
+        .desks
+        .iter()
+        .find(|d| d.address == guest.address && !d.own_name.is_empty())
+        .map_or_else(|| guest.name.clone(), |d| d.own_name.clone())
+}
+
+/// The desks connected here, by the names shown for them.
+fn connected_names(state: &AppState) -> Vec<String> {
+    if state.guests.len() == state.sessions.len() {
+        state.guests.iter().map(|g| guest_name(state, g)).collect()
+    } else {
+        state.sessions.clone()
+    }
+}
+
 /// This desk's state, top right. Returns whether it was clicked while a desk is connected
 /// (which opens the list of them).
 fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
-    let (text, fill, solid) = match (&state.incoming, state.sessions.as_slice()) {
+    let names = connected_names(state);
+    let (text, fill, solid) = match (&state.incoming, names.as_slice()) {
         (Incoming::Failed(_), _) => ("Cannot be reached".to_string(), CORAL, false),
         (_, [one]) => (format!("{one} is connected"), YELLOW, true),
         (_, [_, ..]) => (
@@ -1999,15 +2021,40 @@ fn release_notes(ui: &mut Ui, notes: &str) {
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             ui.label(RichText::new("•").size(14.0));
-                            ui.add(egui::Label::new(RichText::new(text).size(14.0)).wrap());
+                            ui.add(egui::Label::new(with_bold(&text)).wrap());
                         });
                     }
                     NoteLine::Text(text) => {
-                        ui.label(RichText::new(text).size(14.0));
+                        ui.add(egui::Label::new(with_bold(&text)).wrap());
                     }
                 }
             }
         });
+}
+
+/// A line of notes with its `**bold**` parts in semibold.
+fn with_bold(text: &str) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for (i, part) in text.split("**").enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        let font = if i % 2 == 1 {
+            semibold(14.0)
+        } else {
+            FontId::proportional(14.0)
+        };
+        job.append(
+            part,
+            0.0,
+            egui::TextFormat {
+                font_id: font,
+                color: NAVY,
+                ..Default::default()
+            },
+        );
+    }
+    job
 }
 
 /// A boxed line in a dialog: coral for what stands in the way, cream for a note.
@@ -2026,7 +2073,7 @@ fn note_box(ui: &mut Ui, fill: Color32, text: &str) {
 /// Why an update has to wait: what is connected, in words.
 fn busy_sentence(state: &AppState) -> String {
     let mut parts = Vec::new();
-    match state.sessions.as_slice() {
+    match connected_names(state).as_slice() {
         [] => {}
         [one] => parts.push(format!("{one} is connected here")),
         [a, b] => parts.push(format!("{a} and {b} are connected here")),
@@ -2688,7 +2735,7 @@ mod tests {
                 NoteLine::Text("Not released.".into()),
                 NoteLine::Heading("Added".into()),
                 NoteLine::Bullet(
-                    "Updates: the app finds a newer release and installs it (how).".into()
+                    "**Updates**: the app finds a newer release and installs it (how).".into()
                 ),
                 NoteLine::Bullet("illum-sign, for releases.".into()),
                 NoteLine::Heading("Fixed".into()),
@@ -2696,6 +2743,29 @@ mod tests {
             ]
         );
         assert!(note_lines("").is_empty());
+    }
+
+    /// A connected desk goes by the name you gave it, found by its address.
+    #[test]
+    fn a_connected_desk_goes_by_your_name_for_it() {
+        let mut state = sample_state();
+        state.sessions = vec!["LAPTOP-AVOEN7VP".into(), "render-box".into()];
+        state.guests = vec![
+            Guest {
+                name: "LAPTOP-AVOEN7VP".into(),
+                address: "100.64.0.20".into(),
+                since: 0,
+            },
+            Guest {
+                name: "render-box".into(),
+                address: "100.64.0.31".into(),
+                since: 0,
+            },
+        ];
+        // The sample's desk at 100.64.0.20 is named "Laptop"; render-box has no name of yours.
+        assert_eq!(connected_names(&state), ["Laptop", "render-box"]);
+        state.guests.pop();
+        assert_eq!(connected_names(&state), ["LAPTOP-AVOEN7VP", "render-box"]);
     }
 
     #[test]
