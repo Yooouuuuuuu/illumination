@@ -11,7 +11,41 @@ and the evidence in [docs/lessons/lessons.md](docs/lessons/lessons.md).
 
 ## [Unreleased]
 
-## [0.14.5] - 2026-11-19
+## [0.14.6] - 2026-11-18
+
+Not released.
+
+### Added
+
+- **"Always allow" as the setting for new desks**, beside Ask and Never allow
+  (Settings, Incoming). Ask stays the default. With "Always allow", any desk
+  that can reach this one connects without a question; the top of the main
+  window then reads "Open to any desk".
+- **Keyboard and pointer are remembered per desk.** What you choose under More
+  in a session window is used again the next time you connect to that desk.
+
+### Changed
+
+- **Keyboard and pointer left Settings.** Both start as Remote, and both read
+  "Remote | Local" (the pointer said "This desk's | The host's"). The pointer's
+  default was this desk's own. `--pointer` takes `remote` and `local`; `desk`
+  and `host` still work.
+- **Permission wording**: "Always allow", "Ask", "Never allow". Editing a desk
+  asks "When it connects here", and "Default" says what the default is.
+- **Desk cards**: double-click a card to connect. The button at its bottom
+  right opens Connect and Edit. A desk's own permission is a mark beside its
+  address (hover for the words) instead of a line of text.
+- **Settings menu** lists the four sections only.
+- The state at the top of the main window ("Ready for connections") is smaller
+  than the Settings button, and the two cards of the first row lost their
+  empty space.
+
+Verified with cargo fmt, cargo clippy and cargo test (a new desk under each of
+the three settings, an old settings file read as before) and by pictures of
+the windows. Not yet tried by hand: the double click, the card's menu, and the
+remembered keyboard and pointer.
+
+## [0.14.5] - 2026-11-18
 
 Not released.
 

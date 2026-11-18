@@ -418,8 +418,8 @@ fn more_menu(ui: &mut Ui, state: &BarState, out: &mut Vec<BarAction>) {
         }
         group(ui, "Pointer");
         for (mode, name) in [
-            (PointerMode::Desk, "This desk's"),
-            (PointerMode::Host, "The host's"),
+            (PointerMode::Remote, "Remote"),
+            (PointerMode::Local, "Local"),
         ] {
             let on = state.pointer == mode;
             if entry(ui, name, on) && !on {
@@ -562,7 +562,7 @@ pub fn sample() -> BarState {
         view: ViewMode::Fit,
         keyboard: KeyboardMode::Remote,
         keyboard_grabbed: true,
-        pointer: PointerMode::Desk,
+        pointer: PointerMode::Remote,
         mode: WindowMode::Detail,
         reveal: false,
         status: "H.265 · 30 fps · 18 ms · input 12 ms".into(),

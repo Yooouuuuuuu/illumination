@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(on_disk.known_hosts().count(), 19);
 
         let settings = Settings {
-            refuse_new: true,
+            new_desks: illum_ui::app::Permission::Never,
             max_fps: 60,
             ..Settings::default()
         };

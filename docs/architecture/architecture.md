@@ -364,7 +364,8 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
     was). Embedded is gone as a choice: it had no case left that the two below do not serve
     better. Its drawing stays for what it was always used for in both modes: the host's
     pointer in a view-only session, and while the controller's mouse is outside the window.
-  - **This desk's pointers** (`--pointer desk`, the default). The host says which standard
+  - **This desk's pointers** (`--pointer local`; `desk` until v0.14.5, when it was the
+    default). The host says which standard
     pointer it shows (`CursorKind`: arrow, text, hand, wait, progress, crosshair, the four
     resizes, move, not allowed, help) and the viewer shows its own system's pointer of that
     kind (the window library's named cursors, the same on every OS). No picture is converted,
@@ -374,11 +375,12 @@ BtbN fetched by `scripts/get-ffmpeg.ps1`):
     pointer on screen (`GetCursorInfo`) is standard exactly when its handle is one of those
     (`illum_win::pointer_kind`). A program's own pointer (a brush, a crosshair in a game)
     has no kind and comes as the host's picture.
-  - **The host's pointers** (`--pointer host`): the picture for every pointer, as Native
-    did.
+  - **The host's pointers** (`--pointer remote`, the default from v0.14.6; `host` before):
+    the picture for every pointer, as Native did.
   - The kind travels with the picture in one message (cursor message 3), sent only to a
     viewer that lists `cursor-kind`; an older viewer gets message 2 as before. `native` and
-    `embedded`, in a saved setting or on a command line, read as `desk` and `host`.
+    `embedded`, and `desk` and `host` after them, in a saved choice or on a command line,
+    read as `local` and `remote`.
   - **Inverting pixels.** The text pointer is drawn by Windows as the opposite of what is
     under it. A viewer cannot do that: it hands the picture to its system as a pointer,
     which only blends. Until v0.13.6 such pixels were drawn black, and the text pointer was
@@ -806,7 +808,7 @@ of reach.
 host clamps: bitrate to its own ceiling, frame rate to 15–120): `--latency-limit 50`,
 `--max-bitrate 20`, `--max-fps 30`, `--allow-scale` (v0.10.0), `--mute` (v0.7.0),
 `--software-decode` (v0.7.2; the host side has `--no-audio`), `--software-render` (v0.8.0, a
-debugging switch rather than a setting: draw on the CPU), `--pointer desk|host`
+debugging switch rather than a setting: draw on the CPU), `--pointer remote|local`
 (v0.11.0, viewer-side only). `--fec-min/--fec-max` remain for measurement runs only. The GPU and encoder choices are the UI milestone's; the "best possible
 on this link" message is still to do.
 
@@ -1138,7 +1140,9 @@ them follow in 0.14.1 to 0.14.3, drawn on the design canvas named in §14).
   one entry.
 - **Permission** is whether a desk may connect here, and has three values: always, ask,
   never. A desk has one of its own or none. With none, the setting for all desks applies,
-  which has two values: ask (the default) or refuse. A desk's own permission always wins.
+  which has the same three (v0.14.6; ask is the default, and until then "always" was not
+  offered there). A desk let in because the setting says always is not made a paired peer:
+  the setting can change, and then it is asked about. A desk's own permission always wins.
   "Always" is what being a paired peer was and is stored as that, so files from before
   read unchanged.
 - **The question about a desk** has four answers: no, this time, always, never. "This
@@ -1330,9 +1334,25 @@ app is one thing that is either running, with an icon in the tray, or not runnin
     swaps them, and a press near a line between tiles moves the line. The tiles show their
     displays' numbers meanwhile. One mode, not two: the middle of a tile and the line
     between two never ask for the same thing.
-  - *The arrangement is kept per desk*, by the host's key, in `layouts.json` among the
+  - *The arrangement is kept per desk*, by the host's key, in `desk-choices.json` among the
     person's own files, and used again if the host still has the same displays.
   - Only with the GPU presenter, and not in a popped-out window or a measurement run.
+- **Round of changes after the first use on two desks (v0.14.6).**
+  - *Keyboard and pointer are a session's matter, not a setting.* They left Settings. Both
+    begin as "Remote", both read "Remote | Local" under More (the pointer said "This desk's |
+    The host's"), and what is chosen there is kept for that desk, in the file that keeps its
+    arrangement of displays (`desk-choices.json`, by the host's key). `--keyboard` and
+    `--pointer` on a command line still win, and are not kept.
+  - *Permission in words that say what happens*: "Always allow", "Ask", "Never allow",
+    under "When a new desk connects" in Settings and "When it connects here" for one desk,
+    where "Default" also says what the default is now.
+  - *The card of a desk* is the thing to act on: a double click connects. The one button, at
+    its bottom right, opens Connect and Edit. A permission of its own is a mark beside the
+    address (a tick, a question mark, a cross, on the permission's colour; the words on
+    hovering) instead of a line of text. What a card says is unchanged.
+  - *Settings' menu* lists the four sections only, with the dot of an unsaved change on the
+    section. The state at the top of the main window is smaller than the button beside it,
+    and the two cards of the first row are as tall as their contents.
 
 *Online marks (v0.13.5).* Each card under "Your desks" says whether that desk answers right
 now: its little screen is lit and the line reads "Online", or it is dark and reads

@@ -43,7 +43,7 @@ pub struct PairedPeer {
 }
 
 /// Whether a desk may connect to this one. A desk without one of its own follows the
-/// setting for all desks (ask, or refuse).
+/// setting for all desks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
@@ -173,9 +173,9 @@ pub struct TrustStore {
     /// Set when this process may not write the file itself.
     through: Option<Through>,
     guests: HashMap<String, Guest>,
-    /// The setting for desks without a permission of their own: refuse them (true) or ask
-    /// (false). Told by the host from the settings; not part of this file.
-    refuse_new: bool,
+    /// The setting for desks without a permission of their own: let them in, ask, or refuse
+    /// them. Told by the host from the settings; not part of this file.
+    new_desks: Permission,
 }
 
 impl std::fmt::Debug for TrustStore {
@@ -231,7 +231,7 @@ impl TrustStore {
             seen,
             through: None,
             guests: HashMap::new(),
-            refuse_new: false,
+            new_desks: Permission::Ask,
         })
     }
 
@@ -561,13 +561,13 @@ impl TrustStore {
         self.save()
     }
 
-    /// Whether desks without a permission of their own are refused instead of asked about.
-    pub fn refuses_new(&self) -> bool {
-        self.refuse_new
+    /// What holds for a desk without a permission of its own.
+    pub fn new_desks(&self) -> Permission {
+        self.new_desks
     }
 
-    pub fn set_refuse_new(&mut self, refuse: bool) {
-        self.refuse_new = refuse;
+    pub fn set_new_desks(&mut self, permission: Permission) {
+        self.new_desks = permission;
     }
 
     pub fn paired_peers(&self) -> impl Iterator<Item = (&String, &PairedPeer)> {

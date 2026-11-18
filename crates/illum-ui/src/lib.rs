@@ -383,22 +383,23 @@ pub enum PointerMode {
     /// This desk's own pointers: the host says which kind it shows (arrow, text, hand, ...)
     /// and yours of that kind is shown. A program's own pointer, which has no kind, still
     /// comes as the host's picture.
-    #[default]
-    #[serde(alias = "native")]
-    Desk,
+    #[serde(alias = "desk", alias = "native")]
+    Local,
     /// The host's pointer pictures, exactly as it has them.
-    #[serde(alias = "embedded")]
-    Host,
+    #[default]
+    #[serde(alias = "host", alias = "embedded")]
+    Remote,
 }
 
 impl std::str::FromStr for PointerMode {
     type Err = String;
     fn from_str(s: &str) -> Result<PointerMode, String> {
         match s.to_ascii_lowercase().as_str() {
-            // "native" and "embedded" are what the two were called up to 0.13.6.
-            "desk" | "native" => Ok(PointerMode::Desk),
-            "host" | "embedded" => Ok(PointerMode::Host),
-            other => Err(format!("pointer {other:?} is not desk or host")),
+            // What the two were called before: "desk" and "host" up to 0.14.5, "native"
+            // and "embedded" up to 0.13.6.
+            "local" | "desk" | "native" => Ok(PointerMode::Local),
+            "remote" | "host" | "embedded" => Ok(PointerMode::Remote),
+            other => Err(format!("pointer {other:?} is not remote or local")),
         }
     }
 }
@@ -406,8 +407,8 @@ impl std::str::FromStr for PointerMode {
 impl std::fmt::Display for PointerMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            PointerMode::Desk => "desk",
-            PointerMode::Host => "host",
+            PointerMode::Local => "local",
+            PointerMode::Remote => "remote",
         })
     }
 }
@@ -511,6 +512,8 @@ pub struct ViewerOptions {
     /// Called when the keyboard mode is changed in the window. Returns whether the keyboard is
     /// grabbed in that mode.
     pub on_keyboard: Box<dyn Fn(KeyboardMode) -> bool>,
+    /// Called when the pointer mode is changed in the window.
+    pub on_pointer: Box<dyn Fn(PointerMode)>,
 }
 
 /// What the window needs from the session to show several displays as tiles (§14). Each
@@ -761,7 +764,7 @@ impl App {
             return;
         }
         // A standard pointer, and this desk's own are wanted: no picture needed.
-        if self.options.pointer == PointerMode::Desk
+        if self.options.pointer == PointerMode::Local
             && let Some(kind) = shape.kind
         {
             window.set_cursor(desk_pointer(kind));
@@ -1406,6 +1409,7 @@ impl App {
             }
             BarAction::Pointer(mode) => {
                 self.options.pointer = mode;
+                (self.options.on_pointer)(mode);
                 // Whatever the pointer wore, the next draw dresses it for the new mode.
                 self.worn = None;
                 if let Some(s) = &self.window {
@@ -2015,28 +2019,38 @@ mod pointer_tests {
 
     #[test]
     fn pointer_modes_parse_and_print() {
-        assert_eq!("desk".parse::<PointerMode>().unwrap(), PointerMode::Desk);
-        assert_eq!("Host".parse::<PointerMode>().unwrap(), PointerMode::Host);
+        assert_eq!("local".parse::<PointerMode>().unwrap(), PointerMode::Local);
+        assert_eq!(
+            "Remote".parse::<PointerMode>().unwrap(),
+            PointerMode::Remote
+        );
+        // What 0.14.5 and before called them.
+        assert_eq!("desk".parse::<PointerMode>().unwrap(), PointerMode::Local);
+        assert_eq!("host".parse::<PointerMode>().unwrap(), PointerMode::Remote);
+        assert_eq!(
+            serde_json::from_str::<PointerMode>("\"desk\"").unwrap(),
+            PointerMode::Local
+        );
         assert!("accurate".parse::<PointerMode>().is_err());
-        assert_eq!(PointerMode::default(), PointerMode::Desk);
-        assert_eq!(PointerMode::Host.to_string(), "host");
+        assert_eq!(PointerMode::default(), PointerMode::Remote);
+        assert_eq!(PointerMode::Remote.to_string(), "remote");
         // What 0.13.6 and before saved and passed on the command line still reads.
-        assert_eq!("native".parse::<PointerMode>().unwrap(), PointerMode::Desk);
+        assert_eq!("native".parse::<PointerMode>().unwrap(), PointerMode::Local);
         assert_eq!(
             "embedded".parse::<PointerMode>().unwrap(),
-            PointerMode::Host
+            PointerMode::Remote
         );
         assert_eq!(
             serde_json::from_str::<PointerMode>("\"native\"").unwrap(),
-            PointerMode::Desk
+            PointerMode::Local
         );
         assert_eq!(
             serde_json::from_str::<PointerMode>("\"embedded\"").unwrap(),
-            PointerMode::Host
+            PointerMode::Remote
         );
         assert_eq!(
-            serde_json::to_string(&PointerMode::Desk).unwrap(),
-            "\"desk\""
+            serde_json::to_string(&PointerMode::Local).unwrap(),
+            "\"local\""
         );
     }
 

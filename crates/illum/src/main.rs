@@ -114,17 +114,19 @@ enum Command {
         /// Which of the host's displays to show (0 = primary; see `illum displays` on the host).
         #[arg(long, default_value_t = 0)]
         screen: u32,
-        /// How keys are sent. remote (the default): key positions, with the keyboard grabbed so
+        /// How keys are sent. remote: key positions, with the keyboard grabbed so
         /// the host's layout and IME apply and no key acts on this machine; local: characters as
         /// typed here, using this machine's IME (for a host without your language's IME); auto:
-        /// remote when both layouts match.
-        #[arg(long, default_value = "remote", value_parser = parse_keyboard)]
-        keyboard: KeyboardMode,
-        /// Which pointer you see while you control the host. desk: this desk's own pointers,
-        /// following the kind the host shows (arrow, text, hand, ...). host: the host's
-        /// pointer pictures. Either way your own system moves it, so it never lags.
-        #[arg(long, default_value = "desk", value_parser = parse_pointer)]
-        pointer: PointerMode,
+        /// remote when both layouts match. Not given: as last chosen for this host in its
+        /// window, and remote the first time.
+        #[arg(long, value_parser = parse_keyboard)]
+        keyboard: Option<KeyboardMode>,
+        /// Which pointer you see while you control the host. remote: the host's pointer
+        /// pictures. local: this desk's own pointers, following the kind the host shows
+        /// (arrow, text, hand, ...). Either way your own system moves it, so it never lags.
+        /// Not given: as last chosen for this host in its window, and remote the first time.
+        #[arg(long, value_parser = parse_pointer)]
+        pointer: Option<PointerMode>,
         /// Only watch: send no keyboard or mouse input.
         #[arg(long)]
         view_only: bool,
@@ -1065,8 +1067,9 @@ async fn accept_loop(ep: Endpoint, mut listener: Listener, config: HostConfig, s
 }
 
 struct ViewArgs {
-    keyboard: KeyboardMode,
-    pointer: PointerMode,
+    /// `None`: as kept for the host, else remote.
+    keyboard: Option<KeyboardMode>,
+    pointer: Option<PointerMode>,
     view_only: bool,
     /// Present on the GPU (false: `--software-render`).
     gpu: bool,
@@ -1102,14 +1105,14 @@ fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::Os
         "--mute".into(),
         "--no-clipboard".into(),
         "--keyboard".into(),
-        match args.keyboard {
+        match args.keyboard.unwrap_or(KeyboardMode::Remote) {
             KeyboardMode::Remote => "remote",
             KeyboardMode::Local => "local",
             KeyboardMode::Auto => "auto",
         }
         .into(),
         "--pointer".into(),
-        args.pointer.to_string().into(),
+        args.pointer.unwrap_or_default().to_string().into(),
         "--max-bitrate".into(),
         (f64::from(p.max_bitrate_kbps) / 1000.0).to_string().into(),
         "--max-fps".into(),
@@ -1134,28 +1137,37 @@ fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::Os
     line
 }
 
-/// Where the arrangements of tiles are kept, one per desk (a person's own choice, so it is
-/// with their own files).
-fn layouts_file(home: &Path) -> PathBuf {
-    own_folder(home).join("layouts.json")
+/// What the person chose in a desk's session window, kept for the next session with it.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct DeskChoices {
+    keyboard: Option<KeyboardMode>,
+    pointer: Option<PointerMode>,
+    /// How its displays are arranged as tiles.
+    layout: Option<illum_ui::tiles::Layout>,
 }
 
-fn kept_layouts(home: &Path) -> std::collections::HashMap<String, illum_ui::tiles::Layout> {
-    std::fs::read(layouts_file(home))
+/// Where those are kept, by the desk's key (a person's own choices, so with their own files).
+fn choices_file(home: &Path) -> PathBuf {
+    own_folder(home).join("desk-choices.json")
+}
+
+fn kept_choices(home: &Path) -> std::collections::HashMap<String, DeskChoices> {
+    std::fs::read(choices_file(home))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
-/// Keeps the arrangement of a desk's displays for the next time.
-fn keep_layout(home: &Path, desk: &str, layout: &illum_ui::tiles::Layout) {
-    let mut all = kept_layouts(home);
-    all.insert(desk.to_string(), layout.clone());
+/// Keeps one more choice for a desk, beside what is kept for it already.
+fn keep_choice(home: &Path, desk: &str, change: impl FnOnce(&mut DeskChoices)) {
+    let mut all = kept_choices(home);
+    change(all.entry(desk.to_string()).or_default());
     let written = serde_json::to_vec_pretty(&all)
         .map_err(|e| e.to_string())
-        .and_then(|bytes| std::fs::write(layouts_file(home), bytes).map_err(|e| e.to_string()));
+        .and_then(|bytes| std::fs::write(choices_file(home), bytes).map_err(|e| e.to_string()));
     if let Err(e) = written {
-        tracing::warn!(target: "session", "The arrangement of the displays was not kept: {e}");
+        tracing::warn!(target: "session", "A choice for this desk was not kept: {e}");
     }
 }
 
@@ -1314,6 +1326,16 @@ fn run_view(
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));
     let desk_key = conn.peer_fingerprint.to_string();
+    // The keyboard and pointer modes: as the command line says, else as last chosen for this
+    // desk, else remote.
+    let kept = kept_choices(home).remove(&desk_key).unwrap_or_default();
+    let keyboard = args
+        .keyboard
+        .or(kept.keyboard)
+        .unwrap_or(KeyboardMode::Remote);
+    let pointer = args.pointer.or(kept.pointer).unwrap_or_default();
+    let mut args = args;
+    (args.keyboard, args.pointer) = (Some(keyboard), Some(pointer));
     if !hello.capabilities.iter().any(|c| c == "screen") {
         bail!(
             "\"{}\" does not offer screen sharing (it may run an older version)",
@@ -1520,10 +1542,7 @@ fn run_view(
                 Ok(hook) => {
                     // Remote (physical-key) mode grabs every key for the host; local/auto grab
                     // only the system keys and leave typing to this machine's layout/IME (§6).
-                    illum_win::SystemKeyHook::set_grab(matches!(
-                        args.keyboard,
-                        KeyboardMode::Remote
-                    ));
+                    illum_win::SystemKeyHook::set_grab(keyboard == KeyboardMode::Remote);
                     Some(hook)
                 }
                 Err(e) => {
@@ -1540,7 +1559,7 @@ fn run_view(
     let hooked = _hook.is_some();
     #[cfg(not(windows))]
     let hooked = false;
-    let keyboard_grabbed = hooked && matches!(args.keyboard, KeyboardMode::Remote);
+    let keyboard_grabbed = hooked && keyboard == KeyboardMode::Remote;
     // Said out loud, and in the log, so a report of "the keys act here" can be read against
     // which build ran and what it did with the keyboard.
     let keyboard_note = match (with_input, keyboard_grabbed) {
@@ -1573,20 +1592,30 @@ fn run_view(
                 title: format!("Illumination — {}{mode}", hello.device_name),
                 on_presented: Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
                 input,
-                keyboard: args.keyboard,
+                keyboard,
                 keyboard_grabbed,
                 host_name: hello.device_name.clone(),
                 host_address: illum_ui::app::shown_address(&normalize_target(target)).to_string(),
                 // Changing the mode in the window moves the grab with it: every key in remote
                 // mode, only the system keys otherwise (§6).
-                on_keyboard: Box::new(move |mode| {
+                on_keyboard: {
+                    let (keep_home, keep_desk) = (home.to_path_buf(), desk_key.clone());
+                    Box::new(move |mode| {
+                    keep_choice(&keep_home, &keep_desk, |c| c.keyboard = Some(mode));
                     let grab = hooked && mode == KeyboardMode::Remote;
                     #[cfg(windows)]
                     illum_win::SystemKeyHook::set_grab(grab);
                     grab
-                }),
+                })
+                },
                 front_watched: hooked,
-                pointer: args.pointer,
+                pointer,
+                on_pointer: {
+                    let (keep_home, keep_desk) = (home.to_path_buf(), desk_key.clone());
+                    Box::new(move |mode| {
+                        keep_choice(&keep_home, &keep_desk, |c| c.pointer = Some(mode))
+                    })
+                },
                 on_focus: Box::new(move |focused| {
                     if focused {
                         let acks = focus_state.lock().expect("view state lock").input_acks;
@@ -1695,8 +1724,10 @@ fn run_view(
                                 live.send_control(&flags.screen_start(&params));
                             }
                         }),
-                        layout: kept_layouts(home).remove(&desk_key),
-                        on_layout: Box::new(move |layout| keep_layout(&keep_home, &keep_desk, layout)),
+                        layout: kept.layout.clone(),
+                        on_layout: Box::new(move |layout| {
+                            keep_choice(&keep_home, &keep_desk, |c| c.layout = Some(layout.clone()))
+                        }),
                         on_arrange: Box::new(move |on| {
                             arranging.store(on, std::sync::atomic::Ordering::Relaxed)
                         }),
@@ -1904,8 +1935,8 @@ mod tests {
     fn a_pop_out_command_line_parses() {
         use clap::Parser;
         let args = ViewArgs {
-            keyboard: KeyboardMode::Local,
-            pointer: PointerMode::Host,
+            keyboard: Some(KeyboardMode::Local),
+            pointer: Some(PointerMode::Local),
             view_only: true,
             gpu: false,
             codec: None,

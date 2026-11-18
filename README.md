@@ -116,12 +116,15 @@ To check colours, run the host with `--test-pattern`. The top half shows eight p
 right: **red, green, blue, cyan, magenta, yellow, white, black**.
 
 **Keyboard modes** (`illum view <host> --keyboard …`):
-- `remote` (default): sends key positions and **grabs the keyboard** while the window is focused,
+- `remote`: sends key positions and **grabs the keyboard** while the window is focused,
   so the host's layout and IME apply and nothing (Alt+Tab, Win, your local IME) acts on your own
   machine. Click another window to release the grab.
 - `local`: sends characters as you type them here, including your IME's result — for typing into
   a host that doesn't have your language's IME. Only the system keys are grabbed.
 - `auto`: remote when both machines use the same layout, otherwise local.
+
+Without the flag the mode is the one last chosen for that host under More in its session
+window, and `remote` the first time.
 
 `--view-only` sends no input. In the default `remote` mode, while the viewer has focus the
 **whole keyboard** goes to the host — Win, Alt+Tab, shortcuts, everything; click another window
@@ -129,10 +132,13 @@ to get your own keyboard back. (Ctrl+Alt+Del and Win+L are taken by your own Win
 under More in the session window.)
 
 **Pointer** (`illum view <host> --pointer …`):
-- `desk` (default): this desk's own pointers. The host says which kind it shows (arrow, text,
+- `remote`: the host's pointer pictures, exactly as it has them.
+- `local`: this desk's own pointers. The host says which kind it shows (arrow, text,
   hand, resize, ...) and yours of that kind is shown. A program's own pointer still comes as
   the host's picture.
-- `host`: the host's pointer pictures, exactly as it has them.
+
+As with the keyboard: without the flag, the one last chosen for that host, and `remote` the
+first time.
 
 Either way it is your own system's pointer, so it never lags behind the picture.
 
@@ -150,7 +156,7 @@ illum service install    # install the Windows service (terminal opened as admin
 illum --backend        # per-session worker, started by the service (later milestone)
 illum --control        # per-user helper for clipboard and tray (later milestone)
 illum view <host>      # see and control a host (--screen N, --keyboard remote|local|auto, --view-only,
-                       #   --pointer desk|host, --no-clipboard, --no-reconnect,
+                       #   --pointer remote|local, --no-clipboard, --no-reconnect,
                        #   --max-bitrate Mb/s, --max-fps, --allow-scale, --latency-limit ms, --mute,
                        #   --software-decode, --software-render; measurement: --fixed, --scale,
                        #   --codec, --duration, --report, --label)

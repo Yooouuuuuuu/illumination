@@ -310,8 +310,13 @@ pub async fn accept(
             // Accepted for this time, and still here or just gone: not asked again.
             _ if store.guest_allowed(key) => Door::Open,
             Some(Permission::Ask) => Door::Ask,
-            None if store.refuses_new() => Door::Shut,
-            None => Door::Ask,
+            // None of its own: as the setting for all desks says. A desk let in by that
+            // is not kept as one that may always come; the setting can change.
+            None => match store.new_desks() {
+                Permission::Always => Door::Open,
+                Permission::Ask => Door::Ask,
+                Permission::Never => Door::Shut,
+            },
         }
     };
     let let_in = match door {

@@ -196,7 +196,7 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         let offer = offered(&settings);
         // Probing the encoders can take a moment the first time; not on the async threads.
         let (control, sound, clipboard, idle_minutes) = offer;
-        base.store.lock().await.set_refuse_new(settings.refuse_new);
+        base.store.lock().await.set_new_desks(settings.new_desks);
         let probed = tokio::task::spawn_blocking(move || {
             host_config_with(false, !sound, !clipboard, !control)
         })
@@ -246,7 +246,7 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
             tokio::time::sleep(HOST_LOOK).await;
             let now = crate::app::load_settings(home);
             // Who is asked about takes effect at once, without listening anew.
-            base.store.lock().await.set_refuse_new(now.refuse_new);
+            base.store.lock().await.set_new_desks(now.new_desks);
             if accepting.is_finished()
                 || offered(&now) != offer
                 || listen_addresses(bind_to) != addresses

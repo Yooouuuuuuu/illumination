@@ -189,11 +189,16 @@ async fn permissions_decide_who_is_asked_about() {
 
     // No permission of its own, and the setting says refuse: not asked.
     store.lock().await.set_permission(&key, None).unwrap();
-    store.lock().await.set_refuse_new(true);
+    store.lock().await.set_new_desks(Permission::Never);
     let before = asked();
     assert!(connect(&ctl.ep, &addr).await.is_err());
     assert_eq!(asked(), before);
-    store.lock().await.set_refuse_new(false);
+    // The setting says always: let in, not asked, and not kept as a desk of its own rule.
+    store.lock().await.set_new_desks(Permission::Always);
+    connect(&ctl.ep, &addr).await.unwrap();
+    assert_eq!(asked(), before);
+    assert_eq!(store.lock().await.permission(&key), None);
+    store.lock().await.set_new_desks(Permission::Ask);
 }
 
 #[tokio::test]

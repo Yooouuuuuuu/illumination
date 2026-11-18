@@ -40,10 +40,20 @@ fn settings_path(home: &Path) -> PathBuf {
 pub(crate) fn load_settings(home: &Path) -> Settings {
     let path = settings_path(home);
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::warn!(target: "app", "{} is not readable ({e}); using the defaults.", path.display());
-            Settings::default()
-        }),
+        Ok(text) => match serde_json::from_str::<Settings>(&text) {
+            Ok(mut settings) => {
+                // Up to 0.14.5 the setting for new desks was "refuse them" or not.
+                let old: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                if old.get("new_desks").is_none() && old["refuse_new"] == true {
+                    settings.new_desks = illum_ui::app::Permission::Never;
+                }
+                settings
+            }
+            Err(e) => {
+                tracing::warn!(target: "app", "{} is not readable ({e}); using the defaults.", path.display());
+                Settings::default()
+            }
+        },
         Err(_) => Settings::default(),
     }
 }
@@ -67,15 +77,6 @@ fn view_flags(settings: &Settings, view_only: bool, mute: bool) -> Vec<String> {
         settings.max_fps.to_string(),
         "--latency-limit".to_string(),
         settings.latency_limit_ms.to_string(),
-        "--keyboard".to_string(),
-        match settings.keyboard {
-            illum_ui::KeyboardMode::Remote => "remote",
-            illum_ui::KeyboardMode::Local => "local",
-            illum_ui::KeyboardMode::Auto => "auto",
-        }
-        .to_string(),
-        "--pointer".to_string(),
-        settings.pointer.to_string(),
     ];
     let mut flag = |on: bool, name: &str| {
         if on {
@@ -430,9 +431,9 @@ impl Backend {
                 );
                 // Who is asked about takes effect at once.
                 {
-                    let (this, refuse) = (self.clone(), settings.refuse_new);
+                    let (this, new_desks) = (self.clone(), settings.new_desks);
                     self.runtime.spawn(async move {
-                        this.ep.store.lock().await.set_refuse_new(refuse);
+                        this.ep.store.lock().await.set_new_desks(new_desks);
                     });
                 }
                 self.update(|s| s.settings = settings);
@@ -529,14 +530,14 @@ impl Backend {
         }
         let this = self.clone();
         let test_pattern = self.hosting.test_pattern;
-        let (control, sound, clipboard, idle_minutes, refuse_new) = {
+        let (control, sound, clipboard, idle_minutes, new_desks) = {
             let state = self.state.lock().expect("app state");
             (
                 state.settings.let_control,
                 state.settings.let_sound,
                 state.settings.let_clipboard,
                 state.settings.idle_minutes,
-                state.settings.refuse_new,
+                state.settings.new_desks,
             )
         };
         *listening = Some(self.runtime.spawn(async move {
@@ -545,7 +546,7 @@ impl Backend {
                 let _ = before.await;
             }
             // Probing the encoders can take a moment; not on the async threads.
-            this.ep.store.lock().await.set_refuse_new(refuse_new);
+            this.ep.store.lock().await.set_new_desks(new_desks);
             let config = match tokio::task::spawn_blocking(move || {
                 host_config_with(test_pattern, !sound, !clipboard, !control)
             })
@@ -952,7 +953,7 @@ mod tests {
         let flags = view_flags(&Settings::default(), false, false);
         assert_eq!(
             flags.join(" "),
-            "--max-bitrate 20 --max-fps 30 --latency-limit 50 --keyboard remote --pointer desk"
+            "--max-bitrate 20 --max-fps 30 --latency-limit 50"
         );
         let all = Settings {
             max_bitrate_mbps: 7.5,
@@ -960,15 +961,11 @@ mod tests {
             reconnect: false,
             sound: false,
             clipboard: false,
-            keyboard: illum_ui::KeyboardMode::Local,
-            pointer: illum_ui::PointerMode::Host,
             ..Settings::default()
         };
         let flags = view_flags(&all, true, false).join(" ");
         for expected in [
             "--max-bitrate 7.5",
-            "--keyboard local",
-            "--pointer host",
             "--allow-scale",
             "--no-reconnect",
             "--mute",
@@ -990,11 +987,16 @@ mod tests {
         assert_eq!(load_settings(&home), Settings::default(), "no file yet");
         let chosen = Settings {
             max_fps: 60,
-            refuse_new: true,
+            new_desks: illum_ui::app::Permission::Always,
             ..Settings::default()
         };
         save_settings(&home, &chosen).unwrap();
         assert_eq!(load_settings(&home), chosen);
+        // A file from 0.14.5 or before, which only knew "refuse new desks".
+        std::fs::write(settings_path(&home), r#"{"refuse_new":true,"max_fps":60}"#).unwrap();
+        let old = load_settings(&home);
+        assert_eq!(old.new_desks, illum_ui::app::Permission::Never);
+        assert_eq!(old.max_fps, 60);
         std::fs::write(settings_path(&home), "not json").unwrap();
         assert_eq!(load_settings(&home), Settings::default());
         let _ = std::fs::remove_dir_all(&home);
@@ -1013,13 +1015,11 @@ mod tests {
             reconnect: false,
             sound: false,
             clipboard: false,
-            keyboard: illum_ui::KeyboardMode::Auto,
-            pointer: illum_ui::PointerMode::Host,
             start_on_boot: false,
             let_control: false,
             let_sound: false,
             let_clipboard: false,
-            refuse_new: true,
+            new_desks: illum_ui::app::Permission::Never,
             idle_minutes: 10,
         };
         let home = Path::new("C:\\Program Data\\Illumination");
@@ -1258,10 +1258,14 @@ mod tests {
 
         // A setting is saved as it is changed.
         host.command(Command::SaveSettings(Settings {
-            refuse_new: true,
+            new_desks: illum_ui::app::Permission::Never,
             ..Settings::default()
         }));
-        assert!(load_settings(&host.home).refuse_new, "saved");
+        assert_eq!(
+            load_settings(&host.home).new_desks,
+            illum_ui::app::Permission::Never,
+            "saved"
+        );
     }
 
     /// What the person at a desk decides about a desk that reaches it: in for this time
