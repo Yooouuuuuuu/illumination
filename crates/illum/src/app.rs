@@ -657,6 +657,14 @@ impl Backend {
         tracing::info!(target: "app", "The installed service listens for this desk.");
         let mut sessions: Option<Vec<String>> = None;
         loop {
+            // The update first, and whether or not the service runs: the installer stops the
+            // service a moment after the host says it runs, and what the host said stays in
+            // the file.
+            if self.update_phase.load(Ordering::SeqCst) != IDLE
+                && let Some(status) = crate::installed::read_status(&self.home)
+            {
+                self.follow_update(&status.update);
+            }
             let incoming = if !crate::installed::service_runs() {
                 Incoming::Failed(
                     "the Illumination service is not running. Close Illumination and open it again, \
@@ -666,7 +674,6 @@ impl Backend {
             } else {
                 match crate::installed::read_status(&self.home) {
                     Some(status) => {
-                        self.follow_update(&status.update);
                         if sessions.as_ref() != Some(&status.sessions) {
                             // A desk may have been accepted a moment ago: show it as trusted.
                             self.refresh_desks().await;

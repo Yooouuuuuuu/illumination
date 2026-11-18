@@ -11,6 +11,19 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-19
+
+Released.
+
+### Fixed
+
+- **An update no longer stops at 100 %.** The app missed the moment its
+  update's installer started, so it stayed open at 100 % and the installer,
+  which waits for it, gave up after 30 seconds and started the old version
+  again. The app now sees the installer start and closes. The installer also
+  closes an app that is still open after 5 seconds, so an update from 0.15.1,
+  whose app has the old fault, goes through too.
+
 ## [0.15.1] - 2026-11-19
 
 Released.

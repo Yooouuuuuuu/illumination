@@ -62,8 +62,10 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-only"
 
 ; Waits until the program's file can be written: the service has let go of it and no window
 ; of the app is open. Nothing is closed for the person; they are asked to. Run silently, it is
-; an update the service started: the app closes by itself, and if it has not after 30 seconds
-; the old version's service is started again, so the desk is not left without one.
+; an update the person started from the app: the app closes by itself, and if it is still open
+; after 5 seconds it is closed here (an older app may not notice the update). If the program
+; is still in use after 30 seconds, the old version's service is started again, so the desk is
+; not left without one.
 !macro WaitUntilClosed
   StrCpy $1 0
   ${Do}
@@ -78,6 +80,10 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-only"
     ${EndIf}
     IntOp $1 $1 + 1
     ${If} ${Silent}
+      ${If} $1 == 20
+        nsExec::Exec 'taskkill.exe /F /IM ${EXE}'
+        Pop $0
+      ${EndIf}
       ${If} $1 >= 120
         nsExec::Exec 'sc.exe start ${NAME}'
         Pop $0
