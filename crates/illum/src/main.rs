@@ -190,6 +190,10 @@ enum Command {
         /// The process whose window this one belongs to: it closes when that one is gone.
         #[arg(long, hide = true)]
         parent: Option<u32>,
+        /// The number of the window this one was popped out of: the host gives the displays
+        /// of both one bitrate limit.
+        #[arg(long, hide = true)]
+        group: Option<u64>,
     },
     /// Show the measurement workload full screen on this machine (the host side of a
     /// measurement run): still, fine detail and full motion, 20 s each, on the wall clock.
@@ -430,6 +434,7 @@ fn main() -> std::process::ExitCode {
             label,
             popout,
             parent,
+            group,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
@@ -458,6 +463,7 @@ fn main() -> std::process::ExitCode {
                     scale_percent: *scale,
                     scale_rungs: *allow_scale,
                     record: report.is_some(),
+                    group: group.unwrap_or(0),
                     ..ViewParams::new(*screen)
                 },
             };
@@ -1091,8 +1097,8 @@ struct ViewArgs {
 }
 
 /// The command line of a window showing `display` of the same host, popped out of this
-/// session: the same limits and the same permission, and no sound or clipboard of its own
-/// (the main window has those).
+/// session: the same limits, shared with this window, and the same permission, and no sound
+/// or clipboard of its own (the main window has those).
 fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::OsString> {
     let p = &args.params;
     let mut line: Vec<std::ffi::OsString> = vec![
@@ -1120,6 +1126,8 @@ fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::Os
         p.max_fps.to_string().into(),
         "--latency-limit".into(),
         p.latency_limit_ms.to_string().into(),
+        "--group".into(),
+        p.group.to_string().into(),
     ];
     let mut flag = |on: bool, name: &str| {
         if on {
@@ -1305,6 +1313,14 @@ fn window_number() -> u64 {
     (nanos ^ (u64::from(std::process::id()) << 32)) | 1
 }
 
+/// Closes the windows of the displays popped out of this one (they are this program's own).
+fn close_popped(popped: &std::sync::Mutex<Vec<std::process::Child>>) {
+    for mut window in popped.lock().expect("popped-out windows").drain(..) {
+        let _ = window.kill();
+        let _ = window.wait();
+    }
+}
+
 /// Connects, then shows the host's screen in a window until it is closed.
 fn run_view(
     runtime: &tokio::runtime::Runtime,
@@ -1312,8 +1328,11 @@ fn run_view(
     target: &str,
     mut args: ViewArgs,
 ) -> Result<()> {
-    // This window's number for the host: every display it shows shares one ladder there.
-    args.params.group = window_number();
+    // This window's number for the host: every display it shows shares one ladder there,
+    // those popped out of it too (they come with its number).
+    if args.params.group == 0 {
+        args.params.group = window_number();
+    }
     let mut ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
     // Tell the host which lossy codecs we can decode (AV1 only in hardware); it picks AV1,
@@ -1759,6 +1778,10 @@ fn run_view(
                         on_arrange: Box::new(move |on| {
                             arranging.store(on, std::sync::atomic::Ordering::Relaxed)
                         }),
+                        close_popped: {
+                            let popped = popped.clone();
+                            Box::new(move || close_popped(&popped))
+                        },
                     }
                 }),
                 gpu: args.gpu,
@@ -1767,9 +1790,7 @@ fn run_view(
         .map_err(anyhow::Error::msg)?;
 
     // The displays popped out of this window close with it.
-    for mut window in popped.lock().expect("popped-out windows").drain(..) {
-        let _ = window.kill();
-    }
+    close_popped(&popped);
     // Window closed (or the session ended): say goodbye on whichever connection is live and
     // wait briefly for a clean close.
     live.send_control(&ControlMsg::ScreenStop);
@@ -1981,6 +2002,7 @@ mod tests {
                 scale_rungs: true,
                 reconnect: false,
                 hw_decode: false,
+                group: 77,
                 ..ViewParams::new(0)
             },
         };
@@ -1996,6 +2018,7 @@ mod tests {
             mute,
             no_clipboard,
             max_fps,
+            group,
             ..
         }) = cli.command
         else {
@@ -2010,6 +2033,7 @@ mod tests {
             "the main window's permission, no sound of its own"
         );
         assert_eq!(max_fps, 60);
+        assert_eq!(group, Some(77), "the main window's limit, shared");
         assert_eq!(cli.home.as_deref(), Some(Path::new(r"C:\Some Home")));
     }
 }

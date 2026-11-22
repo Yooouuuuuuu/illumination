@@ -18,13 +18,20 @@ the docs: the design documents and the decision ledger in
 - **The version** beside the app's name at the top of the main window, small and
   grey (Home only).
 
+### Changed
+
+- **"All" and popped-out displays do not mix.** While "All" is on, More offers no
+  "Pop out display"; turning "All" on closes the displays popped out of the window,
+  and the tiles show them instead.
+
 ### Fixed
 
-- **The displays in "All" share one bitrate limit.** Each display had a limit of
-  its own and stepped up and down as if the link were its alone, so together they
-  overloaded it and lagged. Now the window has one limit, split by the pixels each
-  display sends: a small tile spends what its size needs (a quarter of the width,
-  a sixteenth of the limit), and all of them step down and up together.
+- **The displays of a session window share one bitrate limit.** Each display, a
+  tile of "All" or a popped-out one, had a limit of its own and stepped up and down
+  as if the link were its alone, so together they overloaded it and lagged. Now
+  "Max bitrate" in Settings is the limit for everything the window shows, split by
+  the pixels each display sends: a small tile spends what its size needs (a quarter
+  of the width, a sixteenth of the limit), and all of them step down and up together.
 - **A re-sent keyframe is no longer shrunk twice.** On a still screen, a frame the
   viewer lost was sent again from a picture already made smaller, at a smaller size
   still, which restarted the encoder twice and sent two full pictures.

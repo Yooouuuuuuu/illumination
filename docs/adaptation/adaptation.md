@@ -40,6 +40,7 @@ The viewer sends its limits when the stream starts. The host clamps them.
 | Resolution rungs | off | on or off | `--allow-scale` |
 
 The bitrate is a ceiling for the encoder's rate control. A still desktop uses far less.
+It is the limit for the whole session window, not for each display it shows (below).
 
 ### The ladder
 
@@ -168,7 +169,16 @@ Details of each:
 | Viewer | The host sends `Quality` (rung, bitrate, frame rate, scale, parity, reason). The viewer shows it in its status line. |
 
 When the viewer shows a display small (one of several in its window), the host sends it at
-that size and scales the bitrate cap by the same percentage.
+that size.
+
+The displays of one session window share one ladder and one max bitrate: the tiles of
+"All", or the window's own display and those popped out of it. "All" and pop-outs do not mix;
+turning "All" on closes the popped-out windows. The viewer numbers the window
+(`ScreenStart.group`), and the host keeps one ladder per desk and window. A second is judged
+from the frames of all the displays added up. Each rung's bitrate is split by the pixels each
+display sends (`split`): a display sent at a quarter of its width needs a sixteenth of the
+cap, together never more than the cap and never under 1 Mb/s. All the displays step down and
+up together.
 
 ### Constants
 

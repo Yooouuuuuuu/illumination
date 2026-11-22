@@ -403,6 +403,17 @@ pub fn draw(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, 
     (out, space)
 }
 
+/// The displays More offers to pop out: each but the one shown, and none among the tiles
+/// ("All" and popped-out displays do not mix).
+fn pop_outs(state: &BarState) -> Vec<u32> {
+    if state.all {
+        return Vec::new();
+    }
+    (0..state.displays.len() as u32)
+        .filter(|&display| display != state.display)
+        .collect()
+}
+
 fn more_menu(ui: &mut Ui, state: &BarState, out: &mut Vec<BarAction>) {
     if state.controlling {
         group(ui, "Keyboard");
@@ -435,12 +446,11 @@ fn more_menu(ui: &mut Ui, state: &BarState, out: &mut Vec<BarAction>) {
                 out.push(BarAction::Lock);
             }
         }
-        if state.displays.len() > 1 {
+        let displays = pop_outs(state);
+        if !displays.is_empty() {
             group(ui, "Displays");
-            for display in 0..state.displays.len() as u32 {
-                if display != state.display
-                    && entry(ui, &format!("Pop out display {}", display + 1), false)
-                {
+            for display in displays {
+                if entry(ui, &format!("Pop out display {}", display + 1), false) {
                     out.push(BarAction::PopOut(display));
                 }
             }
@@ -576,5 +586,21 @@ pub fn sample() -> BarState {
         all: false,
         arrange: false,
         tiles: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_display_pops_out_of_the_tiles() {
+        let shown = sample();
+        assert_eq!(pop_outs(&shown), vec![1], "each display but the one shown");
+        let tiles = BarState {
+            all: true,
+            ..sample()
+        };
+        assert!(pop_outs(&tiles).is_empty());
     }
 }

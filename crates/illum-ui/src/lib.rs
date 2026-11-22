@@ -532,6 +532,8 @@ pub struct AllDisplays {
     pub on_layout: Box<dyn Fn(&tiles::Layout)>,
     /// The tiles are being arranged (true): nothing goes to the host meanwhile.
     pub on_arrange: Box<dyn Fn(bool)>,
+    /// Closes the displays popped out of this window: the tiles show them instead.
+    pub close_popped: Box<dyn Fn()>,
 }
 
 /// One more of the host's displays, shown as a tile.
@@ -1494,6 +1496,7 @@ impl App {
         let Some(options) = self.options.all.as_ref() else {
             return;
         };
+        (options.close_popped)();
         if let Some(input) = &self.options.input {
             input.release_all();
         }
