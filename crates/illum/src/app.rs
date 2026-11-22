@@ -461,6 +461,17 @@ impl Backend {
                     if let Err(e) = saved {
                         tracing::warn!(target: "app", "Could not save a desk: {e}");
                     }
+                    // Its session window, if open, takes the new name.
+                    let named = this
+                        .ep
+                        .store
+                        .lock()
+                        .await
+                        .desk(&fingerprint)
+                        .map(|desk| (desk.address.clone(), desk.shown_name().to_string()));
+                    if let Some((address, name)) = named {
+                        this.rename_sessions(&address, &name);
+                    }
                     this.refresh_desks().await;
                 });
             }
@@ -911,6 +922,22 @@ impl Backend {
                 }
                 // A moment for the goodbyes to leave before the process does.
                 std::thread::sleep(Duration::from_millis(300));
+            }
+        }
+    }
+
+    /// Tells the session windows open to the desk at `address` (no port) its new name.
+    fn rename_sessions(&self, address: &str, name: &str) {
+        use std::io::Write;
+        if address.is_empty() || name.is_empty() {
+            return;
+        }
+        let opened = self.opened.lock().expect("opened sessions");
+        for (to, child) in opened.iter() {
+            if illum_ui::app::shown_address(to) == address
+                && let Some(input) = child.lock().expect("session window").stdin.as_mut()
+            {
+                let _ = writeln!(input, "name {name}");
             }
         }
     }

@@ -11,6 +11,15 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.6] - 2026-11-22
+
+### Changed
+
+- **The session window names the desk as you do, with its address.** The title reads
+  "Illumination — 100.100.101.2 (LAPTOP)" and the bottom line "LAPTOP · 100.100.101.2 ·
+  30 fps · …". The name is your own name for the desk when you gave it one, else the
+  machine's, and an open window follows when you rename the desk.
+
 ## [0.16.5] - 2026-11-22
 
 ### Added

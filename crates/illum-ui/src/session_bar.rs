@@ -413,11 +413,10 @@ fn bars(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, BarS
         .show(ui, |ui| {
             // One line, never two: the numbers are cut short before the note is. Nothing in it
             // can be selected.
-            let words = if state.status.is_empty() {
-                state.host_name.clone()
-            } else {
-                format!("{} · {}", state.host_name, state.status)
-            };
+            let mut words = format!("{} · {}", state.host_name, state.host_address);
+            if !state.status.is_empty() {
+                words = format!("{words} · {}", state.status);
+            }
             egui::Sides::new().shrink_left().spacing(12.0).show(
                 ui,
                 |ui| {

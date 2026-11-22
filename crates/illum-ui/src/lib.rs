@@ -260,6 +260,9 @@ pub struct ViewState {
     pub input_notice: Option<String>,
     /// The host is about to end the session for lack of input: said until input comes.
     pub idle_notice: Option<String>,
+    /// The person renamed the host while the window is open: its new name, for the title
+    /// and the bottom line.
+    pub renamed: Option<String>,
     /// Why the host is ending the session, as it said just before its goodbye.
     pub ended_why: Option<String>,
     /// The session has ended, and why: the window shows it over the dimmed picture, with
@@ -305,6 +308,7 @@ impl Default for ViewState {
             notice: None,
             input_notice: None,
             idle_notice: None,
+            renamed: None,
             ended_why: None,
             ended: None,
             displays: Vec::new(),
@@ -996,6 +1000,13 @@ impl App {
             self.status_line = state.stats.brief.clone();
         }
         self.bar_notice = notice_now;
+        // Renamed by the person: the title and the bottom line follow.
+        if let Some(name) = state.renamed.take() {
+            let (was, now) = (format!("({})", self.options.host_name), format!("({name})"));
+            self.options.title = self.options.title.replacen(&was, &now, 1);
+            self.options.host_name = name;
+            s.window.set_title(&self.options.title);
+        }
         // The session ended: the tiles go back to the one display, whose picture stays.
         let ended_now = state.ended != self.ended && state.ended.is_some();
         self.ended = state.ended.clone();
