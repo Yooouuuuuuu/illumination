@@ -253,7 +253,7 @@ pub struct ViewState {
     pub stats: Stats,
     /// Shown in the title instead of the stats, e.g. "screen unavailable: …".
     pub status: Option<String>,
-    /// A passing condition shown next to the stats, e.g. "waiting for a keyframe…".
+    /// A passing condition shown next to the stats, e.g. "getting a fresh picture from the host…".
     pub notice: Option<String>,
     /// Why the host is not taking input, while it is not (its lock screen, an administrator's
     /// window): shown where the notice is, when nothing more urgent is.

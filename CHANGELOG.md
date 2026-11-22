@@ -11,6 +11,15 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-11-22
+
+### Changed
+
+- **A clearer note while the picture is refreshed.** When a lost frame makes the viewer
+  ask the host for a whole new picture and it takes over 2 s, the note now says
+  "getting a fresh picture from the host…" instead of "waiting for a keyframe from the
+  host…".
+
 ## [0.16.3] - 2026-11-22
 
 ### Changed

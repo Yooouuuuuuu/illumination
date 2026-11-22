@@ -557,7 +557,8 @@ fn media_loop(
             }
             Some("video stalled; reconnecting…")
         } else if awaiting_since.is_some_and(|s| now.duration_since(s) >= KEYFRAME_TIMEOUT) {
-            Some("waiting for a keyframe from the host…")
+            // In the person's words: a keyframe is the whole picture, sent anew.
+            Some("getting a fresh picture from the host…")
         } else {
             None
         };
