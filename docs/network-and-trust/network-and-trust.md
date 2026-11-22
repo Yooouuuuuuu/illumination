@@ -246,6 +246,15 @@ connection to it, its last connection here, and its last refused attempt.
   `paired_peers`; `Ask` and `Never` are stored in the desk's entry.
 - **A desk let in by a default of `Always` is not paired.** Nothing is stored about its
   permission. If the default changes later, the desk follows the new default.
+- **Who may connect is locked while a desk is connected here.** A desk that controls this
+  one could otherwise open the app here and let itself, or any desk, in for good. Until
+  every connected desk is gone, the app here does not change the default for new desks,
+  what a connected desk may do, the idle time, or any desk's own permission, and does not
+  forget a desk. Names, favourites and the desks this one connects to can still change.
+  On an installed desk the host refuses these changes itself (the app may not write its
+  files), so the lock holds whatever program asks. AnyDesk and RustDesk ask for an
+  administrator's rights for their security settings instead; this asks for nothing, and
+  ends when the session does.
 
 The host decides in this order (the "door" in `illum_net::session::accept`):
 

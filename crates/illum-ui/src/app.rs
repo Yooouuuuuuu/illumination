@@ -109,6 +109,30 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// What decides who may connect here and what a connected desk may do: locked while a
+    /// desk is connected.
+    pub fn incoming(&self) -> (Permission, bool, bool, bool, u32) {
+        (
+            self.new_desks,
+            self.let_control,
+            self.let_sound,
+            self.let_clipboard,
+            self.idle_minutes,
+        )
+    }
+
+    /// These settings with the Incoming ones of `other`.
+    pub fn with_incoming_of(&self, other: &Settings) -> Settings {
+        Settings {
+            new_desks: other.new_desks,
+            let_control: other.let_control,
+            let_sound: other.let_sound,
+            let_clipboard: other.let_clipboard,
+            idle_minutes: other.idle_minutes,
+            ..self.clone()
+        }
+    }
+
     /// The outgoing settings put back to what a new install has; the rest is kept.
     pub fn with_outgoing_reset(&self) -> Settings {
         let fresh = Settings::default();
@@ -1268,6 +1292,10 @@ impl HomeUi {
                 text_field(&mut editing.name, "", heading(17.0)),
             );
             ui.label(RichText::new("When it connects here").font(semibold(14.0)));
+            let locked = lock_note(state);
+            if let Some(note) = &locked {
+                ui.label(muted(note));
+            }
             let each = vec2((ui.available_width() - 10.0) / 2.0, 44.0);
             // Without a rule of its own it follows Settings: said with what that is now.
             let (usual, _) = permission_look(state.settings.new_desks);
@@ -1280,16 +1308,21 @@ impl HomeUi {
             }
             for pair in choices.chunks(2) {
                 ui.horizontal(|ui| {
-                    for (value, label, fill) in pair {
-                        if choice(ui, label, editing.permission == *value, *fill, each) {
-                            editing.permission = *value;
+                    ui.add_enabled_ui(locked.is_none(), |ui| {
+                        for (value, label, fill) in pair {
+                            if choice(ui, label, editing.permission == *value, *fill, each) {
+                                editing.permission = *value;
+                            }
                         }
-                    }
+                    });
                 });
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.add(button("Forget", CORAL, 44.0)).clicked() {
+                if ui
+                    .add_enabled(locked.is_none(), button("Forget", CORAL, 44.0))
+                    .clicked()
+                {
                     out.push(Command::ForgetDesk(editing.desk.fingerprint.clone()));
                     close = true;
                 }
@@ -1696,51 +1729,63 @@ impl HomeUi {
             self.here(ui, Item::Shrink);
             ui.checkbox(&mut s.allow_scale, "Shrink picture when slow");
         });
+        // Who may connect is not changed while a desk is connected: it could let itself in.
+        let locked = lock_note(state);
+        if locked.is_some() {
+            *s = s.with_incoming_of(&state.settings);
+        }
         card(ui, WHITE, |ui| {
             ui.set_width(ui.available_width());
             self.here(ui, Item::Permission);
             title(ui, "Incoming");
             ui.label(muted("When another desk connects here."));
-            label(ui, "When a new desk connects");
-            ui.horizontal(|ui| {
-                let each = vec2(150.0, 44.0);
-                for permission in [Permission::Always, Permission::Ask, Permission::Never] {
-                    let (word, fill) = permission_look(permission);
-                    if choice(ui, word, s.new_desks == permission, fill, each) {
-                        s.new_desks = permission;
-                    }
-                }
-            });
-            if s.new_desks == Permission::Always {
-                ui.label(
-                    RichText::new("Any desk that can reach this one connects without a question.")
-                        .font(semibold(14.0)),
-                );
+            if let Some(note) = &locked {
+                ui.label(RichText::new(note).font(semibold(14.0)));
             }
-            ui.label(muted("What you set for one desk overrides this."));
-            self.here(ui, Item::Actions);
-            label(ui, "Allowed actions");
-            let mut always = true;
-            ui.add_enabled(false, egui::Checkbox::new(&mut always, "See screen"));
-            ui.checkbox(&mut s.let_control, "Use keyboard and mouse");
-            ui.checkbox(&mut s.let_sound, "Hear sound");
-            ui.checkbox(&mut s.let_clipboard, "Share clipboard");
-            self.here(ui, Item::Idle);
-            ui.horizontal(|ui| {
-                label(ui, "Disconnect when idle for");
-                let name = |minutes: u32| match minutes {
-                    0 => "Never".to_string(),
-                    60 => "1 hour".to_string(),
-                    120 => "2 hours".to_string(),
-                    m => format!("{m} minutes"),
-                };
-                egui::ComboBox::from_id_salt("idle")
-                    .selected_text(name(s.idle_minutes))
-                    .show_ui(ui, |ui| {
-                        for minutes in [10, 30, 60, 120, 0] {
-                            ui.selectable_value(&mut s.idle_minutes, minutes, name(minutes));
+            ui.add_enabled_ui(locked.is_none(), |ui| {
+                label(ui, "When a new desk connects");
+                ui.horizontal(|ui| {
+                    let each = vec2(150.0, 44.0);
+                    for permission in [Permission::Always, Permission::Ask, Permission::Never] {
+                        let (word, fill) = permission_look(permission);
+                        if choice(ui, word, s.new_desks == permission, fill, each) {
+                            s.new_desks = permission;
                         }
-                    });
+                    }
+                });
+                if s.new_desks == Permission::Always {
+                    ui.label(
+                        RichText::new(
+                            "Any desk that can reach this one connects without a question.",
+                        )
+                        .font(semibold(14.0)),
+                    );
+                }
+                ui.label(muted("What you set for one desk overrides this."));
+                self.here(ui, Item::Actions);
+                label(ui, "Allowed actions");
+                let mut always = true;
+                ui.add_enabled(false, egui::Checkbox::new(&mut always, "See screen"));
+                ui.checkbox(&mut s.let_control, "Use keyboard and mouse");
+                ui.checkbox(&mut s.let_sound, "Hear sound");
+                ui.checkbox(&mut s.let_clipboard, "Share clipboard");
+                self.here(ui, Item::Idle);
+                ui.horizontal(|ui| {
+                    label(ui, "Disconnect when idle for");
+                    let name = |minutes: u32| match minutes {
+                        0 => "Never".to_string(),
+                        60 => "1 hour".to_string(),
+                        120 => "2 hours".to_string(),
+                        m => format!("{m} minutes"),
+                    };
+                    egui::ComboBox::from_id_salt("idle")
+                        .selected_text(name(s.idle_minutes))
+                        .show_ui(ui, |ui| {
+                            for minutes in [10, 30, 60, 120, 0] {
+                                ui.selectable_value(&mut s.idle_minutes, minutes, name(minutes));
+                            }
+                        });
+                });
             });
         });
         card(ui, WHITE, |ui| {
@@ -1785,7 +1830,10 @@ impl HomeUi {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 // Back to what Settings says for a new desk; at once, as in
                                 // the desk's Edit.
-                                if ui.add(button("Remove", WHITE, 36.0)).clicked() {
+                                if ui
+                                    .add_enabled(locked.is_none(), button("Remove", WHITE, 36.0))
+                                    .clicked()
+                                {
                                     out.push(Command::EditDesk {
                                         fingerprint: desk.fingerprint.clone(),
                                         name: desk.own_name.clone(),
@@ -1862,6 +1910,19 @@ fn connected_names(state: &AppState) -> Vec<String> {
     } else {
         state.sessions.clone()
     }
+}
+
+/// Why who may connect cannot be changed now: a desk is connected here. `None`: it can.
+fn lock_note(state: &AppState) -> Option<String> {
+    let who = match connected_names(state).as_slice() {
+        [] => return None,
+        [one] => format!("{one} is"),
+        many => format!("{} desks are", many.len()),
+    };
+    Some(format!(
+        "Locked while {who} connected here, so that a connected desk cannot change who \
+         may connect. These can be changed when no desk is connected."
+    ))
 }
 
 /// This desk's state, top right. Returns whether it was clicked while a desk is connected
@@ -2856,5 +2917,41 @@ mod tests {
         ) {
             assert!(listed.contains(&item), "{item:?} is missing from the menu");
         }
+    }
+
+    #[test]
+    fn who_may_connect_is_locked_while_a_desk_is_connected() {
+        let mut state = sample_state();
+        state.guests.clear();
+        state.sessions.clear();
+        assert_eq!(lock_note(&state), None);
+        state.sessions = vec!["LAPTOP".into()];
+        let note = lock_note(&state).expect("locked");
+        assert!(
+            note.starts_with("Locked while LAPTOP is connected here"),
+            "{note}"
+        );
+        state.sessions.push("TABLET".into());
+        let note = lock_note(&state).expect("locked");
+        assert!(
+            note.starts_with("Locked while 2 desks are connected here"),
+            "{note}"
+        );
+
+        let saved = Settings::default();
+        let shown = Settings {
+            new_desks: Permission::Always,
+            idle_minutes: 0,
+            let_control: false,
+            max_bitrate_mbps: 7.5,
+            ..Settings::default()
+        };
+        let kept = shown.with_incoming_of(&saved);
+        assert_eq!(
+            kept.incoming(),
+            saved.incoming(),
+            "who may connect as it was"
+        );
+        assert_eq!(kept.max_bitrate_mbps, 7.5, "the rest as shown");
     }
 }

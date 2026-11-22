@@ -352,6 +352,12 @@ impl Backend {
 
     /// Puts the desks the trust store knows into what the window shows: one entry per desk,
     /// whichever way it was met.
+    /// Whether who may connect is locked: a desk is connected here, and could be the one
+    /// asking through this desk's screen. The installed host checks the same (`control`).
+    fn locked(&self) -> bool {
+        !self.state.lock().expect("app state").sessions.is_empty()
+    }
+
     async fn refresh_desks(&self) {
         let desks = {
             let mut store = self.ep.store.lock().await;
@@ -394,6 +400,10 @@ impl Backend {
                 }
             }
             Command::ForgetDesk(fingerprint) => {
+                if self.locked() {
+                    tracing::warn!(target: "app", "Not forgetting a desk: one is connected here.");
+                    return;
+                }
                 self.runtime.spawn(async move {
                     if let Err(e) = this.ep.store.lock().await.forget_desk(&fingerprint) {
                         tracing::warn!(target: "app", "Could not forget a desk: {e}");
@@ -415,12 +425,23 @@ impl Backend {
                 permission,
                 favorite,
             } => {
+                // The name and the star may change; the permission waits for no desk connected.
+                let locked = self.locked();
+                if locked {
+                    tracing::info!(target: "app", "A desk's permission is not changed while one is connected here.");
+                }
                 self.runtime.spawn(async move {
                     let saved = {
                         let mut store = this.ep.store.lock().await;
                         store
                             .rename(&fingerprint, &name)
-                            .and_then(|_| store.set_permission(&fingerprint, permission))
+                            .and_then(|_| {
+                                if locked {
+                                    Ok(false)
+                                } else {
+                                    store.set_permission(&fingerprint, permission)
+                                }
+                            })
                             .and_then(|_| store.set_favorite(&fingerprint, favorite))
                     };
                     if let Err(e) = saved {
@@ -431,6 +452,13 @@ impl Backend {
             }
             Command::SaveSettings(settings) => {
                 let was = self.state.lock().expect("app state").settings.clone();
+                // Who may connect stays as it was while a desk is connected here.
+                let settings = if self.locked() && settings.incoming() != was.incoming() {
+                    tracing::warn!(target: "app", "Incoming settings kept: a desk is connected here.");
+                    settings.with_incoming_of(&was)
+                } else {
+                    settings
+                };
                 let settings_start_on_boot = settings.start_on_boot;
                 let saved = match &self.hosting.control {
                     Some(pipe) => crate::control::ask(
@@ -1551,7 +1579,7 @@ mod tests {
             ..Settings::default()
         }));
         let until = std::time::Instant::now() + Duration::from_secs(20);
-        let mut staying = loop {
+        let staying = loop {
             // The host listens anew; for a moment nobody is there.
             if let Ok(Ok(conn)) = runtime.block_on(dial()) {
                 let offered = conn.peer_hello.clone().unwrap().capabilities;
@@ -1564,8 +1592,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         };
 
-        // Another change while that desk is connected, so the host listens anew: the desk
-        // stays connected, and the port, held a moment ago, is listened on again.
+        // While that desk is connected, who may connect stays as it is: it could be the one
+        // changing it, through this desk's screen.
+        wait("the guest is connected", &host, |s| {
+            (s.sessions == ["guest"]).then_some(())
+        });
+        host.command(Command::SaveSettings(Settings::default()));
+        assert!(
+            !host.state.lock().unwrap().settings.let_sound,
+            "changed while a desk is connected"
+        );
+        // Once it has gone the change is made, and the port, held a moment ago, is listened
+        // on again.
+        drop(staying);
+        gone(&host);
         host.command(Command::SaveSettings(Settings::default()));
         let until = std::time::Instant::now() + Duration::from_secs(20);
         let second = loop {
@@ -1585,6 +1625,7 @@ mod tests {
             panic!("the host cannot listen again: {why}");
         }
         // Two sessions of one desk (as with a display popped out) are one desk in the list.
+        let mut staying = runtime.block_on(dial()).unwrap().unwrap();
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(host.state.lock().unwrap().sessions, ["guest"]);
         assert_eq!(host.state.lock().unwrap().guests.len(), 1);

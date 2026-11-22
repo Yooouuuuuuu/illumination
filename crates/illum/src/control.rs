@@ -56,16 +56,50 @@ pub fn pipe_name(home: &Path, usual: bool) -> String {
 /// Ends the sessions of the desk of that name; says how many there were.
 pub type EndSessions = Arc<dyn Fn(&str) -> usize + Send + Sync>;
 
+/// The names of the desks connected here.
+pub type Connected = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// What the host does for the app besides changing files.
 #[derive(Clone)]
 pub struct Hands {
     pub end: EndSessions,
+    /// The desks connected here now: while there are any, who may connect is locked.
+    pub connected: Connected,
     /// The updater; `None` where there is none (tests).
     pub update: Option<Arc<crate::update::Installer>>,
 }
 
+/// Why `request` may not be carried out now: it changes who may connect here while desks
+/// are connected (`connected`), one of which could be asking through this desk's screen.
+pub fn locked(home: &Path, connected: &[String], request: &Request) -> Option<String> {
+    let changes_who = match request {
+        Request::Settings { settings } => {
+            settings.incoming() != crate::app::load_settings(home).incoming()
+        }
+        Request::Trust { change } => matches!(
+            change,
+            Change::SetPermission { .. } | Change::ForgetPeer { .. } | Change::ForgetDesk { .. }
+        ),
+        _ => false,
+    };
+    let who = match connected {
+        [] => return None,
+        [one] => format!("{one} is"),
+        many => format!("{} desks are", many.len()),
+    };
+    changes_who.then(|| format!("locked while {who} connected here"))
+}
+
 /// Carries out one request in the home folder. This is the host's side.
 pub fn carry_out(home: &Path, hands: &Hands, request: &Request) -> Reply {
+    if let Some(why) = locked(home, &(hands.connected)(), request) {
+        tracing::warn!(target: "service", "Refused: {why}.");
+        return Reply {
+            ok: false,
+            changed: false,
+            why,
+        };
+    }
     let done = match request {
         Request::Trust { change } => TrustStore::load(home.join("trust.json"))
             .and_then(|mut store| store.apply(change))
@@ -336,7 +370,11 @@ mod tests {
             noted.lock().unwrap().push(name.to_string());
             usize::from(name == "laptop")
         });
-        let hands = Hands { end, update: None };
+        let hands = Hands {
+            end,
+            connected: Arc::new(Vec::new),
+            update: None,
+        };
         let serving = runtime.spawn(serve(home.clone(), pipe.clone(), hands));
 
         let mut store = TrustStore::load(home.join("trust.json")).unwrap();
@@ -444,6 +482,7 @@ mod tests {
             pipe.clone(),
             Hands {
                 end: Arc::new(|_| 0),
+                connected: Arc::new(Vec::new),
                 update: None,
             },
             Some(move || Some(guest.clone())),
@@ -460,6 +499,7 @@ mod tests {
                 pipe.clone(),
                 Hands {
                     end: Arc::new(|_| 0),
+                    connected: Arc::new(Vec::new),
                     update: None,
                 },
                 Some(|| None),
@@ -490,5 +530,69 @@ mod tests {
             pipe_name(Path::new("b"), false)
         );
         assert_eq!(pipe_name(Path::new("a"), true), r"\\.\pipe\Illumination");
+    }
+
+    /// While a desk is connected, a change to who may connect is refused, and the rest goes
+    /// through.
+    #[test]
+    fn who_may_connect_is_locked_while_a_desk_is_connected() {
+        let home = std::env::temp_dir().join(format!("illum-control-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let open = Request::Settings {
+            settings: Settings {
+                new_desks: illum_core::store::Permission::Always,
+                ..Settings::default()
+            },
+        };
+        let faster = Request::Settings {
+            settings: Settings {
+                max_bitrate_mbps: 50.0,
+                ..Settings::default()
+            },
+        };
+        let trust = |change| Request::Trust { change };
+        let fingerprint = "ab".to_string();
+        let permission = trust(Change::SetPermission {
+            fingerprint: fingerprint.clone(),
+            permission: Some(illum_core::store::Permission::Always),
+        });
+        let forget = trust(Change::ForgetDesk {
+            fingerprint: fingerprint.clone(),
+        });
+        let rename = trust(Change::Rename {
+            fingerprint,
+            name: "Mine".into(),
+        });
+
+        let laptop = vec!["LAPTOP".to_string()];
+        for request in [&open, &permission, &forget] {
+            assert_eq!(locked(&home, &[], request), None, "nobody connected");
+            assert_eq!(
+                locked(&home, &laptop, request).as_deref(),
+                Some("locked while LAPTOP is connected here"),
+                "{request:?}"
+            );
+        }
+        for request in [&faster, &rename, &Request::CancelUpdate] {
+            assert_eq!(locked(&home, &laptop, request), None, "{request:?}");
+        }
+        let two = vec!["LAPTOP".to_string(), "TABLET".to_string()];
+        assert_eq!(
+            locked(&home, &two, &open).as_deref(),
+            Some("locked while 2 desks are connected here")
+        );
+
+        // And carried out: refused, nothing written.
+        let hands = Hands {
+            end: Arc::new(|_| 0),
+            connected: Arc::new(move || laptop.clone()),
+            update: None,
+        };
+        let reply = carry_out(&home, &hands, &open);
+        assert!(!reply.ok && reply.why.starts_with("locked"), "{reply:?}");
+        assert!(!home.join("settings.json").exists());
+        assert!(carry_out(&home, &hands, &faster).ok);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

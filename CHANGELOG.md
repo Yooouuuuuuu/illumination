@@ -11,6 +11,16 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-22
+
+### Changed
+
+- **Who may connect is locked while a desk is connected here.** A desk controlling
+  this one could open the app here and let itself or any desk in for good. While a
+  desk is connected, Settings greys out Incoming and Trusted desks and says why, and a
+  desk's permission and Forget are greyed out too. The installed host also refuses
+  these changes, whichever program asks. Names and favourites can still change.
+
 ## [0.15.3] - 2026-11-22
 
 ### Added

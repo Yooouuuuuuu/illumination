@@ -187,6 +187,10 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
         crate::control::pipe_name(home, crate::is_usual_home(home)),
         crate::control::Hands {
             end: Arc::new(move |name: &str| ending.end(name)),
+            connected: {
+                let sessions = sessions.clone();
+                Arc::new(move || sessions.names())
+            },
             update: Some(installer),
         },
     )));
