@@ -166,7 +166,7 @@ Details of each:
 | Pacer | A token bucket sends at the rung's bitrate. Its burst allowance is 50 ms or two frames, whichever is longer, so a frame at a low frame rate is not spread over its own interval. |
 | Encoder | Its bitrate is `rung × 100 ÷ (100 + parity %) × 90 %` (`encoder_bitrate`). Parity comes out of the budget; 10 % is left for headers and for the bucket to refill. Hardware encoders (NVENC, AMF, QSV) take a new bitrate live; software encoders are reopened. |
 | Frame rate, scale | The encoder is reopened, which costs one keyframe. Frames above the rate are skipped; the newest frame wins. |
-| Viewer | The host sends `Quality` (rung, bitrate, frame rate, scale, parity, reason). The viewer shows it in its status line. |
+| Viewer | The host sends `Quality` (rung, bitrate, frame rate, scale, parity, reason). The viewer writes it to its log every second, and a viewer drawing on the CPU shows it in its title bar. |
 
 When the viewer shows a display small (one of several in its window), the host sends it at
 that size.

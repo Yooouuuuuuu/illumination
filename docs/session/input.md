@@ -222,8 +222,8 @@ host. Its look is in [video.md](video.md).
 ### Input round trip
 
 The host acknowledges every input event once it has injected it (`ControlMsg::InputAck`).
-Moves from the UDP path are acknowledged at most ten times a second. The session window's
-status line shows **"input N ms"**: the median round trip of the last second, or the last one
+Moves from the UDP path are acknowledged at most ten times a second. The viewer's log shows
+**"input N ms"** every second (and so does the title bar of a viewer drawing on the CPU): the median round trip of the last second, or the last one
 known. It covers the way to the host and the injection, not the picture's way back. Beside
 the network round trip it shows whether an input delay is the network or the host.
 

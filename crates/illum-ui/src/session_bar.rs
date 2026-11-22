@@ -411,29 +411,43 @@ fn bars(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, BarS
         )
         .show_separator_line(false)
         .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {} · {}",
-                        state.host_name, state.host_address, state.status
-                    ))
-                    .font(FontId::monospace(12.0))
-                    .color(MUTED),
-                );
-                if let Some(notice) = &state.notice {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // One line, never two: the numbers are cut short before the note is. Nothing in it
+            // can be selected.
+            let words = if state.status.is_empty() {
+                state.host_name.clone()
+            } else {
+                format!("{} · {}", state.host_name, state.status)
+            };
+            egui::Sides::new().shrink_left().spacing(12.0).show(
+                ui,
+                |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(words)
+                                .font(FontId::monospace(12.0))
+                                .color(MUTED),
+                        )
+                        .selectable(false)
+                        .truncate(),
+                    );
+                },
+                |ui| {
+                    if let Some(notice) = &state.notice {
                         Frame::new()
                             .fill(YELLOW)
                             .stroke(thin())
                             .corner_radius(CornerRadius::same(8))
                             .inner_margin(Margin::symmetric(10, 1))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(notice).font(semibold(12.0)));
+                                ui.add(
+                                    egui::Label::new(RichText::new(notice).font(semibold(12.0)))
+                                        .selectable(false)
+                                        .extend(),
+                                );
                             });
-                    });
-                }
-            });
+                    }
+                },
+            );
         });
     let rect = bottom.response.rect;
     ui.painter().line_segment(
@@ -648,7 +662,7 @@ pub fn sample() -> BarState {
         pointer: PointerMode::Remote,
         mode: WindowMode::Detail,
         reveal: false,
-        status: "H.265 · 30 fps · 18 ms · input 12 ms".into(),
+        status: "30 fps · 12.3 Mb/s · delay 18 ms".into(),
         notice: None,
         displays: vec!["2560 × 1440, main".into(), "1920 × 1080".into()],
         display: 0,

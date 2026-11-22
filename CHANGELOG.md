@@ -11,6 +11,17 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-11-22
+
+### Changed
+
+- **The session window's bottom line is short and plain.** It shows the host's name,
+  frames per second, bitrate and delay, and loss only when there is some, for example
+  "LAPTOP · 30 fps · 12.3 Mb/s · delay 18 ms". It stays on one line, cut short with
+  "…" in a narrow window, and its words can no longer be selected. Codec, quality step,
+  encode, decode and draw times, round trip, input and repaired frames are in the
+  viewer's log every second.
+
 ## [0.16.2] - 2026-11-22
 
 ### Added

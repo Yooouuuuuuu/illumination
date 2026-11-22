@@ -64,6 +64,9 @@ pub struct Stats {
     input_ms: Vec<f64>,
     last_input_ms: Option<f64>,
     pub summary: String,
+    /// The few numbers a person reads, for the bottom line: frames per second, bitrate,
+    /// delay, and loss when there is some.
+    pub brief: String,
 }
 
 impl Default for Stats {
@@ -84,6 +87,7 @@ impl Default for Stats {
             input_ms: Vec::new(),
             last_input_ms: None,
             summary: "waiting for the first frame…".into(),
+            brief: String::new(),
         }
     }
 }
@@ -184,9 +188,25 @@ impl Stats {
         if self.audio_frames > 0 {
             parts.push("audio".into());
         }
+        // For the person: how smooth, how much, how late; loss only when there is some. The
+        // rest goes to the log.
+        let mut brief = vec![format!("{fps:.0} fps"), format!("{mbps:.1} Mb/s")];
+        let delay = if self.latencies_ms.is_empty() {
+            rtt.map(|rtt| rtt.as_secs_f64() * 1000.0)
+        } else {
+            Some(self.latencies_ms[self.latencies_ms.len() / 2])
+        };
+        if let Some(ms) = delay {
+            brief.push(format!("delay {ms:.0} ms"));
+        }
+        if self.lost > 0 {
+            let pct = self.lost as f64 * 100.0 / (self.datagrams + self.lost) as f64;
+            brief.push(format!("loss {pct:.1} %"));
+        }
         self.summary = parts.join(" · ");
         *self = Stats {
             summary: std::mem::take(&mut self.summary),
+            brief: brief.join(" · "),
             last_input_ms: self.last_input_ms,
             ..Stats::default()
         };
@@ -671,7 +691,6 @@ impl ViewerWindow {
             over_bar: false,
             bar_press: false,
             status_line: String::new(),
-            last_summary: String::new(),
             bar_notice: None,
             ended: None,
             displays: Vec::new(),
@@ -734,9 +753,8 @@ struct App {
     over_bar: bool,
     /// A mouse button went down on a bar; its release belongs there too.
     bar_press: bool,
-    /// The numbers of the last second, for the status strip.
+    /// The numbers of the last second a person reads, for the bottom line.
     status_line: String,
-    last_summary: String,
     bar_notice: Option<String>,
     /// Why the session ended, while the window says so.
     ended: Option<String>,
@@ -974,20 +992,8 @@ impl App {
             .or_else(|| state.idle_notice.clone())
             .or_else(|| state.notice.clone())
             .or_else(|| state.input_notice.clone());
-        if state.stats.summary != self.last_summary {
-            self.last_summary = state.stats.summary.clone();
-            let codec = state.codec.map_or("", |c| c.name());
-            let quality = state.quality.map_or(String::new(), |q| {
-                format!(
-                    " · rung {}/{}: {:.1} Mb/s {} fps, parity {} %",
-                    q.rung + 1,
-                    q.rungs,
-                    f64::from(q.bitrate_kbps) / 1000.0,
-                    q.fps,
-                    q.fec_percent
-                )
-            });
-            self.status_line = format!("{codec}{quality} · {}", self.last_summary);
+        if state.stats.brief != self.status_line {
+            self.status_line = state.stats.brief.clone();
         }
         self.bar_notice = notice_now;
         // The session ended: the tiles go back to the one display, whose picture stays.
@@ -996,7 +1002,6 @@ impl App {
         let title = if let Some(status) = state.status.clone() {
             Some(format!("{} — {status}", self.options.title))
         } else if state.stats.tick(rtt) {
-            tracing::debug!(target: "viewer", "{}", state.stats.summary); // shown with -v
             let codec = state.codec.map_or("", |c| c.name());
             let quality = state.quality.map_or(String::new(), |q| {
                 let scale = if q.scale_percent < 100 {
@@ -1013,6 +1018,8 @@ impl App {
                     q.fec_percent
                 )
             });
+            // The full numbers, every second, in the log (shown with -v).
+            tracing::debug!(target: "viewer", "{codec}{quality} · {}", state.stats.summary);
             let notice = state
                 .notice
                 .as_ref()
@@ -2151,6 +2158,50 @@ mod pointer_tests {
                 bgra: vec![],
             })
             .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bottom line has the few numbers a person reads; the log line has them all.
+    #[test]
+    fn the_bottom_line_is_short() {
+        let mut stats = Stats {
+            started: Instant::now() - Duration::from_secs(1),
+            ..Stats::default()
+        };
+        for _ in 0..30 {
+            stats.presented(Some(18.0));
+            stats.frame_received(50_000, 3_000);
+            stats.decoded(2_000);
+        }
+        stats.packets(990, 10, 4);
+        assert!(stats.tick(Some(Duration::from_millis(9))));
+        assert!(
+            stats.brief.starts_with("30 fps · 12.")
+                && stats.brief.ends_with(" · delay 18 ms · loss 1.0 %"),
+            "{}",
+            stats.brief
+        );
+        for word in ["encode", "decode", "rtt", "repaired"] {
+            assert!(!stats.brief.contains(word), "{}", stats.brief);
+            assert!(stats.summary.contains(word), "{}", stats.summary);
+        }
+
+        // No loss, no clocks yet: the round trip stands in for the delay.
+        let mut stats = Stats {
+            started: Instant::now() - Duration::from_secs(1),
+            ..Stats::default()
+        };
+        stats.presented(None);
+        assert!(stats.tick(Some(Duration::from_millis(9))));
+        assert!(
+            stats.brief.ends_with("Mb/s · delay 9 ms"),
+            "{}",
+            stats.brief
         );
     }
 }
