@@ -406,6 +406,8 @@ pub enum Command {
     UpdateNow,
     /// Stop the download of an update.
     CancelUpdate,
+    /// Bring the session windows open to other desks to the front.
+    RaiseSessions,
     /// Send the window to the tray; the app goes on.
     Hide,
     /// Close the app: every connection ends and this desk cannot be reached until it is
@@ -994,6 +996,9 @@ impl HomeUi {
                             }
                             if status_pill(ui, state) {
                                 self.connected = true;
+                            }
+                            if outgoing_pill(ui, state) {
+                                out.push(Command::RaiseSessions);
                             }
                             if update_pill(ui, state) {
                                 self.update = true;
@@ -1940,15 +1945,12 @@ fn lock_note(state: &AppState) -> Option<String> {
 /// This desk's state, top right. Returns whether it was clicked while a desk is connected
 /// (which opens the list of them).
 fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
+    // The number only, as the tray says it: the "Connected here" list has the names.
     let names = connected_names(state);
     let (text, fill, solid) = match (&state.incoming, names.as_slice()) {
         (Incoming::Failed(_), _) => ("Cannot be reached".to_string(), CORAL, false),
-        (_, [one]) => (format!("{one} is connected"), YELLOW, true),
-        (_, [_, ..]) => (
-            format!("{} desks connected", state.sessions.len()),
-            YELLOW,
-            true,
-        ),
+        (_, [_]) => ("1 desk connected".to_string(), YELLOW, true),
+        (_, [_, ..]) => (format!("{} desks connected", names.len()), YELLOW, true),
         (Incoming::Listening, []) if state.settings.new_desks == Permission::Never => {
             ("New desks are refused".to_string(), WHITE, false)
         }
@@ -1958,6 +1960,27 @@ fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
         (Incoming::Listening, []) => ("Ready for connections".to_string(), GREEN, true),
         (Incoming::Off, []) => ("Not listening".to_string(), WHITE, false),
     };
+    pill(ui, text, fill, solid).clicked() && !state.sessions.is_empty()
+}
+
+/// The session windows open to other desks, beside the status: their number, never a name
+/// (each window says which desk it shows). Nothing when there are none. Returns whether it
+/// was clicked, which brings them to the front.
+fn outgoing_pill(ui: &mut Ui, state: &AppState) -> bool {
+    let text = match state.outgoing {
+        0 => return false,
+        1 => "Connected to 1 desk".to_string(),
+        n => format!("Connected to {n} desks"),
+    };
+    // Blue, as for things on their way: the yellow of a desk connected here is the one to
+    // watch.
+    pill(ui, text, BLUE, true)
+        .on_hover_text("Bring the session windows to the front")
+        .clicked()
+}
+
+/// A pill of the top bar: a dot, filled or hollow, and a few words.
+fn pill(ui: &mut Ui, text: String, fill: Color32, solid: bool) -> egui::Response {
     // Painted, not laid out: no taller than its words (smaller than the button beside it)
     // and level with that button.
     let words = ui.painter().layout_no_wrap(text, semibold(13.0), NAVY);
@@ -1983,7 +2006,7 @@ fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
         words,
         NAVY,
     );
-    !state.sessions.is_empty() && response.clicked()
+    response
 }
 
 /// The update, top right beside the status: strong yellow while it waits for the person,

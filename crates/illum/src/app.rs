@@ -401,6 +401,18 @@ impl Backend {
                     });
                 }
             }
+            Command::RaiseSessions => {
+                let opened: Vec<String> = self
+                    .opened
+                    .lock()
+                    .expect("opened sessions")
+                    .iter()
+                    .map(|(address, _)| address.clone())
+                    .collect();
+                for address in opened {
+                    self.raise(&address);
+                }
+            }
             Command::ForgetDesk(fingerprint) => {
                 if self.locked() {
                     tracing::warn!(target: "app", "Not forgetting a desk: one is connected here.");

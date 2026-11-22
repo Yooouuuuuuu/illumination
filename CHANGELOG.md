@@ -11,6 +11,20 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-11-22
+
+### Added
+
+- **The main window shows that you are connected out.** While session windows are open
+  to other desks, a blue pill beside the status says "Connected to 1 desk" or
+  "Connected to N desks"; a click brings those windows to the front.
+
+### Changed
+
+- **The status pill gives the number, not a name.** A desk connected here shows as
+  "1 desk connected" instead of its name, as the tray says it. The "Connected here"
+  list still has the names.
+
 ## [0.16.4] - 2026-11-22
 
 ### Changed
