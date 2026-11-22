@@ -24,6 +24,7 @@ pub const CAPABILITIES: &[&str] = &[
     "cursor-kind",
     "idle-warning",
     "lock",
+    "ended",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
@@ -269,6 +270,12 @@ pub enum ControlMsg {
     /// Controller → host: lock the host (what Win+L does there; pressed on the controller,
     /// that key locks the controller). Sent only to a host that lists `lock`.
     LockHost,
+    /// Host → controller, just before `Bye`: why the host ends the session, in one sentence
+    /// for the person ("No input for 30 min, so the host ended the session."). Sent only to
+    /// a controller that lists `ended`.
+    Ended {
+        reason: String,
+    },
     /// Orderly end of session.
     Bye,
 }
@@ -371,6 +378,9 @@ mod tests {
             ControlMsg::InputAck {
                 seq: 77,
                 unreliable: true,
+            },
+            ControlMsg::Ended {
+                reason: "No input for 30 min, so the host ended the session.".into(),
             },
             ControlMsg::Bye,
         ];

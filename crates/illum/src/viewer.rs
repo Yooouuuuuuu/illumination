@@ -851,6 +851,10 @@ pub async fn run_viewer_session_sharing_media(
                     notify();
                 }
                 Ok(ControlMsg::Ping { seq }) => conn.send_control(&ControlMsg::Pong { seq }),
+                Ok(ControlMsg::Ended { reason }) => {
+                    tracing::info!(target: "session", "The host ends the session: {reason}");
+                    shared.lock().expect("view state lock").ended_why = Some(reason);
+                }
                 Ok(ControlMsg::Bye) => break Ok(()),
                 Ok(_) => {}
                 Err(e) => break Err(protocol(e)),

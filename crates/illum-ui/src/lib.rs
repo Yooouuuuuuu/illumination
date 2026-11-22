@@ -240,6 +240,11 @@ pub struct ViewState {
     pub input_notice: Option<String>,
     /// The host is about to end the session for lack of input: said until input comes.
     pub idle_notice: Option<String>,
+    /// Why the host is ending the session, as it said just before its goodbye.
+    pub ended_why: Option<String>,
+    /// The session has ended, and why: the window shows it over the dimmed picture, with
+    /// Reconnect and Close.
+    pub ended: Option<String>,
     /// The host's displays, each in a few words, and the one being shown. Empty until the
     /// host said (an older host never does).
     pub displays: Vec<String>,
@@ -280,6 +285,8 @@ impl Default for ViewState {
             notice: None,
             input_notice: None,
             idle_notice: None,
+            ended_why: None,
+            ended: None,
             displays: Vec::new(),
             display: 0,
             host_layout: None,
@@ -497,6 +504,9 @@ pub struct ViewerOptions {
     pub on_lock: Box<dyn Fn()>,
     /// Called to open another of the host's displays in a window of its own.
     pub on_pop_out: Box<dyn Fn(u32)>,
+    /// Asks for the session again after it ended (see [`ViewState::ended`]); `None`: the
+    /// window closes when the session ends.
+    pub on_reconnect: Option<Box<dyn Fn()>>,
     /// This window is such a popped-out display: the picture alone, with a tab that closes it.
     pub popped_out: bool,
     /// What showing several of the host's displays at once needs; `None`: not offered.
@@ -661,6 +671,7 @@ impl ViewerWindow {
             status_line: String::new(),
             last_summary: String::new(),
             bar_notice: None,
+            ended: None,
             displays: Vec::new(),
             display: 0,
             focused: None,
@@ -725,6 +736,8 @@ struct App {
     status_line: String,
     last_summary: String,
     bar_notice: Option<String>,
+    /// Why the session ended, while the window says so.
+    ended: Option<String>,
     /// The host's displays and the one shown, as the host last said.
     displays: Vec<String>,
     display: u32,
@@ -975,6 +988,9 @@ impl App {
             self.status_line = format!("{codec}{quality} · {}", self.last_summary);
         }
         self.bar_notice = notice_now;
+        // The session ended: the tiles go back to the one display, whose picture stays.
+        let ended_now = state.ended != self.ended && state.ended.is_some();
+        self.ended = state.ended.clone();
         let title = if let Some(status) = state.status.clone() {
             Some(format!("{} — {status}", self.options.title))
         } else if state.stats.tick(rtt) {
@@ -1015,6 +1031,9 @@ impl App {
         if let Some((seq, _)) = new_frame {
             self.last_acked = Some(seq);
             (self.options.on_presented)(seq);
+        }
+        if ended_now {
+            self.leave_all(false);
         }
     }
 
@@ -1343,6 +1362,10 @@ impl App {
             all: self.all.is_some(),
             arrange: self.all.as_ref().is_some_and(|all| all.arrange),
             tiles: self.arrange_marks(),
+            ended: self
+                .ended
+                .clone()
+                .filter(|_| self.options.on_reconnect.is_some()),
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1453,6 +1476,11 @@ impl App {
             BarAction::Lock => (self.options.on_lock)(),
             BarAction::PopOut(display) => (self.options.on_pop_out)(display),
             BarAction::Disconnect => event_loop.exit(),
+            BarAction::Reconnect => {
+                if let Some(reconnect) = &self.options.on_reconnect {
+                    reconnect();
+                }
+            }
         }
     }
 }

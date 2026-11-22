@@ -1025,6 +1025,16 @@ impl Drop for MediaLink {
     }
 }
 
+/// A length of time as a person says it: "30 min", "2 h", "1 h 30 min".
+fn span(time: Duration) -> String {
+    let minutes = (time.as_secs() + 30) / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
 /// Serves one accepted session until the controller says bye, disconnects or goes idle. `end`
 /// is the person at this desk ending it: the controller is told goodbye, so it does not take
 /// it for a dropped link and come back.
@@ -1062,6 +1072,17 @@ pub async fn serve_session(
         .peer_hello
         .as_ref()
         .is_some_and(|h| h.capabilities.iter().any(|c| c == "idle-warning"));
+    // Why it ends, said before the goodbye to a controller that can show it.
+    let tells = conn
+        .peer_hello
+        .as_ref()
+        .is_some_and(|h| h.capabilities.iter().any(|c| c == "ended"));
+    let goodbye = |conn: &Connection, why: String| {
+        if tells {
+            conn.send_control(&ControlMsg::Ended { reason: why });
+        }
+        conn.send_control(&ControlMsg::Bye);
+    };
     let mut warned = false;
     let mut look = tokio::time::interval(Duration::from_secs(1));
     look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1077,7 +1098,10 @@ pub async fn serve_session(
                 );
                 if quiet >= limit {
                     tracing::info!(target: "session", "No input for {} minutes; ending the session.", limit.as_secs() / 60);
-                    conn.send_control(&ControlMsg::Bye);
+                    goodbye(
+                        &conn,
+                        format!("No input for {}, so the host ended the session.", span(limit)),
+                    );
                     break Ok(());
                 }
                 let close = quiet + IDLE_WARNING >= limit;
@@ -1090,7 +1114,7 @@ pub async fn serve_session(
                 continue;
             }
             () = end.notified() => {
-                conn.send_control(&ControlMsg::Bye);
+                goodbye(&conn, "The person at the host ended the session.".to_string());
                 break Ok(());
             }
         };
@@ -1335,4 +1359,18 @@ pub async fn serve_session(
     drop(capture);
     conn.close(Duration::from_secs(1)).await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_time_is_said_as_a_person_says_it() {
+        let min = |m: u64| span(Duration::from_secs(m * 60));
+        assert_eq!(min(10), "10 min");
+        assert_eq!(min(60), "1 h");
+        assert_eq!(min(90), "1 h 30 min");
+        assert_eq!(min(120), "2 h");
+    }
 }

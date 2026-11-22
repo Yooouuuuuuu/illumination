@@ -696,6 +696,11 @@ async fn an_idle_session_is_warned_and_then_ended() {
         .expect("the host ends it")
         .unwrap();
     assert!(ended.is_ok(), "a goodbye, not a dropped link: {ended:?}");
+    // Said why, before the goodbye, in words for the person; 2 s is "0 min" as minutes go.
+    assert_eq!(
+        shared.lock().unwrap().ended_why.as_deref(),
+        Some("No input for 0 min, so the host ended the session.")
+    );
     let took = began.elapsed();
     assert!(
         took >= Duration::from_millis(1800) && took < Duration::from_secs(8),

@@ -60,6 +60,8 @@ pub struct BarState {
     pub arrange: bool,
     /// While arranging: the tiles, to mark each with its display's number.
     pub tiles: Vec<TileMark>,
+    /// The session ended, and why: a card over the dimmed picture offers Reconnect and Close.
+    pub ended: Option<String>,
 }
 
 /// A tile as the bars mark it while the tiles are arranged.
@@ -92,6 +94,8 @@ pub enum BarAction {
     /// Arrange the tiles (true), or go back to controlling the host.
     Arrange(bool),
     Disconnect,
+    /// Dial the host again after the session ended.
+    Reconnect,
 }
 
 /// What the bars remember between frames.
@@ -245,9 +249,69 @@ fn group(ui: &mut Ui, text: &str) {
     );
 }
 
+/// The bars, and over them the card of an ended session.
+pub fn draw(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, BarSpace) {
+    let (mut out, mut space) = bars(ui, state, own);
+    if let Some(why) = &state.ended {
+        ended_card(ui, why, &mut out, &mut space);
+    }
+    (out, space)
+}
+
+/// The session ended: the picture dimmed, and a card in the middle saying why, with
+/// Reconnect and Close. The whole window is the card's while it shows.
+fn ended_card(ui: &mut Ui, why: &str, out: &mut Vec<BarAction>, space: &mut BarSpace) {
+    let screen = ui.ctx().content_rect();
+    ui.ctx()
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::unique("session-ended-dim"),
+        ))
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    egui::Area::new(egui::Id::unique("session-ended"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(WHITE)
+                .stroke(thin())
+                .corner_radius(CornerRadius::same(16))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(360.0);
+                    ui.spacing_mut().item_spacing.y = 12.0;
+                    ui.label(RichText::new("Session ended").font(semibold(18.0)));
+                    ui.label(RichText::new(why).size(14.0));
+                    ui.horizontal(|ui| {
+                        let reconnect = egui::Button::new(
+                            RichText::new("Reconnect").font(semibold(14.0)).color(NAVY),
+                        )
+                        .fill(YELLOW)
+                        .stroke(thin())
+                        .corner_radius(CornerRadius::same(10))
+                        .min_size(vec2(120.0, 36.0));
+                        if ui.add(reconnect).clicked() {
+                            out.push(BarAction::Reconnect);
+                        }
+                        let close = egui::Button::new(
+                            RichText::new("Close").font(semibold(14.0)).color(NAVY),
+                        )
+                        .fill(WHITE)
+                        .stroke(thin())
+                        .corner_radius(CornerRadius::same(10))
+                        .min_size(vec2(96.0, 36.0));
+                        if ui.add(close).clicked() {
+                            out.push(BarAction::Disconnect);
+                        }
+                    });
+                });
+        });
+    space.claims.push(screen);
+}
+
 /// Draws the bars (or, with them hidden, the "Exit" tab) and returns what was asked for and
 /// the room they took.
-pub fn draw(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, BarSpace) {
+fn bars(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, BarSpace) {
     let mut out = Vec::new();
     let mut space = BarSpace::default();
     // Compact, as the bar is thin.
@@ -586,6 +650,7 @@ pub fn sample() -> BarState {
         all: false,
         arrange: false,
         tiles: Vec::new(),
+        ended: None,
     }
 }
 

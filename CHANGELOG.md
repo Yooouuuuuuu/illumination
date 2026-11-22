@@ -11,6 +11,17 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-22
+
+### Changed
+
+- **A session that ends keeps its window and says why.** When the host ends the session
+  (no input for the idle time, or the person at the host ends it), the window no longer
+  closes: the last picture stays, dimmed, with a card such as "No input for 30 min, so
+  the host ended the session." and the buttons Reconnect and Close. A lost link with
+  reconnecting off is shown the same way. Popped-out displays close, and "All" goes back
+  to one display.
+
 ## [0.16.0] - 2026-11-22
 
 ### Changed

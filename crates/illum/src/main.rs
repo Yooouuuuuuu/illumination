@@ -1469,9 +1469,14 @@ fn run_view(
     } else {
         None
     };
+    // When the session ends, the window says why and waits for Reconnect or Close (§9): not
+    // in a popped-out window (it closes with the main one), a measurement run, or without
+    // the GPU presenter, which draws the card.
+    let card = args.gpu && !args.popout && args.duration.is_none() && args.report.is_none();
+    let (ask_again, mut asked_again) = tokio::sync::mpsc::unbounded_channel::<()>();
     // The session runs in a loop: an unexpected drop, with reconnect on (the default), re-dials
     // the host and resumes — keeping the window, clipboard, input and media slot — with a
-    // backoff. A clean end (the host said goodbye) stops it.
+    // backoff. A clean end (the host said goodbye) stops it, or waits for the person.
     let session = {
         let (shared, waker) = (shared.clone(), waker.clone());
         let redraw = waker.clone();
@@ -1485,15 +1490,16 @@ fn run_view(
         );
         let (ep, target) = (ep.clone(), target.to_string());
         let reconnect = args.params.reconnect;
+        let popped = popped.clone();
         runtime.spawn(async move {
             let mut next = Some(conn);
             let mut backoff = Duration::from_secs(1);
+            let mut dialing = "connection lost; reconnecting…";
             let result = loop {
                 let conn = match next.take() {
                     Some(c) => c,
                     None => {
-                        shared.lock().expect("view state lock").status =
-                            Some("connection lost; reconnecting…".into());
+                        shared.lock().expect("view state lock").status = Some(dialing.into());
                         notify();
                         match connect(&ep, &target).await {
                             Ok(c) => {
@@ -1510,6 +1516,8 @@ fn run_view(
                         }
                     }
                 };
+                dialing = "connection lost; reconnecting…";
+                shared.lock().expect("view state lock").ended_why = None;
                 live.set(Some(conn.sender()));
                 let r = run_viewer_session_sharing_media(
                     conn,
@@ -1523,13 +1531,40 @@ fn run_view(
                 .await;
                 live.set(None);
                 *media_slot.lock().expect("media slot") = None;
-                match r {
-                    Ok(()) => break Ok(()),
+                let why = match &r {
+                    Ok(()) => shared
+                        .lock()
+                        .expect("view state lock")
+                        .ended_why
+                        .take()
+                        .unwrap_or_else(|| "The host ended the session.".to_string()),
                     Err(e) if reconnect => {
                         tracing::warn!(target: "media", "Connection ended ({e}); reconnecting.");
+                        continue;
                     }
-                    Err(e) => break Err(e),
+                    Err(_) => "The connection to the host was lost.".to_string(),
+                };
+                if !card {
+                    break r;
                 }
+                // The window stays, dimmed, and says why; the person chooses.
+                tracing::info!(target: "session", "Session ended: {why} Waiting for Reconnect or Close.");
+                close_popped(&popped);
+                {
+                    let mut state = shared.lock().expect("view state lock");
+                    state.ended = Some(why);
+                    state.status = None;
+                    state.idle_notice = None;
+                }
+                notify();
+                if asked_again.recv().await.is_none() {
+                    break r;
+                }
+                tracing::info!(target: "session", "Reconnecting, as asked.");
+                shared.lock().expect("view state lock").ended = None;
+                notify();
+                dialing = "reconnecting…";
+                backoff = Duration::from_secs(1);
             };
             waker.wake(UiEvent::Exit);
             result
@@ -1716,6 +1751,11 @@ fn run_view(
                 },
                 can_lock: with_input && hello.capabilities.iter().any(|c| c == "lock"),
                 popped_out: args.popout,
+                on_reconnect: card.then(|| -> Box<dyn Fn()> {
+                    Box::new(move || {
+                        let _ = ask_again.send(());
+                    })
+                }),
                 on_pop_out: {
                     let (popped, line_for) = (popped.clone(), pop_out_line.clone());
                     Box::new(move |number| {
