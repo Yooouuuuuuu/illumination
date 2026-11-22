@@ -115,6 +115,8 @@ pub struct ViewParams {
     pub scale_percent: u32,
     /// Let the ladder lower the resolution under pressure (`--allow-scale`).
     pub scale_rungs: bool,
+    /// The window the display is shown in (see `ControlMsg::ScreenStart`); 0: alone.
+    pub group: u64,
     /// Keep per-second records (`--report`).
     pub record: bool,
     /// Sync the clipboard both ways with the host (§8); off with `--no-clipboard`.
@@ -140,6 +142,7 @@ impl ViewParams {
             fixed: self.fixed,
             scale_percent: self.scale_percent,
             scale_rungs: self.scale_rungs,
+            group: self.group,
         }
     }
 
@@ -156,6 +159,7 @@ impl ViewParams {
             fixed: false,
             scale_percent: 0,
             scale_rungs: false,
+            group: 0,
             record: false,
             clipboard: true,
             reconnect: true,

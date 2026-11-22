@@ -940,7 +940,22 @@ impl HomeUi {
                     Page::Home => {
                         logo(ui, 36.0);
                         if ui.available_width() > 430.0 {
-                            ui.label(RichText::new("Illumination").font(heading(20.0)));
+                            let name = ui.label(RichText::new("Illumination").font(heading(20.0)));
+                            // The version, small and grey beside the name, on its baseline.
+                            let version = ui.painter().layout_no_wrap(
+                                format!("v{}", state.version),
+                                mono(10.0),
+                                MUTED,
+                            );
+                            let (spot, _) = ui.allocate_exact_size(
+                                vec2(version.size().x - 4.0, name.rect.height()),
+                                Sense::hover(),
+                            );
+                            let at = egui::pos2(
+                                spot.left() - 4.0,
+                                name.rect.bottom() - version.size().y - 4.0,
+                            );
+                            ui.painter().galley(at, version, MUTED);
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.add(button("Settings", WHITE, 40.0)).clicked() {

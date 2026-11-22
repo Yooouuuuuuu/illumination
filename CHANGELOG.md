@@ -11,6 +11,24 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-22
+
+### Added
+
+- **The version** beside the app's name at the top of the main window, small and
+  grey (Home only).
+
+### Fixed
+
+- **The displays in "All" share one bitrate limit.** Each display had a limit of
+  its own and stepped up and down as if the link were its alone, so together they
+  overloaded it and lagged. Now the window has one limit, split by the pixels each
+  display sends: a small tile spends what its size needs (a quarter of the width,
+  a sixteenth of the limit), and all of them step down and up together.
+- **A re-sent keyframe is no longer shrunk twice.** On a still screen, a frame the
+  viewer lost was sent again from a picture already made smaller, at a smaller size
+  still, which restarted the encoder twice and sent two full pictures.
+
 ## [0.15.2] - 2026-11-19
 
 Released.

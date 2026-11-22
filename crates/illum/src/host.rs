@@ -42,6 +42,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+mod group;
+pub use group::StreamGroups;
+use group::{Seat, WindowKey};
+
 /// How often the capture thread wakes up even when the screen is still.
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 /// The top of the ladder when the viewer asks for none (the top rung at 1080p60).
@@ -194,6 +198,9 @@ pub struct HostConfig {
     /// A session with no input from the controller for this long is ended (§10); `None`:
     /// never.
     pub idle: Option<Duration>,
+    /// The ladders of the viewer windows streaming now, shared by every session of this
+    /// host: the displays of one window share one.
+    pub groups: StreamGroups,
 }
 
 /// Asks the system for the Ctrl+Alt+Del screen.
@@ -490,6 +497,14 @@ fn capture_loop(
 
 /// The UDP side of one session: where the viewer is, the threads that feed it, and the
 /// controllers that decide what they send (§5.5, §5.6).
+/// What moves a stream's target.
+enum Steering {
+    /// A measurement run: the target never moves; the adapter only grades.
+    Fixed(Box<Adapter>),
+    /// The ladder of the stream's window (§5.5), shared with its other displays.
+    Shared(Arc<Seat>),
+}
+
 struct MediaLink {
     hub: Arc<MediaHub>,
     session_id: u64,
@@ -498,10 +513,8 @@ struct MediaLink {
     /// The screen is paused (the viewer is minimized, §5.4): the video thread stops capturing,
     /// encoding and sending; audio, input and the connection go on.
     paused: Arc<AtomicBool>,
-    adapter: Arc<Mutex<Adapter>>,
+    steering: Steering,
     target: Arc<Mutex<Target>>,
-    /// A measurement run: the target never moves and the controllers are not consulted.
-    fixed: bool,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -517,6 +530,8 @@ impl MediaLink {
         audio: Option<AudioFactory>,
         sender: Sender,
         input: Option<InputFeed>,
+        groups: &StreamGroups,
+        window: Option<WindowKey>,
     ) -> MediaLink {
         let inbound = hub.register(&keys);
         let stop = Arc::new(AtomicBool::new(false));
@@ -530,44 +545,50 @@ impl MediaLink {
             settings.scale_percent.clamp(25, 100)
         };
         let peer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-        let adapter = Adapter::new(
-            Limits {
-                max_bitrate_bps: settings.max_bitrate_bps * u64::from(base_scale) / 100,
-                max_fps: settings.max_fps,
-                scale_rungs: settings.scale_rungs,
-            },
-            settings.fec_floor,
-            settings.fec_ceiling,
-        );
-        let target = Arc::new(Mutex::new(if settings.fixed {
-            settings.fixed_target()
-        } else {
-            Target {
-                rung: adapter.rung(),
-                fec_percent: adapter.fec_percent(),
-            }
-        }));
-        if settings.fixed {
-            let t = *target.lock().expect("target lock");
+        // The cap is the whole window's: its displays split it by the pixels they send.
+        let limits = Limits {
+            max_bitrate_bps: settings.max_bitrate_bps,
+            max_fps: settings.max_fps,
+            scale_rungs: settings.scale_rungs,
+        };
+        let (steering, target) = if settings.fixed {
+            let t = settings.fixed_target();
             tracing::info!(
                 target: "media",
                 "Fixed for measurement: {} with parity {} %, no adaptation.",
                 t.rung,
                 t.fec_percent
             );
+            (
+                Steering::Fixed(Box::new(Adapter::new(
+                    limits,
+                    settings.fec_floor,
+                    settings.fec_ceiling,
+                ))),
+                Arc::new(Mutex::new(t)),
+            )
         } else {
-            tracing::info!(
-                target: "media",
-                "Ladder: {} rungs from {} down to {}; parity {}–{} %; viewer latency limit {} ms.",
-                adapter.ladder().len(),
-                adapter.ladder().rung(0),
-                adapter.ladder().rung(adapter.ladder().len() - 1),
-                settings.fec_floor,
-                settings.fec_ceiling,
-                settings.latency_limit_ms
+            let joined = groups.join(
+                window,
+                keys.session_id,
+                limits,
+                (settings.fec_floor, settings.fec_ceiling),
+                base_scale,
             );
-        }
-        let adapter = Arc::new(Mutex::new(adapter));
+            if joined.others == 0 {
+                let (top, bottom, rungs) = joined.seat.ladder();
+                tracing::info!(
+                    target: "media",
+                    "Ladder: {rungs} rungs from {top} down to {bottom} for the window, split between its displays by their pixels; parity {}–{} %; viewer latency limit {} ms.",
+                    settings.fec_floor,
+                    settings.fec_ceiling,
+                    settings.latency_limit_ms
+                );
+            } else {
+                tracing::info!(target: "media", "Sharing the window's ladder with its {} other display(s).", joined.others);
+            }
+            (Steering::Shared(Arc::new(joined.seat)), joined.target)
+        };
 
         // Learns the viewer's address from its punches and passes its mouse moves to the input
         // thread; exits when the hub drops the channel.
@@ -683,6 +704,10 @@ impl MediaLink {
                 target.clone(),
                 paused.clone(),
             );
+            let seat = match &steering {
+                Steering::Shared(seat) => Some(seat.clone()),
+                Steering::Fixed(_) => None,
+            };
             let mut sealer = keys.sealer();
             std::thread::Builder::new()
                 .name("media-out".into())
@@ -792,12 +817,13 @@ impl MediaLink {
                         due_us = due_us.max(captured_us.saturating_sub(period_us / 2)) + period_us;
                         // Resolution rungs.
                         let scale = current.rung.scale_percent * base_scale / 100;
-                        let frame = if scale < 100 {
+                        // The captured frame itself is kept for a re-sent keyframe (below), so
+                        // that one is shrunk once, as this one is, not shrunk again.
+                        let shrunk = (scale < 100).then(|| {
                             let (w, h) = scaled_size(frame.width, frame.height, scale.max(10));
                             downscale(&frame, w, h)
-                        } else {
-                            frame
-                        };
+                        });
+                        let picture = shrunk.as_ref().unwrap_or(&frame);
                         // A request inside the minimum interval stays pending until it can be
                         // honoured; dropping it would leave the viewer waiting for ever.
                         if want_keyframe.load(Ordering::SeqCst)
@@ -806,19 +832,26 @@ impl MediaLink {
                             want_keyframe.store(false, Ordering::SeqCst);
                             force_keyframe = true;
                         }
-                        if encoder.is_none() || encoder_size != (frame.width, frame.height) {
+                        if encoder.is_none() || encoder_size != (picture.width, picture.height) {
+                            // The window's split goes by the pixels each display sends.
+                            if let Some(seat) = &seat {
+                                seat.sized(
+                                    u64::from(picture.width) * u64::from(picture.height),
+                                    u64::from(frame.width) * u64::from(frame.height),
+                                );
+                            }
                             encoder = Some(open_encoder(
                                 codec,
-                                frame.width,
-                                frame.height,
+                                picture.width,
+                                picture.height,
                                 current.rung.fps,
                                 enc_bps,
                             ));
-                            encoder_size = (frame.width, frame.height);
+                            encoder_size = (picture.width, picture.height);
                             force_keyframe = true;
                         }
                         let enc = encoder.as_mut().expect("encoder open");
-                        let frames = match enc.encode(&frame, captured_us, force_keyframe) {
+                        let frames = match enc.encode(picture, captured_us, force_keyframe) {
                             Ok(frames) => frames,
                             Err(e) if enc.codec() != VideoCodec::Tiles => {
                                 tracing::warn!(target: "media", "{} encode failed ({e}); switching to tiles.", enc.codec().name());
@@ -880,8 +913,8 @@ impl MediaLink {
                             }
                             seq = seq.wrapping_add(1);
                         }
-                        // Keep what we just sent, so a keyframe can be re-sent from it while the
-                        // screen is static (see the take above).
+                        // Keep what we just sent, as captured, so a keyframe can be re-sent from
+                        // it while the screen is static (see the take above).
                         last_frame = Some(frame);
                     }
                 })
@@ -896,9 +929,8 @@ impl MediaLink {
             stop,
             want_keyframe,
             paused,
-            adapter,
+            steering,
             target,
-            fixed: settings.fixed,
             threads,
         }
     }
@@ -918,67 +950,42 @@ impl MediaLink {
 
     /// The rung and parity in use, for the viewer's title bar.
     fn quality(&self, reason: &str) -> ControlMsg {
-        if self.fixed {
-            let t = *self.target.lock().expect("target lock");
-            return ControlMsg::Quality {
-                rung: 0,
-                rungs: 1,
-                bitrate_kbps: (t.rung.bitrate_bps / 1000) as u32,
-                fps: t.rung.fps,
-                scale_percent: t.rung.scale_percent,
-                fec_percent: t.fec_percent,
-                reason: reason.to_string(),
-            };
-        }
-        let adapter = self.adapter.lock().expect("adapter lock");
-        let rung = adapter.rung();
-        ControlMsg::Quality {
-            rung: adapter.rung_index() as u32,
-            rungs: adapter.ladder().len() as u32,
-            bitrate_kbps: (rung.bitrate_bps / 1000) as u32,
-            fps: rung.fps,
-            scale_percent: rung.scale_percent,
-            fec_percent: adapter.fec_percent(),
-            reason: reason.to_string(),
+        match &self.steering {
+            Steering::Fixed(_) => {
+                let t = *self.target.lock().expect("target lock");
+                ControlMsg::Quality {
+                    rung: 0,
+                    rungs: 1,
+                    bitrate_kbps: (t.rung.bitrate_bps / 1000) as u32,
+                    fps: t.rung.fps,
+                    scale_percent: t.rung.scale_percent,
+                    fec_percent: t.fec_percent,
+                    reason: reason.to_string(),
+                }
+            }
+            Steering::Shared(seat) => seat.quality(reason),
         }
     }
 
     /// Feeds one second of the viewer's report to the controllers. Returns the grade and, when
     /// something changed, the new `Quality` to tell the viewer. A fixed run only grades.
     fn report(&self, report: SecondReport) -> (Grade, Option<ControlMsg>) {
-        if self.fixed {
-            let fps = self.target.lock().expect("target lock").rung.fps;
-            let timing_rose = self
-                .adapter
-                .lock()
-                .expect("adapter lock")
-                .timing_rose(report.rtt_ms, report.rtt_floor_ms);
-            let g = grade(
-                report.shown,
-                report.within_limit,
-                report.decoded,
-                report.frames_lost,
-                fps,
-                timing_rose,
-            );
-            return (g, None);
+        match &self.steering {
+            Steering::Fixed(adapter) => {
+                let fps = self.target.lock().expect("target lock").rung.fps;
+                let timing_rose = adapter.timing_rose(report.rtt_ms, report.rtt_floor_ms);
+                let g = grade(
+                    report.shown,
+                    report.within_limit,
+                    report.decoded,
+                    report.frames_lost,
+                    fps,
+                    timing_rose,
+                );
+                (g, None)
+            }
+            Steering::Shared(seat) => seat.report(report),
         }
-        let decision = self.adapter.lock().expect("adapter lock").observe(report);
-        let changed = decision.rung.is_some() || decision.fec_percent.is_some();
-        if changed {
-            let adapter = self.adapter.lock().expect("adapter lock");
-            *self.target.lock().expect("target lock") = Target {
-                rung: adapter.rung(),
-                fec_percent: adapter.fec_percent(),
-            };
-        } else if !decision.reason.is_empty() {
-            // A decision not to move (the backstop holding at the parity ceiling): once a
-            // window, so the log says why the rung stays where it is.
-            tracing::info!("Adaptation holds: {}.", decision.reason);
-        }
-        let grade = decision.grade.unwrap_or(Grade::Blank);
-        let quality = changed.then(|| self.quality(&decision.reason));
-        (grade, quality)
     }
 }
 
@@ -1137,6 +1144,7 @@ pub async fn serve_session(
                 fixed,
                 scale_percent,
                 scale_rungs,
+                group,
             } => {
                 capture = None; // stop any previous stream first
                 link = None;
@@ -1197,6 +1205,10 @@ pub async fn serve_session(
                             config.audio.clone(),
                             conn.sender(),
                             input.as_ref().and_then(InputWorker::feed),
+                            &config.groups,
+                            // The window is the viewer's own number for it, kept per desk.
+                            (group != 0)
+                                .then(|| (conn.peer_fingerprint.as_str().to_string(), group)),
                         );
                         conn.send_control(&ControlMsg::MediaEndpoint { port: media.port() });
                         conn.send_control(&l.quality(""));

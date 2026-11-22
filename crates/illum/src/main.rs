@@ -679,6 +679,7 @@ fn host_config_with(
         sas: secure_attention(test_pattern || no_input),
         idle: None,
         lock: lock_host(test_pattern || no_input),
+        groups: Default::default(),
     }
 }
 
@@ -1295,13 +1296,24 @@ fn open_extra(setup: &ExtraSetup, display: u32, scale: u32) -> illum_ui::ExtraVi
     }
 }
 
+/// A number for this window, unlikely to be another's (the host keeps them per desk): the
+/// time and the process, never 0.
+fn window_number() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    (nanos ^ (u64::from(std::process::id()) << 32)) | 1
+}
+
 /// Connects, then shows the host's screen in a window until it is closed.
 fn run_view(
     runtime: &tokio::runtime::Runtime,
     home: &Path,
     target: &str,
-    args: ViewArgs,
+    mut args: ViewArgs,
 ) -> Result<()> {
+    // This window's number for the host: every display it shows shares one ladder there.
+    args.params.group = window_number();
     let mut ep = endpoint(home)?;
     println!("This device's fingerprint: {}", ep.identity.fingerprint);
     // Tell the host which lossy codecs we can decode (AV1 only in hardware); it picks AV1,

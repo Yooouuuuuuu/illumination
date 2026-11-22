@@ -622,6 +622,17 @@ impl Adapter {
 
     /// Feeds one second.
     pub fn observe(&mut self, report: SecondReport) -> Decision {
+        self.observe_streams(&[report])
+    }
+
+    /// Feeds one second of several streams that share one link and this one ladder (the
+    /// displays of one window). The link is judged as one, from all their frames: counts are
+    /// added up and the second graded from the sums, so a still display (nothing shown)
+    /// changes nothing, and one display whose frames all come late while the others' come in
+    /// time is not the link's fault (the run of 2026-11-20 had one such, with no loss at all);
+    /// the round trip is the highest of them, its floor the lowest known.
+    pub fn observe_streams(&mut self, reports: &[SecondReport]) -> Decision {
+        let report = combined(reports);
         // The round trip's floor is taken from the seconds before this one, so a sudden rise
         // is seen against the path as it was.
         let timing_rose = self.timing_rose(report.rtt_ms, report.rtt_floor_ms);
@@ -748,9 +759,168 @@ impl Adapter {
     }
 }
 
+/// Several streams' second as one: counts added up, the highest round trip, the lowest known
+/// floor.
+fn combined(reports: &[SecondReport]) -> SecondReport {
+    let mut all = SecondReport::default();
+    for r in reports {
+        all.shown += r.shown;
+        all.within_limit += r.within_limit;
+        all.decoded += r.decoded;
+        all.frames_lost += r.frames_lost;
+        all.received += r.received;
+        all.lost += r.lost;
+        all.rtt_ms = all.rtt_ms.max(r.rtt_ms);
+        if r.rtt_floor_ms > 0 && (all.rtt_floor_ms == 0 || r.rtt_floor_ms < all.rtt_floor_ms) {
+            all.rtt_floor_ms = r.rtt_floor_ms;
+        }
+    }
+    all
+}
+
+/// One of the streams that share a ladder, as the split sees it: its picture's pixels as
+/// sent, and its display's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSize {
+    pub sent: u64,
+    pub native: u64,
+}
+
+/// What each of several streams to one window may spend at `rung_bps` of a ladder whose top
+/// is `top_bps` (the person's cap, which is for the whole window).
+///
+/// Each stream needs the cap in the share of its display it sends: a quarter of the width
+/// is a sixteenth of the pixels and needs a sixteenth of the cap. Together they get what
+/// they need, but never more than the cap; that is split by the pixels each one sends. The
+/// ladder walks all of it alike, and never below [`MIN_BITRATE_BPS`] together.
+pub fn split(rung_bps: u64, top_bps: u64, streams: &[StreamSize]) -> Vec<u64> {
+    let sent: u128 = streams.iter().map(|s| u128::from(s.sent)).sum();
+    let need: u128 = streams
+        .iter()
+        .map(|s| u128::from(top_bps) * u128::from(s.sent) / u128::from(s.native.max(1)))
+        .sum();
+    let whole = need.min(u128::from(top_bps));
+    let now = whole * u128::from(rung_bps) / u128::from(top_bps.max(1));
+    let total = now.max(u128::from(MIN_BITRATE_BPS));
+    streams
+        .iter()
+        .map(|s| (total * u128::from(s.sent) / sent.max(1)) as u64)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FULL_1440: u64 = 2560 * 1440;
+    const FULL_1080: u64 = 1920 * 1080;
+
+    #[test]
+    fn one_whole_display_gets_the_rung_as_before() {
+        let one = [StreamSize {
+            sent: FULL_1440,
+            native: FULL_1440,
+        }];
+        assert_eq!(split(20_000_000, 20_000_000, &one), [20_000_000]);
+        assert_eq!(split(8_192_000, 20_000_000, &one), [8_192_000]);
+        assert_eq!(split(1_000_000, 20_000_000, &one), [1_000_000]);
+    }
+
+    #[test]
+    fn a_shrunk_display_gets_what_its_pixels_need() {
+        let quarter = [StreamSize {
+            sent: 480 * 270,
+            native: FULL_1080,
+        }];
+        assert_eq!(split(20_000_000, 20_000_000, &quarter), [1_250_000]);
+        // Lower on the ladder it keeps the floor.
+        assert_eq!(split(10_000_000, 20_000_000, &quarter), [1_000_000]);
+    }
+
+    #[test]
+    fn the_displays_of_one_window_split_by_their_pixels() {
+        // The run of 2026-11-20: 2560 × 1440 at 75 %, 1920 × 1080 at 25 %.
+        let window = [
+            StreamSize {
+                sent: 1920 * 1080,
+                native: FULL_1440,
+            },
+            StreamSize {
+                sent: 480 * 270,
+                native: FULL_1080,
+            },
+        ];
+        let at_top = split(20_000_000, 20_000_000, &window);
+        assert_eq!(
+            at_top.iter().sum::<u64>(),
+            12_499_999,
+            "11.25 + 1.25 needed"
+        );
+        assert_eq!(at_top[0] / at_top[1], 16, "split by pixels, 16 to 1");
+        let lower = split(10_000_000, 20_000_000, &window);
+        assert_eq!(
+            lower.iter().sum::<u64>(),
+            6_249_999,
+            "half the way down, half"
+        );
+    }
+
+    #[test]
+    fn displays_that_need_more_than_the_cap_share_it() {
+        let both = [
+            StreamSize {
+                sent: FULL_1440,
+                native: FULL_1440,
+            },
+            StreamSize {
+                sent: FULL_1080,
+                native: FULL_1080,
+            },
+        ];
+        let at_top = split(20_000_000, 20_000_000, &both);
+        assert!(at_top.iter().sum::<u64>() <= 20_000_000);
+        assert!(at_top[0] > at_top[1], "the larger picture gets more");
+    }
+
+    #[test]
+    fn several_streams_are_judged_as_one_link() {
+        let green = SecondReport {
+            shown: 30,
+            within_limit: 30,
+            decoded: 30,
+            received: 300,
+            rtt_ms: 12,
+            rtt_floor_ms: 10,
+            ..SecondReport::default()
+        };
+        let red = SecondReport {
+            shown: 30,
+            within_limit: 0,
+            decoded: 30,
+            received: 100,
+            lost: 4,
+            rtt_ms: 14,
+            rtt_floor_ms: 9,
+            ..SecondReport::default()
+        };
+        let still = SecondReport {
+            received: 3,
+            rtt_ms: 13,
+            ..SecondReport::default()
+        };
+        let mut a = Adapter::new(top(), 5, 30);
+        assert_eq!(a.observe_streams(&[green, still]).grade, Some(Grade::Green));
+        assert_eq!(a.observe_streams(&[red, still]).grade, Some(Grade::Red));
+        assert_eq!(
+            a.observe_streams(&[green, red]).grade,
+            Some(Grade::Yellow),
+            "half the window's frames late: not a drop"
+        );
+        assert_eq!(a.observe_streams(&[still, still]).grade, Some(Grade::Blank));
+        let all = combined(&[green, red, still]);
+        assert_eq!((all.received, all.lost), (403, 4));
+        assert_eq!((all.rtt_ms, all.rtt_floor_ms), (14, 9));
+    }
 
     fn top() -> Limits {
         Limits {

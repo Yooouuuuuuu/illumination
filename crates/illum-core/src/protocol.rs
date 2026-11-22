@@ -143,6 +143,11 @@ pub enum ControlMsg {
         /// Whether the ladder may lower the resolution under pressure (off by default).
         #[serde(default)]
         scale_rungs: bool,
+        /// The window this display is shown in, as the viewer numbers it (0: alone). The
+        /// streams of one window share one link, so the host gives them one ladder and splits
+        /// its bitrate by the pixels each sends.
+        #[serde(default)]
+        group: u64,
     },
     /// Host → controller, once a second: what the host side did with the screen, so a
     /// measurement report can tell "the screen did not change" from "the link did not carry
@@ -319,6 +324,7 @@ mod tests {
                 fixed: true,
                 scale_percent: 75,
                 scale_rungs: false,
+                group: 9,
             },
             ControlMsg::HostStats {
                 taken: 61,
