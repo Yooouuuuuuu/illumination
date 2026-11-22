@@ -62,6 +62,8 @@ pub struct BarState {
     pub tiles: Vec<TileMark>,
     /// The session ended, and why: a card over the dimmed picture offers Reconnect and Close.
     pub ended: Option<String>,
+    /// How much the "Exit" tab shows while the mouse is not on it, in percent.
+    pub tab_opacity: u8,
 }
 
 /// A tile as the bars mark it while the tiles are arranged.
@@ -582,13 +584,20 @@ fn exit_tab(
     );
     // The mouse's while it is over where the tab is, shown or about to be.
     space.claims.push(rect);
-    if !state.reveal {
+    // Faint while the mouse is elsewhere, as the person chose; whole while it is there.
+    let opacity = if state.reveal {
+        1.0
+    } else {
+        f32::from(state.tab_opacity.min(100)) / 100.0
+    };
+    if opacity <= 0.0 {
         return;
     }
     egui::Area::new(egui::Id::unique("session-exit"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
+            ui.set_opacity(opacity);
             let (tab, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
             ui.painter().rect(
                 tab,
@@ -651,6 +660,7 @@ pub fn sample() -> BarState {
         arrange: false,
         tiles: Vec::new(),
         ended: None,
+        tab_opacity: 30,
     }
 }
 

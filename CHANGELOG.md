@@ -11,6 +11,17 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-22
+
+### Added
+
+- **The "Exit" tab can stay faintly visible.** With the bars hidden (Focus, full screen)
+  the tab at the top edge now shows at 30 % while the mouse is elsewhere, and fully when
+  it is there. "Exit tab when not pointed at" in Settings sets it from 0 to 100 %.
+- **Hotkeys for the window modes.** Ctrl+Alt+Shift+F10 switches Focus on and off, and
+  Ctrl+Alt+Shift+F11 full screen; switched off, the bars come back. Like
+  Ctrl+Alt+Shift+F2, they are never sent to the host.
+
 ## [0.16.1] - 2026-11-22
 
 ### Changed

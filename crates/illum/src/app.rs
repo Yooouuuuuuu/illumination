@@ -81,6 +81,8 @@ fn view_flags(settings: &Settings, view_only: bool, mute: bool) -> Vec<String> {
         settings.max_fps.to_string(),
         "--latency-limit".to_string(),
         settings.latency_limit_ms.to_string(),
+        "--tab-opacity".to_string(),
+        settings.exit_tab_opacity.min(100).to_string(),
     ];
     let mut flag = |on: bool, name: &str| {
         if on {
@@ -1150,7 +1152,7 @@ mod tests {
         let flags = view_flags(&Settings::default(), false, false);
         assert_eq!(
             flags.join(" "),
-            "--max-bitrate 20 --max-fps 30 --latency-limit 50"
+            "--max-bitrate 20 --max-fps 30 --latency-limit 50 --tab-opacity 30"
         );
         let all = Settings {
             max_bitrate_mbps: 7.5,
@@ -1212,6 +1214,7 @@ mod tests {
             reconnect: false,
             sound: false,
             clipboard: false,
+            exit_tab_opacity: 0,
             start_on_boot: false,
             let_control: false,
             let_sound: false,

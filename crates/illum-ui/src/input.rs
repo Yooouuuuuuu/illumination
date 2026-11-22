@@ -284,18 +284,42 @@ pub fn translate_key(
     }
 }
 
+/// The viewer's own hotkeys: `Ctrl+Alt+Shift` and a key, never sent to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hotkey {
+    /// F2: fit or original size.
+    ToggleView,
+    /// F10: Focus on and off.
+    Focus,
+    /// F11: full screen on and off.
+    FullScreen,
+}
+
+impl Hotkey {
+    /// The hotkey of this key (with `Ctrl+Alt+Shift` held), if it is one.
+    pub fn of(usage: u32) -> Option<Hotkey> {
+        use illum_core::keymap::usage::*;
+        match usage {
+            F2 => Some(Hotkey::ToggleView),
+            F10 => Some(Hotkey::Focus),
+            F11 => Some(Hotkey::FullScreen),
+            _ => None,
+        }
+    }
+}
+
 /// Whose a key from a keyboard grab is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grabbed {
     /// The host's.
     Host,
-    /// The viewer's hotkey that switches between fit and original size.
-    ToggleView,
+    /// One of the viewer's hotkeys.
+    Hotkey(Hotkey),
     /// Part of a viewer hotkey (its repeat or its release): nobody else's.
     Viewer,
 }
 
-/// Picks the viewer's own hotkeys (Ctrl+Alt+Shift+F2) out of a keyboard grab. Under a grab the
+/// Picks the viewer's own hotkeys ([`Hotkey`]) out of a keyboard grab. Under a grab the
 /// window never sees a key press, so it cannot spot them itself.
 #[derive(Default)]
 pub struct GrabHotkeys {
@@ -306,26 +330,26 @@ impl GrabHotkeys {
     pub fn key(&self, key: Key, down: bool) -> Grabbed {
         use illum_core::keymap::usage::*;
         let mut held = self.held.lock().expect("grab hotkeys");
-        if key.usage != F2 {
+        let Some(hotkey) = Hotkey::of(key.usage) else {
             if down {
                 held.insert(key.usage);
             } else {
                 held.remove(&key.usage);
             }
             return Grabbed::Host;
-        }
+        };
         let either = |a, b| held.contains(&a) || held.contains(&b);
         let chord = either(CONTROL_LEFT, CONTROL_RIGHT)
             && either(ALT_LEFT, ALT_RIGHT)
             && either(SHIFT_LEFT, SHIFT_RIGHT);
-        match (down, held.contains(&F2)) {
+        match (down, held.contains(&key.usage)) {
             (true, true) => Grabbed::Viewer,
             (true, false) if chord => {
-                held.insert(F2);
-                Grabbed::ToggleView
+                held.insert(key.usage);
+                Grabbed::Hotkey(hotkey)
             }
             (false, true) => {
-                held.remove(&F2);
+                held.remove(&key.usage);
                 Grabbed::Viewer
             }
             _ => Grabbed::Host,
@@ -625,13 +649,21 @@ mod tests {
         for m in [CONTROL_LEFT, ALT_RIGHT, SHIFT_LEFT] {
             assert_eq!(hot.key(k(m), true), Grabbed::Host);
         }
-        assert_eq!(hot.key(k(F2), true), Grabbed::ToggleView);
+        assert_eq!(hot.key(k(F2), true), Grabbed::Hotkey(Hotkey::ToggleView));
         assert_eq!(
             hot.key(k(F2), true),
             Grabbed::Viewer,
             "a repeat toggles once"
         );
         assert_eq!(hot.key(k(F2), false), Grabbed::Viewer);
+        assert_eq!(
+            hot.key(k(F11), true),
+            Grabbed::Hotkey(Hotkey::FullScreen),
+            "another while the chord is held"
+        );
+        assert_eq!(hot.key(k(F11), false), Grabbed::Viewer);
+        assert_eq!(hot.key(k(F10), true), Grabbed::Hotkey(Hotkey::Focus));
+        assert_eq!(hot.key(k(F10), false), Grabbed::Viewer);
         hot.reset();
         assert_eq!(hot.key(k(F2), true), Grabbed::Host);
     }

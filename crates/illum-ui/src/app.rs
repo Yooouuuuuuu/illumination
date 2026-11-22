@@ -74,6 +74,9 @@ pub struct Settings {
     pub reconnect: bool,
     pub sound: bool,
     pub clipboard: bool,
+    /// How much the "Exit" tab of a session window with its bars hidden shows while the
+    /// mouse is not on it, in percent (0: not at all).
+    pub exit_tab_opacity: u32,
     // Incoming: when another desk connects here.
     /// What a connected desk may do, besides seeing the screen.
     pub let_control: bool,
@@ -98,6 +101,7 @@ impl Default for Settings {
             reconnect: true,
             sound: true,
             clipboard: true,
+            exit_tab_opacity: 30,
             let_control: true,
             let_sound: true,
             let_clipboard: true,
@@ -744,6 +748,7 @@ enum Item {
     Clipboard,
     Reconnect,
     Shrink,
+    Tab,
     Permission,
     Actions,
     Idle,
@@ -763,6 +768,7 @@ const MENU: [(&str, &[Item]); 5] = [
             Item::Clipboard,
             Item::Reconnect,
             Item::Shrink,
+            Item::Tab,
         ],
     ),
     ("Incoming", &[Item::Permission, Item::Actions, Item::Idle]),
@@ -805,6 +811,7 @@ fn unsaved(saved: &Settings, shown: &Settings) -> Vec<Item> {
     differs(Item::Clipboard, saved.clipboard != shown.clipboard);
     differs(Item::Reconnect, saved.reconnect != shown.reconnect);
     differs(Item::Shrink, saved.allow_scale != shown.allow_scale);
+    differs(Item::Tab, saved.exit_tab_opacity != shown.exit_tab_opacity);
     items
 }
 
@@ -1728,6 +1735,11 @@ impl HomeUi {
             ui.checkbox(&mut s.reconnect, "Reconnect automatically");
             self.here(ui, Item::Shrink);
             ui.checkbox(&mut s.allow_scale, "Shrink picture when slow");
+            self.here(ui, Item::Tab);
+            ui.horizontal(|ui| {
+                label(ui, "Exit tab when not pointed at");
+                ui.add(egui::Slider::new(&mut s.exit_tab_opacity, 0..=100).suffix(" %"));
+            });
         });
         // Who may connect is not changed while a desk is connected: it could let itself in.
         let locked = lock_note(state);
@@ -2912,6 +2924,7 @@ mod tests {
                 clipboard: false,
                 reconnect: false,
                 allow_scale: true,
+                exit_tab_opacity: 0,
                 ..shown
             },
         ) {

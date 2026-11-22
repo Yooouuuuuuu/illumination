@@ -194,6 +194,10 @@ enum Command {
         /// of both one bitrate limit.
         #[arg(long, hide = true)]
         group: Option<u64>,
+        /// How much the "Exit" tab shows, in percent, while the bars are hidden and the mouse
+        /// is not on it.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u8).range(0..=100))]
+        tab_opacity: u8,
     },
     /// Show the measurement workload full screen on this machine (the host side of a
     /// measurement run): still, fine detail and full motion, 20 s each, on the wall clock.
@@ -435,6 +439,7 @@ fn main() -> std::process::ExitCode {
             popout,
             parent,
             group,
+            tab_opacity,
         }) if cli.role() == Role::Frontend => {
             let home = cli.home.clone().unwrap_or_else(default_home);
             let options = ViewArgs {
@@ -448,6 +453,7 @@ fn main() -> std::process::ExitCode {
                 label: label.clone(),
                 popout: *popout,
                 parent: *parent,
+                tab_opacity: *tab_opacity,
                 home_flag: cli.home.clone(),
                 params: ViewParams {
                     max_bitrate_kbps: (max_bitrate.max(0.1) * 1000.0) as u32,
@@ -1091,6 +1097,8 @@ struct ViewArgs {
     popout: bool,
     /// The session window this one belongs to.
     parent: Option<u32>,
+    /// How much the "Exit" tab shows while the mouse is not on it (`--tab-opacity`).
+    tab_opacity: u8,
     /// `--home`, to hand on to the windows this one opens.
     home_flag: Option<PathBuf>,
     params: ViewParams,
@@ -1128,6 +1136,8 @@ fn pop_out_args(target: &str, args: &ViewArgs, display: u32) -> Vec<std::ffi::Os
         p.latency_limit_ms.to_string().into(),
         "--group".into(),
         p.group.to_string().into(),
+        "--tab-opacity".into(),
+        args.tab_opacity.to_string().into(),
     ];
     let mut flag = |on: bool, name: &str| {
         if on {
@@ -1614,7 +1624,7 @@ fn run_view(
                         input.key(key, down)
                     }
                 }
-                illum_ui::Grabbed::ToggleView => waker.wake(UiEvent::ToggleView),
+                illum_ui::Grabbed::Hotkey(hotkey) => waker.wake(UiEvent::Hotkey(hotkey)),
                 illum_ui::Grabbed::Viewer => {}
             };
             // The hook also watches whether this program is in front, and says so: the window
@@ -1751,6 +1761,7 @@ fn run_view(
                 },
                 can_lock: with_input && hello.capabilities.iter().any(|c| c == "lock"),
                 popped_out: args.popout,
+                tab_opacity: args.tab_opacity,
                 on_reconnect: card.then(|| -> Box<dyn Fn()> {
                     Box::new(move || {
                         let _ = ask_again.send(());
@@ -2034,6 +2045,7 @@ mod tests {
             label: None,
             popout: false,
             parent: None,
+            tab_opacity: 55,
             home_flag: Some(PathBuf::from(r"C:\Some Home")),
             params: ViewParams {
                 max_bitrate_kbps: 7_500,
@@ -2059,6 +2071,7 @@ mod tests {
             no_clipboard,
             max_fps,
             group,
+            tab_opacity,
             ..
         }) = cli.command
         else {
@@ -2074,6 +2087,7 @@ mod tests {
         );
         assert_eq!(max_fps, 60);
         assert_eq!(group, Some(77), "the main window's limit, shared");
+        assert_eq!(tab_opacity, 55);
         assert_eq!(cli.home.as_deref(), Some(Path::new(r"C:\Some Home")));
     }
 }

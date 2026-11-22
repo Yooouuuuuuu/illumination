@@ -18,13 +18,13 @@ pub mod tiles;
 pub mod tray;
 pub mod workload;
 
-pub use input::{GrabHotkeys, Grabbed, InputOut, KeyboardMode};
+pub use input::{GrabHotkeys, Grabbed, Hotkey, InputOut, KeyboardMode};
 pub use measure::{HostSecond, Recorder, SecondRecord};
 pub use workload::run_workload;
 
 use gpu::WindowPresenter;
 use illum_core::input::{InputMsg, Key, MouseButton};
-use illum_core::keymap::usage;
+
 use illum_media::Frame;
 use illum_media::clock::{ClockSync, now_us};
 use illum_media::codec::VideoCodec;
@@ -365,8 +365,8 @@ pub enum UiEvent {
     Redraw,
     /// The session ended; close the window.
     Exit,
-    /// The fit / original size hotkey, seen by a keyboard grab instead of the window.
-    ToggleView,
+    /// One of the viewer's hotkeys, seen by a keyboard grab instead of the window.
+    Hotkey(Hotkey),
     /// The program came to the front (true) or left it, as the keyboard grab's watch saw it
     /// (`ViewerOptions::front_watched`).
     Front(bool),
@@ -507,6 +507,8 @@ pub struct ViewerOptions {
     /// Asks for the session again after it ended (see [`ViewState::ended`]); `None`: the
     /// window closes when the session ends.
     pub on_reconnect: Option<Box<dyn Fn()>>,
+    /// How much the "Exit" tab shows while the mouse is not on it, in percent.
+    pub tab_opacity: u8,
     /// This window is such a popped-out display: the picture alone, with a tab that closes it.
     pub popped_out: bool,
     /// What showing several of the host's displays at once needs; `None`: not offered.
@@ -1076,15 +1078,46 @@ impl App {
         let Some(key) = key_from_physical(event.physical_key) else {
             return false;
         };
-        match key.usage {
-            usage::F2 => {
-                if event.state == ElementState::Pressed && !event.repeat {
-                    self.toggle_view();
-                }
-                true
-            }
-            _ => false,
+        let Some(hotkey) = input::Hotkey::of(key.usage) else {
+            return false;
+        };
+        if event.state == ElementState::Pressed && !event.repeat {
+            self.use_hotkey(hotkey);
         }
+        true
+    }
+
+    /// Carries out one of the viewer's hotkeys. Focus and full screen switch on, or back to
+    /// the bars.
+    fn use_hotkey(&mut self, hotkey: Hotkey) {
+        use session_bar::WindowMode;
+        let flip = |now: WindowMode, mode: WindowMode| {
+            if now == mode {
+                WindowMode::Detail
+            } else {
+                mode
+            }
+        };
+        match hotkey {
+            Hotkey::ToggleView => self.toggle_view(),
+            Hotkey::Focus => self.set_mode(flip(self.mode, WindowMode::Focus)),
+            Hotkey::FullScreen => self.set_mode(flip(self.mode, WindowMode::FullScreen)),
+        }
+        self.request_redraw();
+    }
+
+    /// Shows the bars, the picture alone, or the picture alone over the screen.
+    fn set_mode(&mut self, mode: session_bar::WindowMode) {
+        let full = mode == session_bar::WindowMode::FullScreen;
+        if let Some(s) = &self.window {
+            s.window
+                .set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+        }
+        // The arranging switch is in the bar: without the bar there is none.
+        if mode != session_bar::WindowMode::Detail {
+            self.set_arrange(false);
+        }
+        self.mode = mode;
     }
 
     /// The window came to the front or left it.
@@ -1366,6 +1399,7 @@ impl App {
                 .ended
                 .clone()
                 .filter(|_| self.options.on_reconnect.is_some()),
+            tab_opacity: self.options.tab_opacity,
         };
         let due = bars.redraw_at.is_some_and(|at| at <= Instant::now());
         let mut actions = Vec::new();
@@ -1444,19 +1478,7 @@ impl App {
                     s.window.set_cursor(CursorIcon::Default);
                 }
             }
-            BarAction::Mode(mode) => {
-                let full = mode == session_bar::WindowMode::FullScreen;
-                if let Some(s) = &self.window {
-                    s.window.set_fullscreen(
-                        full.then_some(winit::window::Fullscreen::Borderless(None)),
-                    );
-                }
-                // The arranging switch is in the bar: without the bar there is none.
-                if mode != session_bar::WindowMode::Detail {
-                    self.set_arrange(false);
-                }
-                self.mode = mode;
-            }
+            BarAction::Mode(mode) => self.set_mode(mode),
             BarAction::Display(display) => {
                 // Nothing stays held on the display that is left.
                 if let Some(input) = &self.options.input {
@@ -1951,7 +1973,7 @@ impl ApplicationHandler<UiEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UiEvent) {
         match event {
             UiEvent::Redraw => self.request_redraw(),
-            UiEvent::ToggleView => self.toggle_view(),
+            UiEvent::Hotkey(hotkey) => self.use_hotkey(hotkey),
             UiEvent::Front(front) if self.options.front_watched => self.focus_changed(front),
             UiEvent::Front(_) => {}
             UiEvent::Raise => {

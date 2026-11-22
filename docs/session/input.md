@@ -79,7 +79,7 @@ Rules of the hook:
 | CapsLock, NumLock (down or up) | Yes | Yes, so the lock lights stay right |
 | Input this program injected itself (marked `OWN_INPUT` in `dwExtraInfo`) | No | Yes |
 | Input another program injected (a remapper, an on-screen keyboard) | Counts as typing: the rows above apply | Counts as typing: the rows above apply |
-| Ctrl+Alt+Shift+F2 | No. It is the viewer's own hotkey | No |
+| Ctrl+Alt+Shift+F2, F10, F11 | No. They are the viewer's own hotkeys | No |
 | Ctrl+Alt+Del, Win+L | No. Windows takes them before any hook | Yes |
 
 - **The grab is on while one of this program's windows is in front, and only then.** For
@@ -130,9 +130,18 @@ any Windows host that accepts input. `sas` needs the installed service (§7).
 ### Viewer hotkeys
 
 Hotkeys of the viewer use the pattern `Ctrl+Alt+Shift+<key>` and are never sent to the host.
-There is one: **Ctrl+Alt+Shift+F2** switches the picture between fit and original size. Under
-a full grab the window sees no press, so the hook's side picks the chord out (`GrabHotkeys`)
-and hands it to the window.
+There are three:
+
+| Hotkey | Does |
+|---|---|
+| Ctrl+Alt+Shift+F2 | Switches the picture between fit and original size |
+| Ctrl+Alt+Shift+F10 | Switches Focus (the picture alone, in the window) on and off |
+| Ctrl+Alt+Shift+F11 | Switches full screen on and off |
+
+F10 and F11 go back to the bars when they switch a mode off. F11 is the key people know for
+full screen from browsers; AnyDesk uses Ctrl+Alt+Shift+Return. Under a full grab the window
+sees no press, so the hook's side picks the chord out (`GrabHotkeys`) and hands it to the
+window.
 
 ### Key codes on the wire
 

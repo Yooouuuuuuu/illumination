@@ -34,6 +34,8 @@ pub mod usage {
     pub const CAPS_LOCK: u32 = keyboard(0x39);
     pub const F2: u32 = keyboard(0x3B);
     pub const F4: u32 = keyboard(0x3D);
+    pub const F10: u32 = keyboard(0x43);
+    pub const F11: u32 = keyboard(0x44);
     pub const PAUSE: u32 = keyboard(0x48);
     pub const DELETE: u32 = keyboard(0x4C);
     pub const ARROW_LEFT: u32 = keyboard(0x50);
