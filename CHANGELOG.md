@@ -11,6 +11,15 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.15] - 2026-11-23
+
+### Fixed
+
+- **A delay of minutes after the host restarted.** The session window came back to a new
+  host process but kept its estimate of the old one's clock for up to a minute, so the
+  delay read as the old process's age (seen: 253855 ms) and every frame counted as late,
+  which stepped the quality down. The estimate now starts anew with each connection.
+
 ## [0.16.14] - 2026-11-23
 
 ### Added

@@ -85,8 +85,9 @@ Resolution rungs are off by default because the host scales on the CPU. That mea
 For every frame it presents, the viewer compares the host's capture time (in the packet header)
 with its estimate of the host clock. The estimate comes from clock probes sent four times a
 second; the fastest probe of the last minute sets the offset, because two machines' clocks
-drift apart over a longer time. A frame presented before any probe has answered counts as
-within the limit.
+drift apart over a longer time. The probes of one connection only: a connection made again
+may reach a new host process, whose clock starts anew. A frame presented before any probe has
+answered counts as within the limit.
 
 Once a second the viewer sends a `MediaReport`:
 

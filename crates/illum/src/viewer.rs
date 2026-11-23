@@ -666,6 +666,10 @@ pub async fn run_viewer_session_sharing_media(
     if params.latency_limit_ms > 0 {
         shared.lock().expect("view state lock").latency_limit_ms = params.latency_limit_ms;
     }
+    // The host's clock is its process's: a connection made again may reach a new process (the
+    // host restarted) whose clock starts from zero. The old one's probes would put the delay
+    // off by its age for up to a minute, so the estimate starts anew.
+    shared.lock().expect("view state lock").clock = illum_media::clock::ClockSync::default();
     // Kept so the media loop can re-send it to rebuild a stuck media path (§5.6).
     let screen_start = flags.screen_start(&params);
     conn.send_control(&screen_start);

@@ -707,3 +707,32 @@ async fn an_idle_session_is_warned_and_then_ended() {
         "{took:?}"
     );
 }
+
+/// A connection made again may reach a new host process, whose clock starts anew: what was
+/// learnt of the old one does not carry over (it read as a delay of 253855 ms, 2026-11-23).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_connection_learns_the_host_clock_anew() {
+    let addr = start_host("host-clock", Some(pattern_factory())).await;
+    let shared: Shared = Arc::default();
+    {
+        // The old host process, 250 s older than this one, answered at once.
+        let now = illum_media::clock::now_us();
+        let mut state = shared.lock().unwrap();
+        state.clock.add_sample(now, now + 250_000_000, now);
+    }
+    let conn = connect(&endpoint("ctl-clock"), &addr.to_string())
+        .await
+        .unwrap();
+    let _session = tokio::spawn(run_viewer_session(
+        conn,
+        params(None),
+        shared.clone(),
+        Arc::new(|| {}),
+    ));
+    // Host and viewer share this process's clock here: the offset comes to about zero. Kept,
+    // the old answer would stay the fastest for a minute.
+    wait_for(&shared, "the host clock learnt anew", |s| {
+        s.clock.offset_us().is_some_and(|o| o.abs() < 1_000_000)
+    })
+    .await;
+}
