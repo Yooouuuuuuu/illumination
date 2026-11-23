@@ -82,7 +82,8 @@ fn view_flags(settings: &Settings, view_only: bool, mute: bool) -> Vec<String> {
         "--latency-limit".to_string(),
         settings.latency_limit_ms.to_string(),
         "--tab-opacity".to_string(),
-        settings.exit_tab_opacity.min(100).to_string(),
+        // The window takes how much shows.
+        (100 - settings.exit_tab_transparency.min(100)).to_string(),
     ];
     let mut flag = |on: bool, name: &str| {
         if on {
@@ -1226,7 +1227,7 @@ mod tests {
             reconnect: false,
             sound: false,
             clipboard: false,
-            exit_tab_opacity: 0,
+            exit_tab_transparency: 100,
             start_on_boot: false,
             let_control: false,
             let_sound: false,

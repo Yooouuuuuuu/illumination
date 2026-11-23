@@ -11,6 +11,14 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.9] - 2026-11-23
+
+### Changed
+
+- **"Exit button transparency" in Settings is a number you type**, like the delay limit:
+  0 % is solid, 100 % hidden, 70 % by default (the same look as before). It replaces the
+  slider "Exit tab when not pointed at".
+
 ## [0.16.8] - 2026-11-23
 
 ### Changed
