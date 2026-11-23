@@ -67,6 +67,36 @@ pub struct Stats {
     /// The few numbers a person reads, for the bottom line: frames per second, bitrate,
     /// delay, and loss when there is some.
     pub brief: String,
+    /// The same, as numbers: `None` until the first second is over.
+    pub last: Option<Brief>,
+}
+
+/// The numbers of the last second a person reads.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Brief {
+    pub fps: f64,
+    pub mbps: f64,
+    /// From capture to the screen, else the network round trip.
+    pub delay_ms: Option<f64>,
+    /// Only when some was lost.
+    pub loss_pct: Option<f64>,
+}
+
+impl Brief {
+    /// "30 fps · 12.3 Mb/s · delay 18 ms", and "loss 1.2 %" when there is some.
+    pub fn text(&self) -> String {
+        let mut words = vec![
+            format!("{:.0} fps", self.fps),
+            format!("{:.1} Mb/s", self.mbps),
+        ];
+        if let Some(ms) = self.delay_ms {
+            words.push(format!("delay {ms:.0} ms"));
+        }
+        if let Some(pct) = self.loss_pct {
+            words.push(format!("loss {pct:.1} %"));
+        }
+        words.join(" · ")
+    }
 }
 
 impl Default for Stats {
@@ -88,6 +118,7 @@ impl Default for Stats {
             last_input_ms: None,
             summary: "waiting for the first frame…".into(),
             brief: String::new(),
+            last: None,
         }
     }
 }
@@ -190,23 +221,24 @@ impl Stats {
         }
         // For the person: how smooth, how much, how late; loss only when there is some. The
         // rest goes to the log.
-        let mut brief = vec![format!("{fps:.0} fps"), format!("{mbps:.1} Mb/s")];
-        let delay = if self.latencies_ms.is_empty() {
+        let delay_ms = if self.latencies_ms.is_empty() {
             rtt.map(|rtt| rtt.as_secs_f64() * 1000.0)
         } else {
             Some(self.latencies_ms[self.latencies_ms.len() / 2])
         };
-        if let Some(ms) = delay {
-            brief.push(format!("delay {ms:.0} ms"));
-        }
-        if self.lost > 0 {
-            let pct = self.lost as f64 * 100.0 / (self.datagrams + self.lost) as f64;
-            brief.push(format!("loss {pct:.1} %"));
-        }
+        let loss_pct =
+            (self.lost > 0).then(|| self.lost as f64 * 100.0 / (self.datagrams + self.lost) as f64);
+        let last = Brief {
+            fps,
+            mbps,
+            delay_ms,
+            loss_pct,
+        };
         self.summary = parts.join(" · ");
         *self = Stats {
             summary: std::mem::take(&mut self.summary),
-            brief: brief.join(" · "),
+            brief: last.text(),
+            last: Some(last),
             last_input_ms: self.last_input_ms,
             ..Stats::default()
         };
@@ -991,8 +1023,9 @@ impl App {
             .or_else(|| state.idle_notice.clone())
             .or_else(|| state.notice.clone())
             .or_else(|| state.input_notice.clone());
-        if state.stats.brief != self.status_line {
-            self.status_line = state.stats.brief.clone();
+        let line = Self::bottom_numbers(self.all.as_ref(), &state.stats);
+        if line != self.status_line {
+            self.status_line = line;
         }
         self.bar_notice = notice_now;
         // The session ended: the tiles go back to the one display, whose picture stays.
@@ -1534,6 +1567,25 @@ impl App {
         self.displays
             .get(display as usize)
             .and_then(|name| tiles::size_in(name))
+    }
+
+    /// The bottom line's numbers: with several displays in the window, how many, and their
+    /// bitrate together (frames per second and delay stay the own display's).
+    fn bottom_numbers(all: Option<&AllView>, own: &Stats) -> String {
+        let (Some(all), Some(last)) = (all, &own.last) else {
+            return own.brief.clone();
+        };
+        let others: f64 = all
+            .tiles
+            .iter()
+            .filter_map(|tile| tile.extra.as_ref())
+            .filter_map(|extra| Some(extra.shared.lock().ok()?.stats.last.as_ref()?.mbps))
+            .sum();
+        let together = Brief {
+            mbps: last.mbps + others,
+            ..last.clone()
+        };
+        format!("{} displays · {}", all.tiles.len(), together.text())
     }
 
     /// Shows the host's displays (four at most) as tiles.
@@ -2163,6 +2215,27 @@ mod pointer_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Several displays: their bitrates add up; frames per second and delay stay the own one's.
+    #[test]
+    fn displays_together_add_their_bitrates() {
+        let own = Brief {
+            fps: 30.0,
+            mbps: 12.3,
+            delay_ms: Some(18.0),
+            loss_pct: None,
+        };
+        assert_eq!(own.text(), "30 fps · 12.3 Mb/s · delay 18 ms");
+        let together = Brief {
+            mbps: own.mbps + 4.2,
+            loss_pct: Some(1.25),
+            ..own
+        };
+        assert_eq!(
+            together.text(),
+            "30 fps · 16.5 Mb/s · delay 18 ms · loss 1.2 %"
+        );
+    }
 
     /// The bottom line has the few numbers a person reads; the log line has them all.
     #[test]

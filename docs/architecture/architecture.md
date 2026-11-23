@@ -241,7 +241,9 @@ shown. Once a second the session window's bottom line shows the host's address a
 numbers for the person: frames per second, bitrate and delay (the median from capture to the screen;
 the network round trip until the two clocks agree), and packet loss when there is some. It
 is one line, never two, cut short with "…" in a narrow window, and its words cannot be
-selected. The full set goes to the viewer's log every second: codec, step of the quality
+selected. With several displays in the window ("All") it says how many after the address,
+and the bitrate is theirs together; frames per second and delay are those of the window's
+own display. The full set goes to the viewer's log every second: codec, step of the quality
 ladder, frames per second, bitrate, delay, encode, decode and draw time, round-trip time,
 input round trip, packet loss and packets repaired. A viewer drawing on the CPU has no bars
 and shows the full set in its title bar.

@@ -11,6 +11,14 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.14] - 2026-11-23
+
+### Added
+
+- **The bottom line says how many displays the window shows.** With "All":
+  "100.100.101.2 · 2 displays · 30 fps · 24.6 Mb/s · delay 18 ms", the bitrate being
+  that of all of them together.
+
 ## [0.16.13] - 2026-11-23
 
 ### Changed
