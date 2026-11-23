@@ -1367,17 +1367,6 @@ fn run_view(
     let conn = runtime.block_on(connect(&ep, target))?;
     let hello = conn.peer_hello.clone().unwrap_or_else(|| Hello::ours(""));
     let desk_key = conn.peer_fingerprint.to_string();
-    // The person's own name for the desk when they gave one, else the machine's (§14).
-    let host_name = runtime
-        .block_on(async {
-            ep.store
-                .lock()
-                .await
-                .desk(&desk_key)
-                .map(|desk| desk.shown_name().to_string())
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| hello.device_name.clone());
     // The keyboard and pointer modes: as the command line says, else as last chosen for this
     // desk, else remote.
     let kept = kept_choices(home).remove(&desk_key).unwrap_or_default();
@@ -1410,22 +1399,15 @@ fn run_view(
     let shared: Shared = Arc::default();
     // The app that opened this session says "raise" on our standard input when the person
     // asks for this desk again: the window comes to the front instead of a second one
-    // opening. It says "name <name>" when the person renames the desk: the window follows.
+    // opening.
     // Started any other way, the input ends or says nothing, and so does this.
     {
-        let (waker, shared) = (waker.clone(), shared.clone());
+        let waker = waker.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             for line in std::io::stdin().lock().lines() {
                 match line {
                     Ok(line) if line.trim() == "raise" => waker.wake(UiEvent::Raise),
-                    Ok(line) if line.starts_with("name ") => {
-                        let name = line["name ".len()..].trim().to_string();
-                        if !name.is_empty() {
-                            shared.lock().expect("view state lock").renamed = Some(name);
-                            waker.wake(UiEvent::Redraw);
-                        }
-                    }
                     Ok(_) => {}
                     Err(_) => break,
                 }
@@ -1701,14 +1683,13 @@ fn run_view(
             shared,
             ViewerOptions {
                 title: format!(
-                    "Illumination — {} ({host_name}){mode}",
+                    "Illumination — {}{mode}",
                     illum_ui::app::shown_address(&normalize_target(target))
                 ),
                 on_presented: Box::new(move |seq| ack.send_control(&ControlMsg::VideoAck { seq })),
                 input,
                 keyboard,
                 keyboard_grabbed,
-                host_name: host_name.clone(),
                 host_address: illum_ui::app::shown_address(&normalize_target(target)).to_string(),
                 // Changing the mode in the window moves the grab with it: every key in remote
                 // mode, only the system keys otherwise (§6).

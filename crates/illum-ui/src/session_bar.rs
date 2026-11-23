@@ -28,7 +28,6 @@ pub enum WindowMode {
 /// What the bars show.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BarState {
-    pub host_name: String,
     pub host_address: String,
     /// False for view-only: no keyboard or pointer choices.
     pub controlling: bool,
@@ -413,7 +412,7 @@ fn bars(ui: &mut Ui, state: &BarState, own: &mut BarUi) -> (Vec<BarAction>, BarS
         .show(ui, |ui| {
             // One line, never two: the numbers are cut short before the note is. Nothing in it
             // can be selected.
-            let mut words = format!("{} · {}", state.host_name, state.host_address);
+            let mut words = state.host_address.clone();
             if !state.status.is_empty() {
                 words = format!("{words} · {}", state.status);
             }
@@ -652,7 +651,6 @@ fn exit_tab(
 /// An example, for pictures and tests.
 pub fn sample() -> BarState {
     BarState {
-        host_name: "Laptop".into(),
         host_address: "100.64.0.20".into(),
         controlling: true,
         view: ViewMode::Fit,

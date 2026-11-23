@@ -11,6 +11,14 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.7] - 2026-11-23
+
+### Changed
+
+- **The session window shows the host's address alone.** The title reads
+  "Illumination — 100.100.101.2" and the bottom line starts "100.100.101.2 · 30 fps · …";
+  the desk's name is no longer shown there.
+
 ## [0.16.6] - 2026-11-22
 
 ### Changed

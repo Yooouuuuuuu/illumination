@@ -237,8 +237,8 @@ page.
 
 **The numbers of the last second.** Each video frame carries its capture time and how long
 the encoder took. The viewer adds its own decode and draw times and the time the frame was
-shown. Once a second the session window's bottom line shows the host's name and address and
-three numbers for the person: frames per second, bitrate and delay (the median from capture to the screen;
+shown. Once a second the session window's bottom line shows the host's address and three
+numbers for the person: frames per second, bitrate and delay (the median from capture to the screen;
 the network round trip until the two clocks agree), and packet loss when there is some. It
 is one line, never two, cut short with "…" in a narrow window, and its words cannot be
 selected. The full set goes to the viewer's log every second: codec, step of the quality
