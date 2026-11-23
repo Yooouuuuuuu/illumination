@@ -532,6 +532,8 @@ impl MediaLink {
         input: Option<InputFeed>,
         groups: &StreamGroups,
         window: Option<WindowKey>,
+        // The viewer lists `group`: it is told how many displays share its window's ladder.
+        tell_group: bool,
     ) -> MediaLink {
         let inbound = hub.register(&keys);
         let stop = Arc::new(AtomicBool::new(false));
@@ -769,7 +771,14 @@ impl MediaLink {
                         }
                         if Instant::now() >= next_stats {
                             next_stats += Duration::from_secs(1);
-                            sender.send_control(&std::mem::take(&mut stats).message());
+                            let second = std::mem::take(&mut stats);
+                            if let Some(seat) = &seat {
+                                let (displays, kbps) = seat.sent(second.bytes);
+                                if tell_group {
+                                    sender.send_control(&ControlMsg::Group { displays, kbps });
+                                }
+                            }
+                            sender.send_control(&second.message());
                         }
                         let keyframe_owed = want_keyframe.load(Ordering::SeqCst)
                             && last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_MIN_INTERVAL);
@@ -1242,6 +1251,7 @@ pub async fn serve_session(
                             // The window is the viewer's own number for it, kept per desk.
                             (group != 0)
                                 .then(|| (conn.peer_fingerprint.as_str().to_string(), group)),
+                            viewer_caps.iter().any(|c| c == "group"),
                         );
                         conn.send_control(&ControlMsg::MediaEndpoint { port: media.port() });
                         conn.send_control(&l.quality(""));

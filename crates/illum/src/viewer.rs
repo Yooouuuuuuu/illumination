@@ -669,7 +669,12 @@ pub async fn run_viewer_session_sharing_media(
     // The host's clock is its process's: a connection made again may reach a new process (the
     // host restarted) whose clock starts from zero. The old one's probes would put the delay
     // off by its age for up to a minute, so the estimate starts anew.
-    shared.lock().expect("view state lock").clock = illum_media::clock::ClockSync::default();
+    // Nor is it known yet how many displays share the window's limit.
+    {
+        let mut state = shared.lock().expect("view state lock");
+        state.clock = illum_media::clock::ClockSync::default();
+        state.group = None;
+    }
     // Kept so the media loop can re-send it to rebuild a stuck media path (§5.6).
     let screen_start = flags.screen_start(&params);
     conn.send_control(&screen_start);
@@ -859,6 +864,9 @@ pub async fn run_viewer_session_sharing_media(
                 Ok(ControlMsg::Ended { reason }) => {
                     tracing::info!(target: "session", "The host ends the session: {reason}");
                     shared.lock().expect("view state lock").ended_why = Some(reason);
+                }
+                Ok(ControlMsg::Group { displays, kbps }) => {
+                    shared.lock().expect("view state lock").group = Some((displays, kbps));
                 }
                 Ok(ControlMsg::Bye) => break Ok(()),
                 Ok(_) => {}

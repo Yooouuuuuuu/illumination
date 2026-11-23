@@ -11,6 +11,15 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.16] - 2026-11-23
+
+### Changed
+
+- **A popped-out display counts like a tile of "All".** The windows that share the
+  limit all say how many displays share it and what they send together: the main window
+  and a pop-out both read "100.100.101.2 · 2 displays · 30 fps · 24.6 Mb/s · …". The host
+  says it once a second; both desks need 0.16.16.
+
 ## [0.16.15] - 2026-11-23
 
 ### Fixed

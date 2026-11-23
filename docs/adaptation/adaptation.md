@@ -179,7 +179,9 @@ turning "All" on closes the popped-out windows. The viewer numbers the window
 from the frames of all the displays added up. Each rung's bitrate is split by the pixels each
 display sends (`split`): a display sent at a quarter of its width needs a sixteenth of the
 cap, together never more than the cap and never under 1 Mb/s. All the displays step down and
-up together.
+up together. Once a second the host tells each of them how many displays share the
+ladder and what they sent together in their last second (`ControlMsg::Group`, to a viewer
+that lists `group`, 0.16.16); the bottom line of every window shows it.
 
 ### Constants
 

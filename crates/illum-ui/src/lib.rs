@@ -282,6 +282,9 @@ pub struct ViewState {
     pub cursor: CursorPosition,
     pub cursor_shape: Option<CursorShape>,
     pub clock: ClockSync,
+    /// How many displays share the window's limit (tiles and pop-outs alike) and what they
+    /// sent together in their last second, in kb/s, as the host last said.
+    pub group: Option<(u32, u32)>,
     pub stats: Stats,
     /// Shown in the title instead of the stats, e.g. "screen unavailable: …".
     pub status: Option<String>,
@@ -332,6 +335,7 @@ impl Default for ViewState {
             cursor: CursorPosition::default(),
             cursor_shape: None,
             clock: ClockSync::default(),
+            group: None,
             stats: Stats::default(),
             status: None,
             notice: None,
@@ -1023,7 +1027,7 @@ impl App {
             .or_else(|| state.idle_notice.clone())
             .or_else(|| state.notice.clone())
             .or_else(|| state.input_notice.clone());
-        let line = Self::bottom_numbers(self.all.as_ref(), &state.stats);
+        let line = Self::bottom_numbers(self.all.as_ref(), &state.stats, state.group);
         if line != self.status_line {
             self.status_line = line;
         }
@@ -1569,10 +1573,22 @@ impl App {
             .and_then(|name| tiles::size_in(name))
     }
 
-    /// The bottom line's numbers: with several displays in the window, how many, and their
-    /// bitrate together (frames per second and delay stay the own display's).
-    fn bottom_numbers(all: Option<&AllView>, own: &Stats) -> String {
-        let (Some(all), Some(last)) = (all, &own.last) else {
+    /// The bottom line's numbers: with several displays sharing the window's limit, how
+    /// many, and their bitrate together (frames per second and delay stay the own display's).
+    /// The host says it (`group`), for the tiles of "All" and pop-outs alike; from a host that
+    /// does not, "All" adds up its tiles.
+    fn bottom_numbers(all: Option<&AllView>, own: &Stats, group: Option<(u32, u32)>) -> String {
+        let Some(last) = &own.last else {
+            return own.brief.clone();
+        };
+        if let Some((displays, kbps)) = group.filter(|(displays, _)| *displays >= 2) {
+            let together = Brief {
+                mbps: f64::from(kbps) / 1000.0,
+                ..last.clone()
+            };
+            return format!("{displays} displays · {}", together.text());
+        }
+        let Some(all) = all.filter(|_| group.is_none()) else {
             return own.brief.clone();
         };
         let others: f64 = all

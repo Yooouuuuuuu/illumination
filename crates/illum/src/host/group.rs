@@ -43,6 +43,8 @@ struct Member {
     target: Arc<Mutex<Target>>,
     /// Its viewer's report for the second the group has not been fed yet.
     pending: Option<SecondReport>,
+    /// What it sent in its last second, in bits.
+    sent_bps: u64,
 }
 
 /// A stream's place in its group; it leaves the group when dropped.
@@ -112,6 +114,7 @@ impl StreamGroups {
                 },
                 target: target.clone(),
                 pending: None,
+                sent_bps: 0,
             });
             if others > 0 {
                 g.changed("another display of the window joined".into());
@@ -232,6 +235,17 @@ impl Seat {
         let quality = (self.told.swap(changes, Ordering::SeqCst) != changes)
             .then(|| quality(&g, self.id, &g.reason));
         (own, quality)
+    }
+
+    /// This stream sent `bytes` in its last second. Returns how many displays share the
+    /// window's ladder and what they sent together in their last seconds, in kb/s.
+    pub(super) fn sent(&self, bytes: u64) -> (u32, u32) {
+        let mut g = self.group.lock().expect("group lock");
+        if let Some(i) = g.member(self.id) {
+            g.members[i].sent_bps = bytes * 8;
+        }
+        let together: u64 = g.members.iter().map(|m| m.sent_bps).sum();
+        (g.members.len() as u32, (together / 1000) as u32)
     }
 
     /// This stream's rung and parity, for its viewer's title bar.
@@ -391,5 +405,21 @@ mod tests {
         );
         drop(big);
         assert_eq!(groups.len(), 0);
+    }
+
+    #[test]
+    fn the_displays_of_a_window_are_counted_with_what_they_sent() {
+        let groups = StreamGroups::default();
+        let one = groups.join(window(), 1, LIMITS, (5, 30), 100);
+        assert_eq!(one.seat.sent(1_000_000), (1, 8_000), "alone");
+        let two = groups.join(window(), 2, LIMITS, (5, 30), 100);
+        assert_eq!(
+            two.seat.sent(500_000),
+            (2, 12_000),
+            "the first one's last second too"
+        );
+        assert_eq!(one.seat.sent(2_000_000), (2, 20_000));
+        drop(two);
+        assert_eq!(one.seat.sent(2_000_000), (1, 16_000), "the pop-out closed");
     }
 }

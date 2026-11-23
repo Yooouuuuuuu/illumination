@@ -25,6 +25,7 @@ pub const CAPABILITIES: &[&str] = &[
     "idle-warning",
     "lock",
     "ended",
+    "group",
 ];
 
 /// Logical channels multiplexed over the single TLS connection (architecture §4.4).
@@ -175,6 +176,13 @@ pub enum ControlMsg {
         fec_percent: u32,
         /// Why, in a few words (empty at start).
         reason: String,
+    },
+    /// Host → controller, once a second while displays of one window share its ladder: how
+    /// many (this one included) and what they sent together in their last second. Sent only
+    /// to a controller that lists `group`.
+    Group {
+        displays: u32,
+        kbps: u32,
     },
     /// Host → controller: send media datagrams to the host's address on this UDP port.
     MediaEndpoint {
@@ -381,6 +389,10 @@ mod tests {
             },
             ControlMsg::Ended {
                 reason: "Disconnected by the host after 30 minutes without input.".into(),
+            },
+            ControlMsg::Group {
+                displays: 2,
+                kbps: 24_600,
             },
             ControlMsg::Bye,
         ];

@@ -66,9 +66,12 @@ async fn start_host_with(
         .unwrap();
     let addr = listener.local_addrs()[0];
     tokio::spawn(async move {
+        // One host: the windows' ladders are shared by all its sessions.
+        let groups = illum::host::StreamGroups::default();
         while let Some((tcp, peer)) = listener.next().await {
             let (ep, acceptor, factory) = (ep.clone(), listener.acceptor(), factory.clone());
             let (media, codecs) = (listener.media(), codecs.clone());
+            let groups = groups.clone();
             tokio::spawn(async move {
                 if let Ok(conn) = accept(&ep, &acceptor, tcp, peer).await {
                     let config = HostConfig {
@@ -80,6 +83,7 @@ async fn start_host_with(
                         displays: Some(Arc::new(|| {
                             vec!["640 × 360, main".to_string(), "320 × 180".to_string()]
                         })),
+                        groups,
                         ..HostConfig::default()
                     };
                     let _ = serve_session(
@@ -735,4 +739,35 @@ async fn a_new_connection_learns_the_host_clock_anew() {
         s.clock.offset_us().is_some_and(|o| o.abs() < 1_000_000)
     })
     .await;
+}
+
+/// Two displays of one window (a pop-out, or tiles of "All") share its ladder: each viewer is
+/// told how many displays share it and what they send together.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_displays_of_one_window_are_counted_together() {
+    let addr = start_host("host-group", Some(pattern_factory())).await;
+    let ctl = endpoint("ctl-group");
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let shared: Shared = Arc::default();
+        let conn = connect(&ctl, &addr.to_string()).await.unwrap();
+        sessions.push((
+            shared.clone(),
+            tokio::spawn(run_viewer_session(
+                conn,
+                ViewParams {
+                    group: 7,
+                    ..params(None)
+                },
+                shared,
+                Arc::new(|| {}),
+            )),
+        ));
+    }
+    for (shared, _) in &sessions {
+        wait_for(shared, "two displays sharing", |s| {
+            s.group.is_some_and(|(displays, _)| displays == 2)
+        })
+        .await;
+    }
 }
