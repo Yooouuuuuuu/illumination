@@ -11,6 +11,13 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.12] - 2026-11-23
+
+### Changed
+
+- **"1 desk connected here"** in the main window's status and the tray's tooltip (it said
+  "1 desk connected"), so it reads apart from "Connected to 1 desk".
+
 ## [0.16.11] - 2026-11-23
 
 ### Changed

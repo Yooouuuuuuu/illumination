@@ -1972,8 +1972,12 @@ fn status_pill(ui: &mut Ui, state: &AppState) -> bool {
     let names = connected_names(state);
     let (text, fill, solid) = match (&state.incoming, names.as_slice()) {
         (Incoming::Failed(_), _) => ("Cannot be reached".to_string(), CORAL, false),
-        (_, [_]) => ("1 desk connected".to_string(), YELLOW, true),
-        (_, [_, ..]) => (format!("{} desks connected", names.len()), YELLOW, true),
+        (_, [_]) => ("1 desk connected here".to_string(), YELLOW, true),
+        (_, [_, ..]) => (
+            format!("{} desks connected here", names.len()),
+            YELLOW,
+            true,
+        ),
         (Incoming::Listening, []) if state.settings.new_desks == Permission::Never => {
             ("New desks are refused".to_string(), WHITE, false)
         }

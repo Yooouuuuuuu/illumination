@@ -115,8 +115,8 @@ mod imp {
             self.connected.set_text(format!("Connected here: {count}"));
             let tip = match count {
                 0 => "Illumination".to_string(),
-                1 => "Illumination: 1 desk connected".to_string(),
-                n => format!("Illumination: {n} desks connected"),
+                1 => "Illumination: 1 desk connected here".to_string(),
+                n => format!("Illumination: {n} desks connected here"),
             };
             let _ = self.icon.set_tooltip(Some(tip));
             let picture = if count > 0 { &self.busy } else { &self.plain };
