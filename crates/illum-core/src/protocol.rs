@@ -271,8 +271,8 @@ pub enum ControlMsg {
     /// that key locks the controller). Sent only to a host that lists `lock`.
     LockHost,
     /// Host → controller, just before `Bye`: why the host ends the session, in one sentence
-    /// for the person ("No input for 30 min, so the host ended the session."). Sent only to
-    /// a controller that lists `ended`.
+    /// for the person ("Disconnected by the host after 30 minutes without input."). Sent only to a
+    /// controller that lists `ended`.
     Ended {
         reason: String,
     },
@@ -380,7 +380,7 @@ mod tests {
                 unreliable: true,
             },
             ControlMsg::Ended {
-                reason: "No input for 30 min, so the host ended the session.".into(),
+                reason: "Disconnected by the host after 30 minutes without input.".into(),
             },
             ControlMsg::Bye,
         ];

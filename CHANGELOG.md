@@ -11,6 +11,16 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.8] - 2026-11-23
+
+### Changed
+
+- **Plainer, more formal wording.** A session that ends says "Disconnected by the host after 30 minutes without input." or
+  "Disconnected manually at the host."; Settings, locked, says "Locked while 1 desk is
+  connected. This keeps a connected desk from changing who may connect here."; an update
+  waiting for connections says "Updating ends all connections. … Disconnect them first."
+  Desks connected here are counted, not named, in these sentences.
+
 ## [0.16.7] - 2026-11-23
 
 ### Changed

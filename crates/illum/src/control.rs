@@ -82,12 +82,12 @@ pub fn locked(home: &Path, connected: &[String], request: &Request) -> Option<St
         ),
         _ => false,
     };
-    let who = match connected {
-        [] => return None,
-        [one] => format!("{one} is"),
-        many => format!("{} desks are", many.len()),
+    let who = match connected.len() {
+        0 => return None,
+        1 => "1 desk is".to_string(),
+        n => format!("{n} desks are"),
     };
-    changes_who.then(|| format!("locked while {who} connected here"))
+    changes_who.then(|| format!("locked while {who} connected"))
 }
 
 /// Carries out one request in the home folder. This is the host's side.
@@ -570,7 +570,7 @@ mod tests {
             assert_eq!(locked(&home, &[], request), None, "nobody connected");
             assert_eq!(
                 locked(&home, &laptop, request).as_deref(),
-                Some("locked while LAPTOP is connected here"),
+                Some("locked while 1 desk is connected"),
                 "{request:?}"
             );
         }
@@ -580,7 +580,7 @@ mod tests {
         let two = vec!["LAPTOP".to_string(), "TABLET".to_string()];
         assert_eq!(
             locked(&home, &two, &open).as_deref(),
-            Some("locked while 2 desks are connected here")
+            Some("locked while 2 desks are connected")
         );
 
         // And carried out: refused, nothing written.

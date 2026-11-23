@@ -1548,7 +1548,7 @@ fn run_view(
                         .expect("view state lock")
                         .ended_why
                         .take()
-                        .unwrap_or_else(|| "The host ended the session.".to_string()),
+                        .unwrap_or_else(|| "Disconnected by the host.".to_string()),
                     Err(e) if reconnect => {
                         tracing::warn!(target: "media", "Connection ended ({e}); reconnecting.");
                         continue;

@@ -1931,14 +1931,14 @@ fn connected_names(state: &AppState) -> Vec<String> {
 
 /// Why who may connect cannot be changed now: a desk is connected here. `None`: it can.
 fn lock_note(state: &AppState) -> Option<String> {
-    let who = match connected_names(state).as_slice() {
-        [] => return None,
-        [one] => format!("{one} is"),
-        many => format!("{} desks are", many.len()),
+    let who = match connected_names(state).len() {
+        0 => return None,
+        1 => "1 desk is".to_string(),
+        n => format!("{n} desks are"),
     };
     Some(format!(
-        "Locked while {who} connected here, so that a connected desk cannot change who \
-         may connect. These can be changed when no desk is connected."
+        "Locked while {who} connected. This keeps a connected desk from changing who may \
+         connect here."
     ))
 }
 
@@ -2184,11 +2184,10 @@ fn note_box(ui: &mut Ui, fill: Color32, text: &str) {
 /// Why an update has to wait: what is connected, in words.
 fn busy_sentence(state: &AppState) -> String {
     let mut parts = Vec::new();
-    match connected_names(state).as_slice() {
-        [] => {}
-        [one] => parts.push(format!("{one} is connected here")),
-        [a, b] => parts.push(format!("{a} and {b} are connected here")),
-        many => parts.push(format!("{} desks are connected here", many.len())),
+    match connected_names(state).len() {
+        0 => {}
+        1 => parts.push("1 desk is connected here".to_string()),
+        n => parts.push(format!("{n} desks are connected here")),
     }
     match state.outgoing {
         0 => {}
@@ -2196,7 +2195,7 @@ fn busy_sentence(state: &AppState) -> String {
         n => parts.push(format!("{n} session windows are open")),
     }
     format!(
-        "Updating ends every connection. {}. End them first.",
+        "Updating ends all connections. {}. Disconnect them first.",
         parts.join(" and ")
     )
 }
@@ -2964,13 +2963,13 @@ mod tests {
         state.sessions = vec!["LAPTOP".into()];
         let note = lock_note(&state).expect("locked");
         assert!(
-            note.starts_with("Locked while LAPTOP is connected here"),
+            note.starts_with("Locked while 1 desk is connected."),
             "{note}"
         );
         state.sessions.push("TABLET".into());
         let note = lock_note(&state).expect("locked");
         assert!(
-            note.starts_with("Locked while 2 desks are connected here"),
+            note.starts_with("Locked while 2 desks are connected."),
             "{note}"
         );
 

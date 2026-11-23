@@ -1025,13 +1025,22 @@ impl Drop for MediaLink {
     }
 }
 
-/// A length of time as a person says it: "30 min", "2 h", "1 h 30 min".
+/// A length of time in words: "30 minutes", "2 hours", "1 hour 30 minutes".
 fn span(time: Duration) -> String {
     let minutes = (time.as_secs() + 30) / 60;
     match (minutes / 60, minutes % 60) {
-        (0, m) => format!("{m} min"),
-        (h, 0) => format!("{h} h"),
-        (h, m) => format!("{h} h {m} min"),
+        (0, m) => plural(m, "minute"),
+        (h, 0) => plural(h, "hour"),
+        (h, m) => format!("{} {}", plural(h, "hour"), plural(m, "minute")),
+    }
+}
+
+/// "1 hour", "2 hours".
+fn plural(n: u64, unit: &str) -> String {
+    if n == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
     }
 }
 
@@ -1100,7 +1109,7 @@ pub async fn serve_session(
                     tracing::info!(target: "session", "No input for {} minutes; ending the session.", limit.as_secs() / 60);
                     goodbye(
                         &conn,
-                        format!("No input for {}, so the host ended the session.", span(limit)),
+                        format!("Disconnected by the host after {} without input.", span(limit)),
                     );
                     break Ok(());
                 }
@@ -1114,7 +1123,7 @@ pub async fn serve_session(
                 continue;
             }
             () = end.notified() => {
-                goodbye(&conn, "The person at the host ended the session.".to_string());
+                goodbye(&conn, "Disconnected manually at the host.".to_string());
                 break Ok(());
             }
         };
@@ -1368,9 +1377,11 @@ mod tests {
     #[test]
     fn a_time_is_said_as_a_person_says_it() {
         let min = |m: u64| span(Duration::from_secs(m * 60));
-        assert_eq!(min(10), "10 min");
-        assert_eq!(min(60), "1 h");
-        assert_eq!(min(90), "1 h 30 min");
-        assert_eq!(min(120), "2 h");
+        assert_eq!(min(1), "1 minute");
+        assert_eq!(min(10), "10 minutes");
+        assert_eq!(min(60), "1 hour");
+        assert_eq!(min(61), "1 hour 1 minute");
+        assert_eq!(min(90), "1 hour 30 minutes");
+        assert_eq!(min(120), "2 hours");
     }
 }
