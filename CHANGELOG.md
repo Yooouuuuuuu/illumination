@@ -11,6 +11,13 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.10] - 2026-11-23
+
+### Changed
+
+- **Settings: Save on the left, Discard on the right**, and after saving a green "Saved"
+  where the count of unsaved changes was, until the next change.
+
 ## [0.16.9] - 2026-11-23
 
 ### Changed

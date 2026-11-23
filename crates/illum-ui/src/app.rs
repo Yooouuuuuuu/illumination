@@ -29,6 +29,8 @@ pub mod color {
     pub const WHITE: Color32 = Color32::WHITE;
     /// Open, allowed: ready for connections, online, permission "always".
     pub const GREEN: Color32 = Color32::from_rgb(0xB9, 0xEF, 0xB0);
+    /// Words that say something went well: green dark enough to read on white (5:1).
+    pub const GREEN_TEXT: Color32 = Color32::from_rgb(0x1E, 0x7A, 0x34);
     /// Waiting for an answer: connecting, permission "ask".
     pub const BLUE: Color32 = Color32::from_rgb(0xC9, 0xDB, 0xFF);
     /// Closed, refused, broken: cannot be reached, permission "never", ending something.
@@ -840,6 +842,8 @@ pub struct HomeUi {
     editing: Option<Editing>,
     /// The settings as edited and not yet saved, while the Settings page is open.
     pending: Option<Settings>,
+    /// What Save last sent: "Saved" shows while the page still holds it, saved.
+    saved: Option<Settings>,
     /// The setting the menu was asked to bring into view.
     jump: Option<Item>,
     /// Asked to leave Settings with unsaved changes.
@@ -1022,7 +1026,14 @@ impl HomeUi {
                         }
                         ui.label(RichText::new("Settings").font(heading(20.0)));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            // Always in sight, wherever the page is scrolled to.
+                            // Always in sight, wherever the page is scrolled to. Right to
+                            // left: Discard at the edge, Save before it.
+                            if ui
+                                .add_enabled(changes > 0, button("Discard", WHITE, 40.0))
+                                .clicked()
+                            {
+                                self.pending = Some(state.settings.clone());
+                            }
                             let save = ui.add_enabled(
                                 changes > 0,
                                 primary("Save").min_size(vec2(96.0, 40.0)),
@@ -1030,15 +1041,16 @@ impl HomeUi {
                             if save.clicked()
                                 && let Some(pending) = &self.pending
                             {
+                                self.saved = Some(pending.clone());
                                 out.push(Command::SaveSettings(pending.clone()));
                             }
-                            if ui
-                                .add_enabled(changes > 0, button("Discard", WHITE, 40.0))
-                                .clicked()
-                            {
-                                self.pending = Some(state.settings.clone());
-                            }
-                            if changes > 0 {
+                            if changes == 0 && self.saved.is_some() && self.saved == self.pending {
+                                ui.label(
+                                    RichText::new("Saved")
+                                        .font(semibold(14.0))
+                                        .color(GREEN_TEXT),
+                                );
+                            } else if changes > 0 {
                                 let text = if changes == 1 {
                                     "1 unsaved change".to_string()
                                 } else {
@@ -1062,6 +1074,7 @@ impl HomeUi {
     fn leave(&mut self) {
         self.page = Page::Home;
         self.pending = None;
+        self.saved = None;
         self.leaving = false;
         self.jump = None;
     }
