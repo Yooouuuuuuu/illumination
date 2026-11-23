@@ -7,6 +7,7 @@
 mod app;
 mod control;
 mod installed;
+mod logs;
 mod prompt;
 mod update;
 
@@ -338,8 +339,9 @@ fn endpoint(home: &Path) -> Result<Endpoint> {
     })
 }
 
-/// Console at info (debug with `-v`), plus one file per role under `<home>/logs` at debug
-/// level, so a problem seen once can be read afterwards. Returns the file's path.
+/// Console at info (debug with `-v`), plus one file per role and day under `<home>/logs` at
+/// info level, or debug with "Detailed logs" (`logs`), so a problem seen once can be read
+/// afterwards. Returns today's file.
 fn init_logging(cli: &Cli) -> Option<PathBuf> {
     use tracing_subscriber::Layer;
     use tracing_subscriber::filter::LevelFilter;
@@ -372,31 +374,28 @@ fn init_logging(cli: &Cli) -> Option<PathBuf> {
         (Some(Command::Ask { .. }), Role::Frontend) => "ask".to_string(),
         (_, role) => format!("{role:?}").to_lowercase(),
     };
-    let path = own_folder(&cli.home.clone().unwrap_or_else(default_home))
-        .join("logs")
-        .join(format!("{role}.log"));
-    let file = std::fs::create_dir_all(path.parent().expect("logs directory"))
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-        })
-        .ok();
+    let home = cli.home.clone().unwrap_or_else(default_home);
+    let dir = own_folder(&home).join("logs");
+    let file = logs::DailyLog::open(&dir, &role).ok();
     let opened = file.is_some();
+    let detailed = app::load_settings(&home).detailed_logs;
+    let (level, levels) = tracing_subscriber::reload::Layer::new(logs::file_level(detailed));
+    logs::on_detailed(Box::new(move |on| {
+        let _ = levels.modify(|level| *level = logs::file_level(on));
+    }));
     let file_layer = file.map(|f| {
         tracing_subscriber::fmt::layer()
             .with_target(true)
             .with_ansi(false)
             .with_writer(Arc::new(f))
-            .with_filter(LevelFilter::DEBUG)
+            .with_filter(level)
             .with_filter(quiet_gpu)
     });
     tracing_subscriber::registry()
         .with(console)
         .with(file_layer)
         .init();
-    opened.then_some(path)
+    opened.then(|| logs::today_file(&dir, &role))
 }
 
 fn main() -> std::process::ExitCode {
@@ -405,7 +404,7 @@ fn main() -> std::process::ExitCode {
     if let Some(path) = &log_path
         && (cli.role() == Role::Service || matches!(cli.command, Some(Command::View { .. })))
     {
-        tracing::info!(target: "illum", "Log file: {} (debug level).", path.display());
+        tracing::info!(target: "illum", "Log file: {}.", path.display());
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

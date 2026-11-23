@@ -11,6 +11,15 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.13] - 2026-11-23
+
+### Changed
+
+- **Logs are smaller and kept a week.** The files are written at info level; "Detailed
+  logs" in Settings, General, turns on the debug level for finding a problem. Each role
+  writes one file a day, `viewer.2026-11-23.log` (dates in UTC), and files not written
+  for 7 days are deleted, the old `viewer.log` and `service.log` with them.
+
 ## [0.16.12] - 2026-11-23
 
 ### Changed

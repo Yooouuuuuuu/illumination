@@ -105,7 +105,10 @@ pub fn carry_out(home: &Path, hands: &Hands, request: &Request) -> Reply {
             .and_then(|mut store| store.apply(change))
             .map_err(|e| e.to_string()),
         Request::Settings { settings } => crate::app::save_settings(home, settings)
-            .map(|()| true)
+            .map(|()| {
+                crate::logs::set_detailed(settings.detailed_logs);
+                true
+            })
             .map_err(|e| format!("{e:#}")),
         Request::EndSession { name } => Ok((hands.end)(name) > 0),
         Request::Update => match &hands.update {

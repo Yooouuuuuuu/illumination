@@ -762,7 +762,7 @@ pub fn install(home: &Path) -> Result<()> {
         "Illumination is installed as a service and {}.",
         match service_state() {
             ServiceState::Running => "running",
-            _ => "not running yet (see logs\\service-run.log in the home folder)",
+            _ => "not running yet (see logs\\service-run.<date>.log in the home folder)",
         }
     );
     Ok(())

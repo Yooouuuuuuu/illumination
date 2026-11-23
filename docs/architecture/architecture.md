@@ -251,27 +251,31 @@ fresh picture from the host…" after 2 s without the keyframe it asked for, and
 while the control connection is alive ([adaptation.md](../adaptation/adaptation.md)).
 
 **Logs.** Every process writes to the console (stderr) at info level, or debug with `-v`, and
-appends to a file at debug level:
+appends to a file of the day at info level, or debug while "Detailed logs" is on in Settings
+(General), for finding a problem. A change of that switch applies at once to the app and the
+host, and to session windows opened after it:
 
 | Process | File |
 |---|---|
-| The app | `logs\app.log` |
-| Session window | `logs\viewer.log` |
-| The service | `logs\service-run.log` |
-| Host (installed or by hand) | `logs\service.log` |
-| Question window | `logs\ask.log` |
-| Other commands | `logs\frontend.log` |
+| The app | `logs\app.2026-11-23.log` |
+| Session window | `logs\viewer.2026-11-23.log` |
+| The service | `logs\service-run.2026-11-23.log` |
+| Host (installed or by hand) | `logs\service.2026-11-23.log` |
+| Question window | `logs\ask.2026-11-23.log` |
+| Other commands | `logs\frontend.2026-11-23.log` |
 
 The `logs` folder is in the home folder where the process can write there. On an installed
 desk that is true for the service and the host; the user's processes log to
-`%LOCALAPPDATA%\Illumination\logs`. Files are appended to and not rotated.
+`%LOCALAPPDATA%\Illumination\logs`. A new file starts each day at midnight UTC (the lines'
+times are UTC too); processes of one role share it. A file not written for 7 days is
+deleted when a process opens its own.
 
 Each line starts with the component it comes from: `app`, `service`, `session`, `net`,
 `identity`, `media`, `codec`, `capture`, `audio`, `input`, `clipboard`, `viewer`, `workload`.
 The GPU libraries (`wgpu`, `naga`) are logged at warning level and above only.
 
 **Reading a session back.** The host logs every change of ladder step at info level with its
-reason, and one line per second at debug level: frames shown and on time, datagrams received
+reason, and one line per second at debug level (with "Detailed logs"): frames shown and on time, datagrams received
 and lost, frames lost, packets repaired, round-trip time, grade. With `view --report <file>`
 the viewer also writes these per-second records as JSON, with the host's own per-second
 numbers; `illum report` turns a folder of them into a table.

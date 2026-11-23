@@ -91,6 +91,8 @@ pub struct Settings {
     // General.
     /// Start with the system, in the tray, so this desk can be reached after a restart.
     pub start_on_boot: bool,
+    /// The log files at debug level, for finding a problem; else info.
+    pub detailed_logs: bool,
 }
 
 impl Default for Settings {
@@ -110,6 +112,7 @@ impl Default for Settings {
             new_desks: Permission::Ask,
             idle_minutes: 30,
             start_on_boot: true,
+            detailed_logs: false,
         }
     }
 }
@@ -747,6 +750,7 @@ enum Tab {
 enum Item {
     StartOnBoot,
     Key,
+    Logs,
     Limits,
     Sound,
     Clipboard,
@@ -763,7 +767,7 @@ enum Item {
 
 /// The sections of Settings, each with its settings in the order they are drawn.
 const MENU: [(&str, &[Item]); 5] = [
-    ("General", &[Item::StartOnBoot, Item::Key]),
+    ("General", &[Item::StartOnBoot, Item::Key, Item::Logs]),
     (
         "Connection",
         &[
@@ -792,6 +796,7 @@ fn unsaved(saved: &Settings, shown: &Settings) -> Vec<Item> {
         Item::StartOnBoot,
         saved.start_on_boot != shown.start_on_boot,
     );
+    differs(Item::Logs, saved.detailed_logs != shown.detailed_logs);
     differs(Item::Permission, saved.new_desks != shown.new_desks);
     differs(
         Item::Actions,
@@ -1701,6 +1706,11 @@ impl HomeUi {
             label(ui, "This desk's key");
             ui.horizontal(|ui| key_box(ui, &state.fingerprint, TILE, 15.0));
             ui.label(muted("Other desks show it on first connection."));
+            self.here(ui, Item::Logs);
+            ui.checkbox(&mut s.detailed_logs, "Detailed logs");
+            ui.label(muted(
+                "Records more, for finding a problem. Logs are kept 7 days.",
+            ));
         });
         card(ui, WHITE, |ui| {
             ui.set_width(ui.available_width());
@@ -2974,6 +2984,7 @@ mod tests {
                 reconnect: false,
                 allow_scale: true,
                 exit_tab_transparency: 0,
+                detailed_logs: true,
                 ..shown
             },
         ) {

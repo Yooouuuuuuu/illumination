@@ -489,6 +489,7 @@ impl Backend {
                 if let Err(e) = saved {
                     tracing::warn!(target: "app", "Settings not saved: {e:#}");
                 }
+                crate::logs::set_detailed(settings.detailed_logs);
                 // What a connected desk may do is part of what is listened with.
                 let offer_changed = (
                     settings.let_control,
@@ -939,9 +940,7 @@ impl Backend {
     fn watch_session(self: &Arc<Self>, child: std::process::Child, address: String, shown: String) {
         let this = self.clone();
         let started = std::time::Instant::now();
-        let log = crate::own_folder(&self.home)
-            .join("logs")
-            .join("viewer.log");
+        let log = crate::logs::today_file(&crate::own_folder(&self.home).join("logs"), "viewer");
         // Kept where closing the app finds it, and looked at instead of waited on, so that
         // closing can end it.
         let child = Arc::new(Mutex::new(child));
@@ -1229,6 +1228,7 @@ mod tests {
             clipboard: false,
             exit_tab_transparency: 100,
             start_on_boot: false,
+            detailed_logs: true,
             let_control: false,
             let_sound: false,
             let_clipboard: false,
