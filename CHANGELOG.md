@@ -11,6 +11,18 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.17] - 2026-11-23
+
+### Changed
+
+- **The rest of the wording, plainer and more formal.** The session window's notes start
+  with a capital and say what is happening: "Connection lost. Reconnecting…", "Video
+  stopped. Reconnecting…", "Getting a fresh picture from the host…", "No input:
+  disconnecting in 45 s. Move the mouse or press a key to stay connected.", "Arranging
+  displays: input is paused." The main window's hints read the same way, for example
+  "These desks connect without asking." and "No desks yet. Desks you connect to appear
+  here."
+
 ## [0.16.16] - 2026-11-23
 
 ### Changed

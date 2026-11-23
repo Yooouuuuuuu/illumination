@@ -253,8 +253,8 @@ resumes with a keyframe when the window is restored. The connection, input and s
 going. Being covered by another window does not pause.
 
 **A still host is not a dead path.** A host whose screen does not change sends no video. The
-host reports each second how much it sent (`HostStats`). The viewer says "video stalled;
-reconnecting…" only when the host says it did send and nothing arrived.
+host reports each second how much it sent (`HostStats`). The viewer says "Video stopped.
+Reconnecting…" only when the host says it did send and nothing arrived.
 
 ### 5.5–5.7
 

@@ -116,7 +116,7 @@ impl Default for Stats {
             audio_frames: 0,
             input_ms: Vec::new(),
             last_input_ms: None,
-            summary: "waiting for the first frame…".into(),
+            summary: "Waiting for the first picture…".into(),
             brief: String::new(),
             last: None,
         }
@@ -288,7 +288,7 @@ pub struct ViewState {
     pub stats: Stats,
     /// Shown in the title instead of the stats, e.g. "screen unavailable: …".
     pub status: Option<String>,
-    /// A passing condition shown next to the stats, e.g. "getting a fresh picture from the host…".
+    /// A passing condition shown next to the stats, e.g. "Getting a fresh picture from the host…".
     pub notice: Option<String>,
     /// Why the host is not taking input, while it is not (its lock screen, an administrator's
     /// window): shown where the notice is, when nothing more urgent is.
@@ -1424,7 +1424,7 @@ impl App {
             reveal: self.mode != session_bar::WindowMode::Detail && self.over_bar,
             status: self.status_line.clone(),
             notice: if self.all.as_ref().is_some_and(|all| all.arrange) {
-                Some("Arranging: nothing is sent to the host".into())
+                Some("Arranging displays: input is paused.".into())
             } else {
                 self.bar_notice.clone()
             },

@@ -857,7 +857,7 @@ mod tests {
                             held: false,
                         },
                     ],
-                    notice: Some("Arranging: nothing is sent to the host".into()),
+                    notice: Some("Arranging displays: input is paused.".into()),
                     ..crate::session_bar::sample()
                 },
                 (1280.0, 520.0),
@@ -867,7 +867,7 @@ mod tests {
                 crate::session_bar::BarState {
                     controlling: false,
                     displays: Vec::new(),
-                    notice: Some("connection lost; reconnecting…".into()),
+                    notice: Some("Connection lost. Reconnecting…".into()),
                     ..crate::session_bar::sample()
                 },
                 (760.0, 360.0),

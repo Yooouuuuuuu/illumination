@@ -555,10 +555,10 @@ fn media_loop(
                 }
                 sender.send_control(&again);
             }
-            Some("video stalled; reconnecting…")
+            Some("Video stopped. Reconnecting…")
         } else if awaiting_since.is_some_and(|s| now.duration_since(s) >= KEYFRAME_TIMEOUT) {
             // In the person's words: a keyframe is the whole picture, sent anew.
-            Some("getting a fresh picture from the host…")
+            Some("Getting a fresh picture from the host…")
         } else {
             None
         };
@@ -576,7 +576,7 @@ fn media_loop(
             // A reason the host already gave (e.g. capture failed) stays; this is only a guess.
             if state.status.is_none() {
                 state.status = Some(
-                    "no video arrived within 5 s. If the host reports no error, its UDP port is probably blocked by a firewall."
+                    "No video within 5 seconds. The host's UDP port may be blocked by a firewall."
                         .into(),
                 );
                 drop(state);
@@ -837,7 +837,7 @@ pub async fn run_viewer_session_sharing_media(
                 }
                 Ok(ControlMsg::IdleWarning { seconds }) => {
                     shared.lock().expect("view state lock").idle_notice = (seconds > 0).then(|| {
-                        format!("no input for a while: the host disconnects in {seconds} s unless you move the mouse")
+                        format!("No input: disconnecting in {seconds} s. Move the mouse or press a key to stay connected.")
                     });
                     notify();
                 }

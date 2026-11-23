@@ -273,8 +273,8 @@ frame a keyframe.
 | Static screen | The capture emits frames only on change. If a keyframe is owed and nothing new was captured, the host re-sends the last frame as a keyframe. | `host.rs` |
 | Lost reference | Five frames in a row fed to the decoder with no picture out mean the frame they build on is gone. The viewer asks for a keyframe. | `NO_PICTURE_LIMIT`, `viewer.rs` |
 | Reminder | While waiting for a keyframe and other frames keep arriving, the viewer asks again every second. | `KEYFRAME_REMINDER` |
-| Notice | After 2 s without the keyframe the session window says "getting a fresh picture from the host…" (until 0.16.4: "waiting for a keyframe from the host…"; a keyframe is a word the person need not know). | `KEYFRAME_TIMEOUT` |
-| Stall | The host reports each second what it sent (`HostStats`). No video for 3 s while the host says it is sending: the viewer asks for a keyframe and the session window says "video stalled; reconnecting…". After 8 s it sends `ScreenStart` again, which rebuilds the media path. | `SILENCE_AFTER`, `RECONNECT_AFTER` |
+| Notice | After 2 s without the keyframe the session window says "Getting a fresh picture from the host…" (until 0.16.4: "waiting for a keyframe from the host…"; a keyframe is a word the person need not know). | `KEYFRAME_TIMEOUT` |
+| Stall | The host reports each second what it sent (`HostStats`). No video for 3 s while the host says it is sending: the viewer asks for a keyframe and the session window says "Video stopped. Reconnecting…". After 8 s it sends `ScreenStart` again, which rebuilds the media path. | `SILENCE_AFTER`, `RECONNECT_AFTER` |
 
 A host with a still screen sends nothing. That is not a stall, and the viewer stays quiet.
 

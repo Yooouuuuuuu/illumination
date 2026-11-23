@@ -1504,7 +1504,7 @@ fn run_view(
         runtime.spawn(async move {
             let mut next = Some(conn);
             let mut backoff = Duration::from_secs(1);
-            let mut dialing = "connection lost; reconnecting…";
+            let mut dialing = "Connection lost. Reconnecting…";
             let result = loop {
                 let conn = match next.take() {
                     Some(c) => c,
@@ -1526,7 +1526,7 @@ fn run_view(
                         }
                     }
                 };
-                dialing = "connection lost; reconnecting…";
+                dialing = "Connection lost. Reconnecting…";
                 shared.lock().expect("view state lock").ended_why = None;
                 live.set(Some(conn.sender()));
                 let r = run_viewer_session_sharing_media(

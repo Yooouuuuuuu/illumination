@@ -1255,7 +1255,7 @@ impl HomeUi {
             ui.label(muted(match (tab, needle.is_empty()) {
                 (_, false) => "No desk matches.",
                 (Tab::Favorites, _) => "No favorites yet. Add one from a desk's menu.",
-                (Tab::Recent, _) => "No desks yet. Connect to one above and it is kept here.",
+                (Tab::Recent, _) => "No desks yet. Desks you connect to appear here.",
                 (Tab::CameIn, _) => "No desk has connected here yet.",
             }));
             return;
@@ -1705,11 +1705,11 @@ impl HomeUi {
             self.here(ui, Item::Key);
             label(ui, "This desk's key");
             ui.horizontal(|ui| key_box(ui, &state.fingerprint, TILE, 15.0));
-            ui.label(muted("Other desks show it on first connection."));
+            ui.label(muted("Shown to other desks the first time they connect."));
             self.here(ui, Item::Logs);
             ui.checkbox(&mut s.detailed_logs, "Detailed logs");
             ui.label(muted(
-                "Records more, for finding a problem. Logs are kept 7 days.",
+                "Records more detail, for troubleshooting. Logs are kept for 7 days.",
             ));
         });
         card(ui, WHITE, |ui| {
@@ -1805,10 +1805,8 @@ impl HomeUi {
                 });
                 if s.new_desks == Permission::Always {
                     ui.label(
-                        RichText::new(
-                            "Any desk that can reach this one connects without a question.",
-                        )
-                        .font(semibold(14.0)),
+                        RichText::new("Any desk that can reach this one connects without asking.")
+                            .font(semibold(14.0)),
                     );
                 }
                 ui.label(muted("What you set for one desk overrides this."));
@@ -1842,7 +1840,7 @@ impl HomeUi {
             ui.set_width(ui.available_width());
             self.here(ui, Item::Trusted);
             title(ui, "Trusted desks");
-            ui.label(muted("They connect here without a question."));
+            ui.label(muted("These desks connect without asking."));
             let mut trusted: Vec<&Desk> = state
                 .desks
                 .iter()
@@ -2768,7 +2766,7 @@ fn question(ctx: &egui::Context, q: &Question, out: &mut Vec<Command>) {
             ui.add_space(4.0);
             key_box(ui, &q.fingerprint, TILE, 16.0);
             ui.label(muted(
-                "Its key. Compare with the key in that desk's Settings.",
+                "This desk's key. It should match the key in that desk's Settings.",
             ));
             ui.add_space(6.0);
             ui.label(RichText::new("Let it connect?").font(semibold(15.0)));

@@ -248,7 +248,7 @@ ladder, frames per second, bitrate, delay, encode, decode and draw time, round-t
 input round trip, packet loss and packets repaired. A viewer drawing on the CPU has no bars
 and shows the full set in its title bar.
 
-**The viewer says what it is waiting for** instead of freezing silently: "getting a
+**The viewer says what it is waiting for** instead of freezing silently: "Getting a
 fresh picture from the host…" after 2 s without the keyframe it asked for, and a stall notice after 3 s without media
 while the control connection is alive ([adaptation.md](../adaptation/adaptation.md)).
 
