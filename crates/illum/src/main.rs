@@ -849,7 +849,7 @@ struct Live {
     address: String,
     /// Unix seconds when it connected.
     since: u64,
-    end: Arc<tokio::sync::Notify>,
+    end: Arc<illum::host::Ending>,
     /// Ended by the person at this desk, not by the controller or the link.
     dismissed: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -858,7 +858,7 @@ struct Live {
 struct Entered {
     sessions: Sessions,
     id: u64,
-    end: Arc<tokio::sync::Notify>,
+    end: Arc<illum::host::Ending>,
     dismissed: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -939,10 +939,19 @@ impl Sessions {
             session
                 .dismissed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            // Kept until the session looks, should it be busy right now.
-            session.end.notify_one();
+            session.end.end(illum::host::ENDED_MANUALLY);
         }
         theirs.len()
+    }
+
+    /// Ends every session, telling each controller `why`. The desks are not sent away: one
+    /// accepted "this time" may come back. Returns how many there were.
+    fn end_all(&self, why: &str) -> usize {
+        let live = self.live.lock().expect("sessions");
+        for session in live.iter() {
+            session.end.end(why);
+        }
+        live.len()
     }
 }
 
@@ -1939,6 +1948,30 @@ mod tests {
 
     fn parse(args: &[&str]) -> std::result::Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("illum").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn an_update_ends_every_session_and_says_why() {
+        let sessions = Sessions::new(|_| {});
+        let (laptop, popped, other) = (
+            sessions.enter("Laptop", "100.100.101.2"),
+            sessions.enter("Laptop", "100.100.101.2"),
+            sessions.enter("Other", "100.100.101.3"),
+        );
+        assert_eq!(sessions.end_all(illum::host::ENDED_FOR_UPDATE), 3);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for entered in [&laptop, &popped, &other] {
+            let why = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(1), entered.end.ended()).await
+            });
+            assert_eq!(why.as_deref(), Ok(illum::host::ENDED_FOR_UPDATE));
+            assert!(!entered.dismissed(), "it may come back after the update");
+        }
+        // The person at this desk ending one says so, and sends it away.
+        assert_eq!(sessions.end("Other"), 1);
+        let why = runtime.block_on(other.end.ended());
+        assert_eq!(why, illum::host::ENDED_MANUALLY);
+        assert!(other.dismissed());
     }
 
     #[test]

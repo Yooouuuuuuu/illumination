@@ -11,6 +11,16 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.18] - 2026-11-23
+
+### Changed
+
+- **Updating no longer waits for the connections to end.** With a desk connected here or a
+  session window open, the update dialog says what updating ends and offers **Disconnect
+  all and update**. Once the update is downloaded and checked, each desk connected here is
+  told "Disconnected by the host for an update. Reconnect in about a minute.", and the
+  session windows close. A desk can now be updated through its own session.
+
 ## [0.16.17] - 2026-11-23
 
 ### Changed

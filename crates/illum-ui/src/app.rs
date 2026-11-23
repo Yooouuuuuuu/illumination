@@ -1534,7 +1534,6 @@ impl HomeUi {
                 note_box(ui, CORAL, &format!("The update did not finish: {why}."));
             }
             let connections = state.sessions.len() + state.outgoing;
-            let can_update = state.update.installed && connections == 0;
             if !state.update.installed {
                 note_box(
                     ui,
@@ -1546,15 +1545,19 @@ impl HomeUi {
                     ),
                 );
             } else if connections > 0 {
-                note_box(ui, CORAL, &busy_sentence(state));
+                note_box(ui, CREAM, &busy_sentence(state));
             } else {
                 ui.label(muted("Illumination closes and opens again.").size(13.0));
             }
             ui.horizontal(|ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if state.update.installed {
-                        let go = primary("Update now").min_size(vec2(0.0, 44.0));
-                        if ui.add_enabled(can_update, go).clicked() {
+                        let go = if connections > 0 {
+                            "Disconnect all and update"
+                        } else {
+                            "Update now"
+                        };
+                        if ui.add(primary(go).min_size(vec2(0.0, 44.0))).clicked() {
                             out.push(Command::UpdateNow);
                         }
                     } else if ui
@@ -2216,7 +2219,7 @@ fn note_box(ui: &mut Ui, fill: Color32, text: &str) {
         });
 }
 
-/// Why an update has to wait: what is connected, in words.
+/// What updating ends: what is connected, in words.
 fn busy_sentence(state: &AppState) -> String {
     let mut parts = Vec::new();
     match connected_names(state).len() {
@@ -2229,10 +2232,7 @@ fn busy_sentence(state: &AppState) -> String {
         1 => parts.push("1 session window is open".to_string()),
         n => parts.push(format!("{n} session windows are open")),
     }
-    format!(
-        "Updating ends all connections. {}. Disconnect them first.",
-        parts.join(" and ")
-    )
+    format!("Updating ends all connections: {}.", parts.join(" and "))
 }
 
 /// The update line of About: what the last check found, and the button for what comes

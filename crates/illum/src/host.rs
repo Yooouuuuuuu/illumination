@@ -1053,15 +1053,42 @@ fn plural(n: u64, unit: &str) -> String {
     }
 }
 
+/// A session ended from this desk, and the words the controller is told why.
+#[derive(Default)]
+pub struct Ending {
+    now: tokio::sync::Notify,
+    why: std::sync::Mutex<String>,
+}
+
+/// The person at this desk ended it.
+pub const ENDED_MANUALLY: &str = "Disconnected manually at the host.";
+/// The host is about to install an update.
+pub const ENDED_FOR_UPDATE: &str =
+    "Disconnected by the host for an update. Reconnect in about a minute.";
+
+impl Ending {
+    /// Ends the session, saying `why`. Kept until the session looks, should it be busy now.
+    pub fn end(&self, why: &str) {
+        *self.why.lock().expect("ending") = why.to_string();
+        self.now.notify_one();
+    }
+
+    /// Waits until the session is ended from this desk; returns why.
+    pub async fn ended(&self) -> String {
+        self.now.notified().await;
+        self.why.lock().expect("ending").clone()
+    }
+}
+
 /// Serves one accepted session until the controller says bye, disconnects or goes idle. `end`
-/// is the person at this desk ending it: the controller is told goodbye, so it does not take
-/// it for a dropped link and come back.
+/// is this desk ending it (its person, or an update): the controller is told goodbye and why,
+/// so it does not take it for a dropped link and come back.
 pub async fn serve_session(
     mut conn: Connection,
     config: HostConfig,
     idle: Duration,
     media: Arc<MediaHub>,
-    end: Arc<tokio::sync::Notify>,
+    end: Arc<Ending>,
     touched: Arc<AtomicU64>,
 ) -> Result<(), NetError> {
     let mut capture: Option<Capture> = None;
@@ -1131,8 +1158,8 @@ pub async fn serve_session(
                 }
                 continue;
             }
-            () = end.notified() => {
-                goodbye(&conn, "Disconnected manually at the host.".to_string());
+            why = end.ended() => {
+                goodbye(&conn, why);
                 break Ok(());
             }
         };

@@ -174,10 +174,10 @@ pub async fn run_host(home: &Path, home_flag: Option<PathBuf>, port: u16, bind_t
     *guests_of.lock().expect("sessions") = Some(sessions.clone());
     // Updating, when the app asks: what an earlier update downloaded is not needed now.
     crate::update::clean(home);
-    let (counted, shown) = (sessions.clone(), told.clone());
+    let (ending, shown) = (sessions.clone(), told.clone());
     let installer = crate::update::Installer::new(
         home,
-        move || counted.guests().len(),
+        move || ending.end_all(illum::host::ENDED_FOR_UPDATE),
         move |update| shown.change(|s| s.update = update),
     );
     // What the app may not do itself, it asks for here (`control`).

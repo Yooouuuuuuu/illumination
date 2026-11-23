@@ -273,8 +273,8 @@ pub struct Installer {
     home: PathBuf,
     busy: AtomicBool,
     cancel: AtomicBool,
-    /// How many desks are connected here now; an update ends them, so it waits for none.
-    connected: Box<dyn Fn() -> usize + Send + Sync>,
+    /// Ends every session here, saying it is for an update; returns how many there were.
+    end_all: Box<dyn Fn() -> usize + Send + Sync>,
     /// Says how it goes, for the app.
     show: Box<dyn Fn(UpdateStatus) + Send + Sync>,
 }
@@ -282,23 +282,20 @@ pub struct Installer {
 impl Installer {
     pub fn new(
         home: &Path,
-        connected: impl Fn() -> usize + Send + Sync + 'static,
+        end_all: impl Fn() -> usize + Send + Sync + 'static,
         show: impl Fn(UpdateStatus) + Send + Sync + 'static,
     ) -> std::sync::Arc<Installer> {
         std::sync::Arc::new(Installer {
             home: home.to_path_buf(),
             busy: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
-            connected: Box::new(connected),
+            end_all: Box::new(end_all),
             show: Box::new(show),
         })
     }
 
     /// Starts updating to the latest release, in the background.
     pub fn start(self: &std::sync::Arc<Self>) -> Result<(), String> {
-        if (self.connected)() > 0 {
-            return Err(BUSY.to_string());
-        }
         if self.busy.swap(true, Ordering::SeqCst) {
             return Ok(()); // already on its way
         }
@@ -370,8 +367,12 @@ impl Installer {
         if self.cancel.load(Ordering::SeqCst) {
             return Err(CANCELLED.to_string());
         }
-        if (self.connected)() > 0 {
-            return Err(BUSY.to_string());
+        // Only now, so that the connections last through the download, and through one that
+        // fails. A moment for the goodbyes to leave before the installer stops the host.
+        let ended = (self.end_all)();
+        if ended > 0 {
+            tracing::info!(target: "service", "Ended {ended} sessions for the update.");
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
         // For the service the installer starts: open the app again.
         std::fs::write(folder.join(REOPEN), release.version.as_bytes())
@@ -387,9 +388,6 @@ impl Installer {
         })
     }
 }
-
-/// Why an update waits.
-pub const BUSY: &str = "a desk is connected here; update when it has disconnected";
 
 /// Runs the installer without its pages. It outlives this host: stopping the service ends
 /// the host, and the installer goes on to replace the program.

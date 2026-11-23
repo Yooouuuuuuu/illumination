@@ -188,9 +188,11 @@ version, the release's notes, and where the installer and its signature are.
   request carries the program's name and version and nothing about the desk. Only a higher
   version is offered, and only when its installer's address is that version's file in this
   repository's releases. A desk run with `--home` does not check.
-- **The host installs.** "Update now" asks the host over the pipe. The host refuses while a
-  desk is connected (the app refuses while a session window is open), fetches the manifest
-  itself, and downloads the installer into the home folder, which only the system writes.
+- **The host installs.** "Update now" asks the host over the pipe. The host fetches the
+  manifest itself and downloads the installer into the home folder, which only the system
+  writes. Then it ends the sessions here, saying why ("Disconnected by the host for an
+  update. …"), and the app closes its session windows (0.16.18; until then the update
+  waited for no desk to be connected and no session window to be open).
 - **Only a signed installer runs.** The signature is minisign's (Ed25519). The public key is
   compiled into `illum`; the private key signs releases (`illum-sign`) and stays on the
   machine that builds them. The signature's trusted comment names the installer's file, so

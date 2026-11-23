@@ -817,6 +817,8 @@ impl Backend {
         let closing = progress == Progress::Installing;
         if closing {
             tracing::info!(target: "app", "The update's installer runs: closing.");
+            // They run this program too, which the installer replaces.
+            self.close_session_windows();
         }
         let shown = self
             .state
@@ -893,9 +895,7 @@ impl Backend {
     /// app is opened again.
     fn quit(self: &Arc<Self>) {
         tracing::info!(target: "app", "Closing: ending every connection.");
-        for (_, child) in self.opened.lock().expect("opened sessions").drain(..) {
-            let _ = child.lock().expect("session window").kill();
-        }
+        self.close_session_windows();
         let names = self.state.lock().expect("app state").sessions.clone();
         match &self.hosting.control {
             Some(pipe) => {
@@ -914,6 +914,13 @@ impl Backend {
                 // A moment for the goodbyes to leave before the process does.
                 std::thread::sleep(Duration::from_millis(300));
             }
+        }
+    }
+
+    /// Closes every session window this app opened.
+    fn close_session_windows(&self) {
+        for (_, child) in self.opened.lock().expect("opened sessions").drain(..) {
+            let _ = child.lock().expect("session window").kill();
         }
     }
 
