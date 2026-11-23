@@ -11,6 +11,13 @@ the docs: the design documents and the decision ledger in
 
 ## [Unreleased]
 
+## [0.16.11] - 2026-11-23
+
+### Changed
+
+- **"Update now"** in Settings, About, once an update is found (it said "Update…"). It
+  opens the update as before.
+
 ## [0.16.10] - 2026-11-23
 
 ### Changed

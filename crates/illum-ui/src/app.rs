@@ -2234,7 +2234,7 @@ fn update_line(ui: &mut Ui, state: &AppState) -> Option<bool> {
                 RichText::new(format!("{} is available.", release.version)).font(semibold(14.0)),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(button("Update…", YELLOW, 36.0)).clicked() {
+                if ui.add(button("Update now", YELLOW, 36.0)).clicked() {
                     asked = Some(true);
                 }
             });
